@@ -1,0 +1,117 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - configmap
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigs/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigs/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanets/status
+  verbs:
+  - get
+  - patch
+  - update

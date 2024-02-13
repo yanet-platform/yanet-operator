@@ -1,0 +1,12 @@
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  labels:
+    app.kubernetes.io/name: yanetconfig
+    app.kubernetes.io/instance: yanetconfig-sample
+    app.kubernetes.io/part-of: yanet-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: yanet-operator
+  name: yanetconfig-sample
+spec:
+  # TODO(user): Add fields here

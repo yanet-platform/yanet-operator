@@ -1,0 +1,27 @@
+# permissions for end users to view yanetconfigs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: yanetconfig-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: yanet-operator
+    app.kubernetes.io/part-of: yanet-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: yanetconfig-viewer-role
+rules:
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigs/status
+  verbs:
+  - get

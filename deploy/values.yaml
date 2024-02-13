@@ -1,0 +1,38 @@
+replicaCount: 2
+
+image:
+  repository: yanetplatform/yanet-operator
+  pullPolicy: IfNotPresent
+  tag: "0.13"
+
+imagePullSecrets: []
+namespace: "yanet"
+nameOverride: ""
+fullnameOverride: "yanet-operator"
+
+serviceAccount:
+  name: "controller-manager"
+
+podAnnotations: {}
+
+hostNetwork: false
+
+podSecurityContext: {}
+
+securityContext: {}
+
+resources:
+  limits:
+    cpu: 4
+    memory: 4Gi
+  requests:
+     cpu: 2
+     memory: 2Gi
+
+nodeSelector: {}
+
+tolerations:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+
+affinity: {}

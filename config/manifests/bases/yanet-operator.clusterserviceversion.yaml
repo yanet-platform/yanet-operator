@@ -1,0 +1,45 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  annotations:
+    alm-examples: '[]'
+    capabilities: Basic Install
+  name: yanet-operator.v0.0.0
+  namespace: placeholder
+spec:
+  apiservicedefinitions: {}
+  customresourcedefinitions:
+    owned:
+    - description: Yanet is the Schema for the yanets API
+      displayName: Yanet
+      kind: Yanet
+      name: yanets.yanet.yanet-platform.io
+      version: v1alpha1
+  description: yanet operator
+  displayName: yanet-operator
+  icon:
+  - base64data: ""
+    mediatype: ""
+  install:
+    spec:
+      deployments: null
+    strategy: ""
+  installModes:
+  - supported: false
+    type: OwnNamespace
+  - supported: false
+    type: SingleNamespace
+  - supported: false
+    type: MultiNamespace
+  - supported: true
+    type: AllNamespaces
+  keywords:
+  - yanet
+  links:
+  - name: Yanet Operator
+    url: https://yanet-operator.domain
+  maturity: alpha
+  provider:
+    name: yanet platform
+    url: yanet-platform.io
+  version: 0.0.0
