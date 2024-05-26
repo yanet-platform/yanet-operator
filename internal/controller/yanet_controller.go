@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
@@ -36,9 +38,12 @@ import (
 // YanetReconciler reconciles a Yanet object
 type YanetReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	GlobalConfig *yanetv1alpha1.MutexYanetConfigSpec
-	Log          logr.Logger
+	Scheme         *runtime.Scheme
+	GlobalConfig   *yanetv1alpha1.MutexYanetConfigSpec
+	Log            logr.Logger
+	lock           sync.Mutex
+	lastUpdateTS   time.Time
+	lastUpdateHost string
 }
 
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanets,verbs=get;list;watch;create;update;patch;delete
@@ -76,23 +81,14 @@ func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	yanet := &yanetv1alpha1.Yanet{}
 	err := r.Client.Get(ctx, req.NamespacedName, yanet)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
-			// Owned objects are automatically garbage collected. For additional cleanup logic use finalizers.
-			// Return and don't requeue
-			r.Log.Info(fmt.Sprintf(
-				`Reconcile: Yanet resource not found in cluster for NamespacedName: %s.
-				Ignoring since object must be deleted`,
-				req.NamespacedName,
-			))
-		} else {
+		if !errors.IsNotFound(err) {
 			// Error reading the object - requeue the request.
-			r.Log.Error(err, "Failed to get Yanet object")
+			r.Log.Error(err, "Error while getting Yanet object")
 			return ctrl.Result{}, err
 		}
 	} else {
 		r.Log.Info(fmt.Sprintf("Reconcile: successfully found Yanet object for NamespacedName: %s", req.NamespacedName))
-		return r.reconcilerYanet(ctx, yanet)
+		return r.reconcilerYanet(ctx, yanet, updateWindow)
 	}
 
 	// Create Yanet CRD for new worker node by auto.

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -33,8 +34,33 @@ import (
 	manifests "github.com/yanet-platform/yanet-operator/internal/manifests"
 )
 
+func (r *YanetReconciler) checkUpdateRequeue(updateWindow time.Duration, updateHost string) time.Duration {
+	var retryTimer time.Duration
+	if updateWindow == 0 {
+		return retryTimer
+	}
+	r.lock.Lock()
+	defer r.lock.Unlock()
+	timeNow := time.Now()
+	timerExpired := r.lastUpdateTS.Add(updateWindow).Before(timeNow)
+	if !timerExpired && updateHost != r.lastUpdateHost {
+		retryTimer = updateWindow - timeNow.Sub(r.lastUpdateTS)
+		r.Log.Info(fmt.Sprintf(
+			`Reconcile: Yanet update try too early. Last update occured at: %s on host %s. Retry in %s \n`,
+			r.lastUpdateTS,
+			r.lastUpdateHost,
+			retryTimer,
+		))
+	} else {
+		r.lastUpdateTS = timeNow
+		r.lastUpdateHost = updateHost
+	}
+
+	return retryTimer
+}
+
 // Reconcile logic for Yanet object
-func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet) (ctrl.Result, error) {
+func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet, config *yanetv1alpha1.MutexYanetConfigSpec) (ctrl.Result, error) {
 	// Check if the deployments already exists, if not create a new one
 	deps := []*appsv1.Deployment{
 		manifests.DeploymentForDataplane(yanet),
@@ -80,8 +106,13 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		// Check deployment for the needed to update
 		r.Log.Info(fmt.Sprintf("existing deployment: %s", found.String()))
 		if helpers.DeploymentDiff(ctx, dep, found) {
+			updateWindow := time.Duration(config.Config.UpdateWindow) * time.Second
+			requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
+			if requeueTimer > 0 {
+				return ctrl.Result{RequeueAfter: requeueTimer}, nil
+			}
 			r.Log.Info(fmt.Sprintf("Found diff for Deployment: %s", dep.Name))
-			if yanet.Spec.AutoSync == false {
+			if !yanet.Spec.AutoSync {
 				r.Log.Info(fmt.Sprintf(
 					"Deployment %s requires update, but AutoSync for this host is disabled, do nothing.",
 					dep.Name,

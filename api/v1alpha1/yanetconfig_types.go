@@ -32,12 +32,18 @@ type YanetConfigSpec struct {
 
 	// (Optional) Stop means global stop. Do nothing in main reconcile loop.
 	// When turned off, the operator may skip some events.
-	// When turned on, we recommend restarting.
+	// When turned on, restart recommended.
 	// Default: false
 	// +kubebuilder:default=false
 	Stop bool `json:"stop,omitempty"`
 	// (Optional) AutoDiscovery configure new worker node initializer.
 	AutoDiscovery AutoDiscovery `json:"autodiscovery,omitempty"`
+	// (Optional) Period in seconds between yanet resources reconcilation on different nodes.
+	// When the value is non-zero, the operator expects number of seconds between end of resource reconcilation on one node
+	// and resource reconcilation start on another node.
+	// Default: 0
+	// +kubebuilder:default=0
+	UpdateWindow int `json:"updatewindow,omitempty"`
 }
 
 // YanetConfigSpec with mutex for controllers.
