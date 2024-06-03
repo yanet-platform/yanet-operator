@@ -88,7 +88,7 @@ func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		}
 	} else {
 		r.Log.Info(fmt.Sprintf("Reconcile: successfully found Yanet object for NamespacedName: %s", req.NamespacedName))
-		return r.reconcilerYanet(ctx, yanet, updateWindow)
+		return r.reconcilerYanet(ctx, yanet, config)
 	}
 
 	// Create Yanet CRD for new worker node by auto.

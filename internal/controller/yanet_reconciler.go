@@ -60,7 +60,7 @@ func (r *YanetReconciler) checkUpdateRequeue(updateWindow time.Duration, updateH
 }
 
 // Reconcile logic for Yanet object
-func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet, config *yanetv1alpha1.MutexYanetConfigSpec) (ctrl.Result, error) {
+func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) (ctrl.Result, error) {
 	// Check if the deployments already exists, if not create a new one
 	deps := []*appsv1.Deployment{
 		manifests.DeploymentForDataplane(yanet),
@@ -106,7 +106,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		// Check deployment for the needed to update
 		r.Log.Info(fmt.Sprintf("existing deployment: %s", found.String()))
 		if helpers.DeploymentDiff(ctx, dep, found) {
-			updateWindow := time.Duration(config.Config.UpdateWindow) * time.Second
+			updateWindow := time.Duration(config.UpdateWindow) * time.Second
 			requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
 			if requeueTimer > 0 {
 				return ctrl.Result{RequeueAfter: requeueTimer}, nil
