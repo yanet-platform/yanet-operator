@@ -99,8 +99,16 @@ spec:
                 default: false
                 description: '(Optional) Stop means global stop. Do nothing in main
                   reconcile loop. When turned off, the operator may skip some events.
-                  When turned on, we recommend restarting. Default: false'
+                  When turned on, restart recommended. Default: false'
                 type: boolean
+              updatewindow:
+                default: 0
+                description: '(Optional) Period in seconds between yanet resources
+                  reconcilation on different nodes. When the value is non-zero, the
+                  operator expects number of seconds between end of resource reconcilation
+                  on one node and resource reconcilation start on another node. Default:
+                  0'
+                type: integer
             type: object
           status:
             description: YanetConfigStatus defines the observed state of YanetConfig
