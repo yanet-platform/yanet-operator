@@ -29,7 +29,7 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 }
 
 // GetInitContainer generate init container spec from Yanet Container type.
-func GetInitContainer(m *yanetv1alpha1.Container) v1.Container {
+func GetInitContainer(m *v1.Container) v1.Container {
 	c := v1.Container{
 		Image:                    m.Image,
 		Name:                     m.Name,
@@ -38,29 +38,28 @@ func GetInitContainer(m *yanetv1alpha1.Container) v1.Container {
 		TerminationMessagePath:   "/dev/stdout",
 		TerminationMessagePolicy: "File",
 	}
-	if m.Privileged {
-		privileged := true
-		c.SecurityContext = &v1.SecurityContext{
-			Privileged: &privileged,
-			Capabilities: &v1.Capabilities{
-				Add: []v1.Capability{
-					"NET_ADMIN",
-					"NET_RAW",
-					"IPC_LOCK",
-					"SYS_ADMIN",
-					"SYS_RAWIO",
-					"SYS_CHROOT",
-				},
+
+	privileged := true
+	c.SecurityContext = &v1.SecurityContext{
+		Privileged: &privileged,
+		Capabilities: &v1.Capabilities{
+			Add: []v1.Capability{
+				"NET_ADMIN",
+				"NET_RAW",
+				"IPC_LOCK",
+				"SYS_ADMIN",
+				"SYS_RAWIO",
+				"SYS_CHROOT",
 			},
-		}
+		},
 	}
-	for _, v := range m.VolumeMounts {
-		name := strings.Split(v, "/")
-		c.VolumeMounts = append(
-			c.VolumeMounts,
-			v1.VolumeMount{Name: name[len(name)-1], MountPath: v},
-		)
-	}
+	// for _, v := range m.VolumeMounts {
+	// 	name := strings.Split(v, "/")
+	// 	c.VolumeMounts = append(
+	// 		c.VolumeMounts,
+	// 		v1.VolumeMount{Name: name[len(name)-1], MountPath: v},
+	// 	)
+	// }
 	return c
 }
 

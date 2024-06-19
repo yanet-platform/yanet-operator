@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -57,9 +58,9 @@ type YanetSpec struct {
 	// (Optional) base configs for dataplane deployment.
 	Dataplane Dep `json:"dataplane,omitempty"`
 	// (Optional) base configs for bird deployment.
-	Bird DepWithTag `json:"bird,omitempty"`
+	Bird Dep `json:"bird,omitempty"`
 	// (Optional) oneshot host prepare job.
-	PrepareJob DepWithTag `json:"preparejob,omitempty"`
+	PrepareJob Dep `json:"preparejob,omitempty"`
 	// (Optional) Allow reboot on prepare stage.
 	// Default: false
 	// +kubebuilder:default=false
@@ -76,41 +77,11 @@ type Dep struct {
 	// image name.
 	Image string `json:"image,omitempty"`
 	// (Optional) Addition init containers.
-	InitContainers []Container `json:"initcontainers,omitempty"`
-}
-
-// Deployment base configs with custom tag.
-type DepWithTag struct {
-	// (Optional) replicas for this deployment. One with true options and zero with false.
-	// You can make deployment with zero replicas with this option.
-	// Default: true
-	// +kubebuilder:default=true
-	Enable bool `json:"enable,omitempty"`
+	InitContainers []v1.Container `json:"initcontainers,omitempty"`
 	// (Optional) image tag.
 	// Default: latest.
 	// +kubebuilder:default=latest
 	Tag string `json:"tag,omitempty"`
-	// image name
-	Image string `json:"image,omitempty"`
-}
-
-// Base configs for init container.
-type Container struct {
-	// Full image name.
-	Image string `json:"image,omitempty"`
-	// Container name.
-	Name string `json:"name,omitempty"`
-	// Command.
-	Command []string `json:"command,omitempty"`
-	// (Optional) Args.
-	Args []string `json:"args,omitempty"`
-	// (Optional) make container privileged.
-	// Default: false.
-	// +kubebuilder:default=false
-	Privileged bool `json:"privileged,omitempty"`
-	// (Optional) VolumeMounts.
-	// Available volumes: "/dev/hugepages", "/var", "/etc", "/run/yanet", "/run/bird"
-	VolumeMounts []string `json:"volumemounts,omitempty"`
 }
 
 // YanetStatus defines the observed state of Yanet.
