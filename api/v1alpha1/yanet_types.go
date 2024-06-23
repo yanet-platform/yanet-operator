@@ -17,7 +17,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -65,6 +64,10 @@ type YanetSpec struct {
 	// Default: false
 	// +kubebuilder:default=false
 	AllowReboot bool `json:"allowreboot,omitempty"`
+	// (Optional) Additional options for controlPlain Deloyments.
+	ControlPlainOpts AdditionalOpts `json:"cpopts,omitempty"`
+	// (Optional) Additional options for dataPlain Deloyments.
+	DataPlainOpts AdditionalOpts `json:"dpopts,omitempty"`
 }
 
 // Deployment base configs.
@@ -76,8 +79,6 @@ type Dep struct {
 	Enable bool `json:"enable,omitempty"`
 	// image name.
 	Image string `json:"image,omitempty"`
-	// (Optional) Addition init containers.
-	InitContainers []v1.Container `json:"initcontainers,omitempty"`
 	// (Optional) image tag.
 	// Default: latest.
 	// +kubebuilder:default=latest

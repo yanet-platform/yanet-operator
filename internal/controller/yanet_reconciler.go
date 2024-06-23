@@ -63,9 +63,9 @@ func (r *YanetReconciler) checkUpdateRequeue(updateWindow time.Duration, updateH
 func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) (ctrl.Result, error) {
 	// Check if the deployments already exists, if not create a new one
 	deps := []*appsv1.Deployment{
-		manifests.DeploymentForDataplane(yanet),
+		manifests.DeploymentForDataplane(ctx, yanet, config),
 		manifests.DeploymentForAnnouncer(yanet),
-		manifests.DeploymentForControlplane(yanet),
+		manifests.DeploymentForControlplane(ctx, yanet, config),
 		manifests.DeploymentForBird(yanet),
 	}
 	for _, dep := range deps {
@@ -96,8 +96,8 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 					"Deployment.Name",
 					dep.Name,
 				)
-				continue
 			}
+			continue // FIXME: why do not we need to skip diff check if we create new dep???????
 			// Deployment created successfully
 		} else if err != nil {
 			r.Log.Error(err, "Failed to get Deployment")

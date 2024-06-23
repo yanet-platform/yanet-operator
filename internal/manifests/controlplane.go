@@ -1,16 +1,19 @@
 package manifests
 
 import (
+	"context"
 	"fmt"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // DeploymentForControlplane return dataplane Deployment object
-func DeploymentForControlplane(m *yanetv1alpha1.Yanet) *appsv1.Deployment {
+func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+	log := log.FromContext(ctx)
 	replicas := int32(0)
 	if m.Spec.Controlplane.Enable {
 		replicas = 1
@@ -69,8 +72,30 @@ func DeploymentForControlplane(m *yanetv1alpha1.Yanet) *appsv1.Deployment {
 			},
 		},
 	}
-	for _, container := range m.Spec.Controlplane.InitContainers {
-		initContainers = append(initContainers, GetInitContainer(&container))
+	configIcns, err := GetInitContainers(config.ControlPlainOpts.InitContainers)
+	if err != nil {
+		log.Error(err, "incorrect init containers in config spec for ControlPlain")
+	} else {
+		initContainers = append(initContainers, configIcns...)
+	}
+	yanetIcns, err := GetInitContainers(m.Spec.ControlPlainOpts.InitContainers)
+	if err != nil {
+		log.Error(err, "incorrect init containers in yanet spec for ControlPlain")
+	} else {
+		// overriding initContainers with specified in yanet spec
+		for _, j := range yanetIcns {
+			flag := false
+			for k, v := range initContainers {
+				if j.Name == v.Name {
+					initContainers[k] = j
+					flag = true
+					break
+				}
+			}
+			if !flag {
+				initContainers = append(initContainers, j)
+			}
+		}
 	}
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{

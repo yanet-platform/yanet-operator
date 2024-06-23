@@ -1,6 +1,7 @@
 package manifests
 
 import (
+	"fmt"
 	"strings"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
@@ -28,39 +29,32 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 	return Volumes
 }
 
-// GetInitContainer generate init container spec from Yanet Container type.
-func GetInitContainer(m *v1.Container) v1.Container {
-	c := v1.Container{
-		Image:                    m.Image,
-		Name:                     m.Name,
-		Command:                  m.Command,
-		Args:                     m.Args,
-		TerminationMessagePath:   "/dev/stdout",
-		TerminationMessagePolicy: "File",
+func duplicateElements(array []string) []string {
+	mapUniq := make(map[string]bool)
+	dups := []string{}
+	for _, v := range array {
+		if mapUniq[v] {
+			dups = append(dups, v)
+		} else {
+			mapUniq[v] = true
+		}
+
+	}
+	return dups
+}
+
+// GetInitContainers check if initContainers contains no errors (dup names and other possible issues)
+func GetInitContainers(initCs []v1.Container) ([]v1.Container, error) {
+
+	names := []string{}
+	for _, c := range initCs {
+		names = append(names, c.Name)
+	}
+	if dups := duplicateElements(names); len(dups) > 0 {
+		return nil, fmt.Errorf("duplicate names found %s", names)
 	}
 
-	privileged := true
-	c.SecurityContext = &v1.SecurityContext{
-		Privileged: &privileged,
-		Capabilities: &v1.Capabilities{
-			Add: []v1.Capability{
-				"NET_ADMIN",
-				"NET_RAW",
-				"IPC_LOCK",
-				"SYS_ADMIN",
-				"SYS_RAWIO",
-				"SYS_CHROOT",
-			},
-		},
-	}
-	// for _, v := range m.VolumeMounts {
-	// 	name := strings.Split(v, "/")
-	// 	c.VolumeMounts = append(
-	// 		c.VolumeMounts,
-	// 		v1.VolumeMount{Name: name[len(name)-1], MountPath: v},
-	// 	)
-	// }
-	return c
+	return initCs, nil
 }
 
 // LabelsForYanet returns the labels for selecting the resources
