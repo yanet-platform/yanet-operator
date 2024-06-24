@@ -138,6 +138,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	podList := &v1.PodList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(yanet.Namespace),
+		client.MatchingFields{"status.phase": "Running"},
 		client.MatchingLabels(map[string]string{
 			"topology-location-host":       yanet.Spec.NodeName,
 			"app.kubernetes.io/created-by": "yanet-operator",
