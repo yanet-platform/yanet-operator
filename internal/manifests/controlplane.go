@@ -5,39 +5,16 @@ import (
 	"fmt"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
+	"github.com/yanet-platform/yanet-operator/internal/names"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// DeploymentForControlplane return dataplane Deployment object
-func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
-	log := log.FromContext(ctx)
-	replicas := int32(0)
-	if m.Spec.Controlplane.Enable {
-		replicas = 1
-	}
-	privileged := true
-	poststart := []string{}
-	// start with default config, mount slb config and run reload for l3balancer
-	if m.Spec.Type == "l3balancer" {
-		poststart = []string{
-			"/bin/sh",
-			"-c",
-			`sleep 60;
-			/bin/mountpoint -q /etc/yanet/controlplane.conf;
-			/bin/mount -o ro,bind /etc/yanet/controlplane.slb.conf /etc/yanet/controlplane.conf;
-			/usr/bin/yanet-cli reload`,
-		}
-	} else {
-		poststart = []string{
-			"/bin/sh",
-			"-c",
-			`echo "starting..."`,
-		}
-	}
-	n := fmt.Sprintf("controlplane-%s", m.Spec.NodeName)
+func newControlInitContainers(m *yanetv1alpha1.Yanet) []v1.Container {
 	image := fmt.Sprintf("%s:%s", m.Spec.Controlplane.Image, m.Spec.Tag)
 	if m.Spec.Registry != "" {
 		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
@@ -72,34 +49,56 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 			},
 		},
 	}
-	configIcns, err := GetInitContainers(config.ControlPlainOpts.InitContainers)
-	if err != nil {
-		log.Error(err, "incorrect init containers in config spec for ControlPlain")
-	} else {
-		initContainers = append(initContainers, configIcns...)
+	return initContainers
+}
+
+// DeploymentForControlplane return dataplane Deployment object
+func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+	log := log.FromContext(ctx)
+	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
+	if !ok {
+		log.Info("typeOpts is not specified for %s", m.Spec.Type)
 	}
-	yanetIcns, err := GetInitContainers(m.Spec.ControlPlainOpts.InitContainers)
-	if err != nil {
-		log.Error(err, "incorrect init containers in yanet spec for ControlPlain")
-	} else {
-		// overriding initContainers with specified in yanet spec
-		for _, j := range yanetIcns {
-			flag := false
-			for k, v := range initContainers {
-				if j.Name == v.Name {
-					initContainers[k] = j
-					flag = true
-					break
-				}
-			}
-			if !flag {
-				initContainers = append(initContainers, j)
-			}
+	// Filling in all init containers
+	initContainers := newControlInitContainers(m)
+	additionalInitContainers := GetAdditionalInitContainers(
+		config.AdditionalOpts.Controlplane.InitContainers, // all available initContainers in yanetConfig spec
+		perTypeOpts.Controlplane.InitContainers,           // initContainers enabled for specific type in global config
+		m.Spec.DepOpts.Controlplane.InitContainers,        // initContainers enabled in node spec
+	)
+	initContainers = append(initContainers, additionalInitContainers...)
+
+	// start with default config, mount slb config and run reload for l3balancer
+	poststart := []string{}
+	if m.Spec.Type == names.Balancer {
+		poststart = []string{
+			"/bin/sh",
+			"-c",
+			`sleep 60;
+			/bin/mountpoint -q /etc/yanet/controlplane.conf;
+			/bin/mount -o ro,bind /etc/yanet/controlplane.slb.conf /etc/yanet/controlplane.conf;
+			/usr/bin/yanet-cli reload`,
 		}
+	} else {
+		poststart = []string{
+			"/bin/sh",
+			"-c",
+			`echo "starting..."`,
+		}
+	}
+	depName := fmt.Sprintf("controlplane-%s", m.Spec.NodeName)
+	image := fmt.Sprintf("%s:%s", m.Spec.Controlplane.Image, m.Spec.Tag)
+	if m.Spec.Registry != "" {
+		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
+	}
+	// Creating deployment based on previously created structures
+	replicas := int32(0)
+	if m.Spec.Controlplane.Enable {
+		replicas = 1
 	}
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      n,
+			Name:      depName,
 			Namespace: m.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -110,7 +109,7 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        n,
+					Name:        depName,
 					Annotations: AnnotationsForYanet(nil),
 					Labels:      LabelsForYanet(nil, m, "controlplane"),
 				},

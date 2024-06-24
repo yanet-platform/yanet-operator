@@ -5,25 +5,14 @@ import (
 	"fmt"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// DeploymentForDataplane return dataplane Deployment object
-func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
-	replicas := int32(0)
-	log := log.FromContext(ctx)
-	if m.Spec.Dataplane.Enable {
-		replicas = 1
-	}
-	privileged := true
-	n := fmt.Sprintf("dataplane-%s", m.Spec.NodeName)
-	image := fmt.Sprintf("%s:%s", m.Spec.Dataplane.Image, m.Spec.Tag)
-	if m.Spec.Registry != "" {
-		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
-	}
+func newDataInitContainers() []v1.Container {
 	initContainers := []v1.Container{
 		{
 			Image:           "busybox",
@@ -56,34 +45,39 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 			},
 		},
 	}
-	configIcns, err := GetInitContainers(config.DataPlainOpts.InitContainers)
-	if err != nil {
-		log.Error(err, "incorrect init containers in config spec for DataPlain")
-	} else {
-		initContainers = append(initContainers, configIcns...)
+	return initContainers
+}
+
+// DeploymentForDataplane return dataplane Deployment object
+func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+	log := log.FromContext(ctx)
+	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
+	if !ok {
+		log.Info("typeOpts is not specified for %s", m.Spec.Type)
 	}
-	yanetIcns, err := GetInitContainers(m.Spec.DataPlainOpts.InitContainers)
-	if err != nil {
-		log.Error(err, "incorrect init containers in yanet spec for DataPlain")
-	} else {
-		// overriding initContainers with specified in yanet spec
-		for _, j := range yanetIcns {
-			flag := false
-			for k, v := range initContainers {
-				if j.Name == v.Name {
-					initContainers[k] = j
-					flag = true
-					break
-				}
-			}
-			if !flag {
-				initContainers = append(initContainers, j)
-			}
-		}
+
+	// Filling in all init containers
+	initContainers := newDataInitContainers()
+	additionalInitContainers := GetAdditionalInitContainers(
+		config.AdditionalOpts.Dataplain.InitContainers, // all available initContainers in yanetConfig spec
+		perTypeOpts.Dataplain.InitContainers,           // initContainers enabled for specific type in global config
+		m.Spec.DepOpts.Dataplain.InitContainers,        // initContainers enabled in node spec
+	)
+	initContainers = append(initContainers, additionalInitContainers...)
+
+	// Creating deployment based on previously created structures
+	depName := fmt.Sprintf("dataplane-%s", m.Spec.NodeName)
+	replicas := int32(0)
+	image := fmt.Sprintf("%s:%s", m.Spec.Dataplane.Image, m.Spec.Tag)
+	if m.Spec.Registry != "" {
+		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
+	}
+	if m.Spec.Controlplane.Enable {
+		replicas = 1
 	}
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      n,
+			Name:      depName,
 			Namespace: m.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -94,7 +88,7 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:        n,
+					Name:        depName,
 					Annotations: AnnotationsForYanet(nil),
 					Labels:      LabelsForYanet(nil, m, "dataplane"),
 				},

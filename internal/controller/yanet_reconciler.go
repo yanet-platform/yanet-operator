@@ -64,9 +64,9 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	// Check if the deployments already exists, if not create a new one
 	deps := []*appsv1.Deployment{
 		manifests.DeploymentForDataplane(ctx, yanet, config),
-		manifests.DeploymentForAnnouncer(yanet),
+		manifests.DeploymentForAnnouncer(ctx, yanet, config),
 		manifests.DeploymentForControlplane(ctx, yanet, config),
-		manifests.DeploymentForBird(yanet),
+		manifests.DeploymentForBird(ctx, yanet, config),
 	}
 	for _, dep := range deps {
 		// Set Yanet instance as the owner and controller
@@ -96,8 +96,8 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 					"Deployment.Name",
 					dep.Name,
 				)
+				continue // FIXME: why do not we need to skip diff check if we create new dep???????
 			}
-			continue // FIXME: why do not we need to skip diff check if we create new dep???????
 			// Deployment created successfully
 		} else if err != nil {
 			r.Log.Error(err, "Failed to get Deployment")

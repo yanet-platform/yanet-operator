@@ -38,7 +38,7 @@ type YanetSpec struct {
 	// Only one Yanet on node!
 	// Do not use regex!
 	NodeName string `json:"nodename,omitempty"`
-	// (Optional) Type of dataplane(release, l3balancer or firewall).
+	// (Optional) Type of dataplane(release, l3balancer  or firewall).
 	// Default: release
 	// +kubebuilder:default=release
 	Type string `json:"type,omitempty"`
@@ -64,10 +64,8 @@ type YanetSpec struct {
 	// Default: false
 	// +kubebuilder:default=false
 	AllowReboot bool `json:"allowreboot,omitempty"`
-	// (Optional) Additional options for controlPlain Deloyments.
-	ControlPlainOpts AdditionalOpts `json:"cpopts,omitempty"`
-	// (Optional) Additional options for dataPlain Deloyments.
-	DataPlainOpts AdditionalOpts `json:"dpopts,omitempty"`
+	// (Optional) Additional options to be applied to yanet.
+	DepOpts DepOpts `json:"depopts,omitempty"`
 }
 
 // Deployment base configs.

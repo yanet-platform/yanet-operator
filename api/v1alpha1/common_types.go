@@ -18,7 +18,32 @@ package v1alpha1
 
 import v1 "k8s.io/api/core/v1"
 
-// AdditionalOpts contains a list of additional options (initContainers, Labels, etc) that should be applied to Deployments
+// AdditionalOpts contains a struct of additional options (initContainers, Labels, etc) that MAY be applied to Deployments
 type AdditionalOpts struct {
+	Controlplane OptsSpec `json:"controlplane,omitempty"`
+	Dataplain    OptsSpec `json:"dataplane,omitempty"`
+	Bird         OptsSpec `json:"bird,omitempty"`
+	Announcer    OptsSpec `json:"announcer,omitempty"`
+}
+
+// AdditionalOpts contains a struct of additional options (initContainers, Labels, etc) that SHOULD be applied to Deployments
+type EnabledOpts struct {
+	FireWall DepOpts `json:"firewall,omitempty"`
+	Release  DepOpts `json:"release,omitempty"`
+	Balancer DepOpts `json:"balancer,omitempty"`
+}
+type OptsSpec struct {
 	InitContainers []v1.Container `json:"initcontainers,omitempty"`
+}
+
+type OptsNames struct {
+	InitContainers []string `json:"initcontainers,omitempty"`
+}
+
+// AdditionalOpts contains a struct of additional options (initContainers, Labels, etc) that SHOULD be applied to Deployments
+type DepOpts struct {
+	Controlplane OptsNames `json:"controlplane,omitempty"`
+	Dataplain    OptsNames `json:"dataplane,omitempty"`
+	Bird         OptsNames `json:"bird,omitempty"`
+	Announcer    OptsNames `json:"announcer,omitempty"`
 }

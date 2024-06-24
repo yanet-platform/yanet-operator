@@ -1,13 +1,18 @@
 package manifests
 
 import (
-	"fmt"
 	"strings"
 
+	"golang.org/x/exp/slices"
+
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"golang.org/x/exp/maps"
 	v1 "k8s.io/api/core/v1"
+	kuberv1 "k8s.io/kubernetes/pkg/apis/core/v1"
 )
+
+var privileged = true
 
 // GetVolumes generate Volumes for deployment
 // TODO: add more type
@@ -29,32 +34,24 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 	return Volumes
 }
 
-func duplicateElements(array []string) []string {
-	mapUniq := make(map[string]bool)
-	dups := []string{}
-	for _, v := range array {
-		if mapUniq[v] {
-			dups = append(dups, v)
-		} else {
-			mapUniq[v] = true
-		}
-
-	}
-	return dups
+func normalizeContainer(c v1.Container) v1.Container {
+	// TODO: k8s.io/kubernetes/pkg/apis/core/v1@v1.26.1 is used for compatibility reasons
+	// Upgrade with go itself after https://github.com/kubernetes-sigs/controller-tools/issues/880 is resolved
+	kuberv1.SetDefaults_Container(&c)
+	return c
 }
 
-// GetInitContainers check if initContainers contains no errors (dup names and other possible issues)
-func GetInitContainers(initCs []v1.Container) ([]v1.Container, error) {
-
-	names := []string{}
-	for _, c := range initCs {
-		names = append(names, c.Name)
+// GetAdditionalInitContainers filters out initCointainers required for specific setup based on global configuration and yanet spec
+func GetAdditionalInitContainers(initCs []v1.Container, globalNames []string, specialNames []string) []v1.Container {
+	enabledContainersNames := append(globalNames, specialNames...)
+	var resCs []v1.Container
+	uniqCs := helpers.UniqueSliceElements(enabledContainersNames)
+	for _, ic := range initCs {
+		if slices.Contains(uniqCs, ic.Name) {
+			resCs = append(resCs, normalizeContainer(ic))
+		}
 	}
-	if dups := duplicateElements(names); len(dups) > 0 {
-		return nil, fmt.Errorf("duplicate names found %s", names)
-	}
-
-	return initCs, nil
+	return resCs
 }
 
 // LabelsForYanet returns the labels for selecting the resources
