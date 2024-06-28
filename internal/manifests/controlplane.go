@@ -64,7 +64,7 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 	additionalInitContainers := GetAdditionalInitContainers(
 		config.AdditionalOpts.Controlplane.InitContainers, // all available initContainers in yanetConfig spec
 		perTypeOpts.Controlplane.InitContainers,           // initContainers enabled for specific type in global config
-		m.Spec.DepOpts.Controlplane.InitContainers,        // initContainers enabled in node spec
+		m.Spec.Controlplane.Opts.InitContainers,           // initContainers enabled in node spec
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
 

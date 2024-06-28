@@ -49,7 +49,7 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 	additionalInitContainers := GetAdditionalInitContainers(
 		config.AdditionalOpts.Announcer.InitContainers, // all available initContainers in yanetConfig spec
 		perTypeOpts.Announcer.InitContainers,           // initContainers enabled for specific type in global config
-		m.Spec.DepOpts.Announcer.InitContainers,        // initContainers enabled in node spec
+		m.Spec.Announcer.Opts.InitContainers,           // initContainers enabled in node spec
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
 

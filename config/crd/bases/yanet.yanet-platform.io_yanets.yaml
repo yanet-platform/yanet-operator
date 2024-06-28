@@ -50,6 +50,14 @@ spec:
                   image:
                     description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -77,6 +85,14 @@ spec:
                   image:
                     description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -94,6 +110,14 @@ spec:
                   image:
                     description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -111,42 +135,18 @@ spec:
                   image:
                     description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
                     type: string
-                type: object
-              depopts:
-                description: (Optional) Additional options to be applied to yanet.
-                properties:
-                  announcer:
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
-                  bird:
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
-                  controlplane:
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
-                  dataplane:
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
                 type: object
               nodename:
                 description: Worker node name for deploy. Only one Yanet on node!
@@ -164,6 +164,14 @@ spec:
                   image:
                     description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'

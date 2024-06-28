@@ -62,7 +62,7 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 	additionalInitContainers := GetAdditionalInitContainers(
 		config.AdditionalOpts.Bird.InitContainers, // all available initContainers in yanetConfig spec
 		perTypeOpts.Bird.InitContainers,           // initContainers enabled for specific type in gloabal config
-		m.Spec.DepOpts.Bird.InitContainers,        // initContainers enabled in node spec
+		m.Spec.Bird.Opts.InitContainers,           // initContainers enabled in node spec
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
 

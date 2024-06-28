@@ -64,8 +64,6 @@ type YanetSpec struct {
 	// Default: false
 	// +kubebuilder:default=false
 	AllowReboot bool `json:"allowreboot,omitempty"`
-	// (Optional) Additional options to be applied to yanet.
-	DepOpts DepOpts `json:"depopts,omitempty"`
 }
 
 // Deployment base configs.
@@ -81,6 +79,8 @@ type Dep struct {
 	// Default: latest.
 	// +kubebuilder:default=latest
 	Tag string `json:"tag,omitempty"`
+	// (Optional) additional opts for deployment.
+	Opts OptsNames `json:"opts,omitempty"`
 }
 
 // YanetStatus defines the observed state of Yanet.
