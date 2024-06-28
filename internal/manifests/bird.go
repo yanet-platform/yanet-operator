@@ -68,7 +68,7 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 
 	// Creating deployment based on previously created structures
 	replicas := int32(0)
-	if m.Spec.Controlplane.Enable {
+	if m.Spec.Bird.Enable {
 		replicas = 1
 	}
 	depName := fmt.Sprintf("bird-%s", m.Spec.NodeName)

@@ -55,7 +55,7 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 
 	// Creating deployment based on previously created structures
 	replicas := int32(0)
-	if m.Spec.Controlplane.Enable {
+	if m.Spec.Announcer.Enable {
 		replicas = 1
 	}
 	depName := fmt.Sprintf("announcer-%s", m.Spec.NodeName)
