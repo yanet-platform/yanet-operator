@@ -6,6 +6,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/names"
+
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +31,31 @@ func GetLabeledNodes(nodeList *v1.NodeList) []v1.Node {
 		}
 	}
 	return labeledNodes
+}
+
+func GetTypeOpts(opts yanetv1alpha1.EnabledOpts, t string) (bool, yanetv1alpha1.DepOpts) {
+	switch t {
+	case names.Release:
+		return true, opts.Release
+	case names.FireWall:
+		return true, opts.FireWall
+	case names.Balancer:
+		return true, opts.Balancer
+	default:
+		return false, yanetv1alpha1.DepOpts{}
+	}
+}
+
+func UniqueSliceElements[T comparable](inputSlice []T) []T {
+	uniqueSlice := make([]T, 0, len(inputSlice))
+	seen := make(map[T]bool, len(inputSlice))
+	for _, element := range inputSlice {
+		if !seen[element] {
+			uniqueSlice = append(uniqueSlice, element)
+			seen[element] = true
+		}
+	}
+	return uniqueSlice
 }
 
 func GetNodeNames(nodeList *v1.NodeList) []string {

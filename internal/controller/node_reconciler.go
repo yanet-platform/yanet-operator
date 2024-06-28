@@ -95,7 +95,7 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 	announcer := &yanetv1alpha1.Dep{
 		Image: config.AutoDiscovery.Images.Announcer,
 	}
-	bird := &yanetv1alpha1.DepWithTag{
+	bird := &yanetv1alpha1.Dep{
 		Image: config.AutoDiscovery.Images.Bird,
 	}
 

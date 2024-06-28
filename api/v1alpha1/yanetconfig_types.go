@@ -44,6 +44,10 @@ type YanetConfigSpec struct {
 	// Default: 0
 	// +kubebuilder:default=0
 	UpdateWindow int `json:"updatewindow,omitempty"`
+	// (Optional) Additional options to be applied to yanet.
+	EnabledOpts EnabledOpts `json:"enabledopts,omitempty"`
+	// (Optional) Additional options.
+	AdditionalOpts AdditionalOpts `json:"additionalopts,omitempty"`
 }
 
 // YanetConfigSpec with mutex for controllers.

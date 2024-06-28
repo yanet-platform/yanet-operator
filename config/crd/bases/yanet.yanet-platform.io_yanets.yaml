@@ -50,40 +50,18 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  initcontainers:
-                    description: (Optional) Addition init containers.
-                    items:
-                      description: Base configs for init container.
-                      properties:
-                        args:
-                          description: (Optional) Args.
-                          items:
-                            type: string
-                          type: array
-                        command:
-                          description: Command.
-                          items:
-                            type: string
-                          type: array
-                        image:
-                          description: Full image name.
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
                           type: string
-                        name:
-                          description: Container name.
-                          type: string
-                        privileged:
-                          default: false
-                          description: '(Optional) make container privileged. Default:
-                            false.'
-                          type: boolean
-                        volumemounts:
-                          description: '(Optional) VolumeMounts. Available volumes:
-                            "/dev/hugepages", "/var", "/etc", "/run/yanet", "/run/bird"'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    type: array
+                        type: array
+                    type: object
+                  tag:
+                    default: latest
+                    description: '(Optional) image tag. Default: latest.'
+                    type: string
                 type: object
               arch:
                 default: corei7
@@ -105,8 +83,16 @@ spec:
                       zero replicas with this option. Default: true'
                     type: boolean
                   image:
-                    description: image name
+                    description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -124,40 +110,18 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  initcontainers:
-                    description: (Optional) Addition init containers.
-                    items:
-                      description: Base configs for init container.
-                      properties:
-                        args:
-                          description: (Optional) Args.
-                          items:
-                            type: string
-                          type: array
-                        command:
-                          description: Command.
-                          items:
-                            type: string
-                          type: array
-                        image:
-                          description: Full image name.
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
                           type: string
-                        name:
-                          description: Container name.
-                          type: string
-                        privileged:
-                          default: false
-                          description: '(Optional) make container privileged. Default:
-                            false.'
-                          type: boolean
-                        volumemounts:
-                          description: '(Optional) VolumeMounts. Available volumes:
-                            "/dev/hugepages", "/var", "/etc", "/run/yanet", "/run/bird"'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    type: array
+                        type: array
+                    type: object
+                  tag:
+                    default: latest
+                    description: '(Optional) image tag. Default: latest.'
+                    type: string
                 type: object
               dataplane:
                 description: (Optional) base configs for dataplane deployment.
@@ -171,40 +135,18 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  initcontainers:
-                    description: (Optional) Addition init containers.
-                    items:
-                      description: Base configs for init container.
-                      properties:
-                        args:
-                          description: (Optional) Args.
-                          items:
-                            type: string
-                          type: array
-                        command:
-                          description: Command.
-                          items:
-                            type: string
-                          type: array
-                        image:
-                          description: Full image name.
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
                           type: string
-                        name:
-                          description: Container name.
-                          type: string
-                        privileged:
-                          default: false
-                          description: '(Optional) make container privileged. Default:
-                            false.'
-                          type: boolean
-                        volumemounts:
-                          description: '(Optional) VolumeMounts. Available volumes:
-                            "/dev/hugepages", "/var", "/etc", "/run/yanet", "/run/bird"'
-                          items:
-                            type: string
-                          type: array
-                      type: object
-                    type: array
+                        type: array
+                    type: object
+                  tag:
+                    default: latest
+                    description: '(Optional) image tag. Default: latest.'
+                    type: string
                 type: object
               nodename:
                 description: Worker node name for deploy. Only one Yanet on node!
@@ -220,8 +162,16 @@ spec:
                       zero replicas with this option. Default: true'
                     type: boolean
                   image:
-                    description: image name
+                    description: image name.
                     type: string
+                  opts:
+                    description: (Optional) additional opts for deployment.
+                    properties:
+                      initcontainers:
+                        items:
+                          type: string
+                        type: array
+                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -237,7 +187,7 @@ spec:
                 type: string
               type:
                 default: release
-                description: '(Optional) Type of dataplane(release, l3balancer or
+                description: '(Optional) Type of dataplane(release, l3balancer  or
                   firewall). Default: release'
                 type: string
             type: object
