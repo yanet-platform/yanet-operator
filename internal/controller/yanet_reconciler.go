@@ -144,10 +144,19 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 			"app.kubernetes.io/created-by": "yanet-operator",
 		}),
 	}
-	if err := r.List(ctx, podList, listOpts...); err != nil {
-		r.Log.Error(err, "Failed to list pods", "Yanet.Namespace", yanet.Namespace, "host", yanet.Spec.NodeName)
-		return ctrl.Result{}, err
+	err := r.List(ctx, podList, listOpts...)
+	if err != nil {
+		r.Log.Error(
+			err,
+			"Can not find pods for status update, may be replicaCount = 0 in config",
+			"Yanet.Namespace",
+			yanet.Namespace,
+			"host",
+			yanet.Spec.NodeName,
+		)
+		return ctrl.Result{}, nil
 	}
+
 	podNames := helpers.GetPodNames(podList.Items)
 
 	// Update pods status if needed

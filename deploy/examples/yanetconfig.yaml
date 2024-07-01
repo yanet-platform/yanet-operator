@@ -1,0 +1,76 @@
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+  namespace: yanet
+spec:
+  additionalopts:
+    annotations:
+    - annotations:
+        telegraf.influxdata.com/ports: "8080"
+      name: telegraf
+    - annotations:
+        checkpointer.ydb.tech/checkpoint: "true"
+        checkpointer.ydb.tech/manual-recovery: "true"
+      name: checkpointer
+    initcontainers:
+    - args:
+      - -c
+      - echo hello
+      command:
+      - /bin/bash
+      image: busybox
+      name: test
+    poststart:
+    - exec: sleep 60; /bin/mountpoint -q /etc/yanet/controlplane.conf; /bin/mount
+        -o ro,bind /etc/yanet/controlplane.slb.conf /etc/yanet/controlplane.conf;/usr/bin/yanet-cli
+        reload
+      name: reloader
+    - exec: cat /etc/yanet/controlplane.conf | jq -j '.modules.route0.interfaces |
+        keys[] as $k | $k, " ", (.[$k] | .ipAddresses[]), "\n"' | grep kni | while
+        read iface addr;do echo ip -6 link add $(echo $iface | cut -d\. -f1) name
+        $iface type vlan; echo ip -6 addr add $addr dev $iface; done
+      name: netconfig
+  autodiscovery:
+    enable: false
+    namespace: yanet
+    registry: dockerhub.io
+  enabledopts:
+    balancer:
+      dataplane:
+        poststart:
+          exec:
+          - reloader
+          - netconfig
+        annotations:
+        - checkpointer
+      controlplane:
+        annotations:
+        - checkpointer
+      bird:
+        annotations:
+        - checkpointer
+      announcer:
+        annotations:
+        - checkpointer
+    release:
+      dataplane:
+        initcontainers:
+        - test
+        poststart:
+          exec:
+          - netconfig
+        annotations:
+        - checkpointer
+      controlplane:
+        annotations:
+        - telegraf
+        - checkpointer
+      bird:
+        annotations:
+        - checkpointer
+      announcer:
+        annotations:
+        - checkpointer
+  stop: false
+  updatewindow: 10

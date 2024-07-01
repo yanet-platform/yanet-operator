@@ -6,7 +6,6 @@ import (
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
-	"github.com/yanet-platform/yanet-operator/internal/names"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 
@@ -57,35 +56,19 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
-		log.Info("typeOpts is not specified for %s", m.Spec.Type)
+		log.Info(fmt.Sprintf("typeOpts is not specified for %s", m.Spec.Type))
 	}
 	// Filling in all init containers
 	initContainers := newControlInitContainers(m)
 	additionalInitContainers := GetAdditionalInitContainers(
-		config.AdditionalOpts.Controlplane.InitContainers, // all available initContainers in yanetConfig spec
-		perTypeOpts.Controlplane.InitContainers,           // initContainers enabled for specific type in global config
-		m.Spec.Controlplane.Opts.InitContainers,           // initContainers enabled in node spec
+		config.AdditionalOpts.InitContainers,    // all available initContainers in yanetConfig spec
+		perTypeOpts.Controlplane.InitContainers, // initContainers enabled for specific type in global config
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
 
 	// start with default config, mount slb config and run reload for l3balancer
-	poststart := []string{}
-	if m.Spec.Type == names.Balancer {
-		poststart = []string{
-			"/bin/sh",
-			"-c",
-			`sleep 60;
-			/bin/mountpoint -q /etc/yanet/controlplane.conf;
-			/bin/mount -o ro,bind /etc/yanet/controlplane.slb.conf /etc/yanet/controlplane.conf;
-			/usr/bin/yanet-cli reload`,
-		}
-	} else {
-		poststart = []string{
-			"/bin/sh",
-			"-c",
-			`echo "starting..."`,
-		}
-	}
+	poststart := GetPostStartExec(config.AdditionalOpts.PostStart, perTypeOpts.Controlplane.PostStart)
+
 	depName := fmt.Sprintf("controlplane-%s", m.Spec.NodeName)
 	image := fmt.Sprintf("%s:%s", m.Spec.Controlplane.Image, m.Spec.Tag)
 	if m.Spec.Registry != "" {
@@ -110,7 +93,7 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        depName,
-					Annotations: AnnotationsForYanet(nil),
+					Annotations: AnnotationsForYanet(config.AdditionalOpts.Annotations, perTypeOpts.Controlplane.Annotations),
 					Labels:      LabelsForYanet(nil, m, "controlplane"),
 				},
 				Spec: v1.PodSpec{
@@ -121,7 +104,7 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 							Image:           image,
 							ImagePullPolicy: v1.PullIfNotPresent,
 							Name:            "controlplane",
-							Command:         []string{"/usr/bin/yanet-controlplane-" + m.Spec.Arch},
+							Command:         []string{"/usr/bin/yanet-controlplane"},
 							Args: []string{
 								"-c",
 								"/etc/yanet/controlplane.conf",

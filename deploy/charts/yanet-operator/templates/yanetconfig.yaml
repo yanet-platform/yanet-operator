@@ -1,0 +1,11 @@
+{{- with .Values.yanetconfig }}
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+  namespace: {{ .Values.namespace }}
+spec:
+   {{- with .spec }}
+     {{- toYaml . | nindent 2 }}
+   {{- end }}
+{{- end }}

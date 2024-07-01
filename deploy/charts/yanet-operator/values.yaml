@@ -1,12 +1,11 @@
 replicaCount: 2
 
 image:
-  repository: yanetplatform/yanet-operator
+  repository: yanet-platform/yanet-operator
   pullPolicy: IfNotPresent
-  tag: "0.13"
+  tag: "latest"
 
 imagePullSecrets: []
-namespace: "yanet"
 nameOverride: ""
 fullnameOverride: "yanet-operator"
 
@@ -29,10 +28,17 @@ resources:
      cpu: 2
      memory: 2Gi
 
+tolerations: []
 nodeSelector: {}
 
-tolerations:
-  - effect: NoSchedule
-    key: node-role.kubernetes.io/control-plane
-
 affinity: {}
+
+yanetconfig:
+  spec:
+    autodiscovery:
+      enable: false
+      namespace: yanet
+      registry: dockerhub.io
+    stop: false
+
+extraManifests: {}

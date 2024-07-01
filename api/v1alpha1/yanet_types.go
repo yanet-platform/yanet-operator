@@ -38,14 +38,10 @@ type YanetSpec struct {
 	// Only one Yanet on node!
 	// Do not use regex!
 	NodeName string `json:"nodename,omitempty"`
-	// (Optional) Type of dataplane(release, l3balancer  or firewall).
+	// (Optional) Type of dataplane(release or balancer).
 	// Default: release
 	// +kubebuilder:default=release
 	Type string `json:"type,omitempty"`
-	// (Optional) Arch of dataplane(broadwell, corei7 or knl).
-	// Default: corei7
-	// +kubebuilder:default=corei7
-	Arch string `json:"arch,omitempty"`
 	// (Optional) Operator enable autosync for this node.
 	// Default: false
 	// +kubebuilder:default=false
@@ -79,8 +75,6 @@ type Dep struct {
 	// Default: latest.
 	// +kubebuilder:default=latest
 	Tag string `json:"tag,omitempty"`
-	// (Optional) additional opts for deployment.
-	Opts OptsNames `json:"opts,omitempty"`
 }
 
 // YanetStatus defines the observed state of Yanet.

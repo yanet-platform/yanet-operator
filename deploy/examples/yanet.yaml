@@ -1,0 +1,28 @@
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: Yanet
+metadata:
+  name: test.yndx.net
+  namespace: yanet
+spec:
+  allowreboot: false
+  announcer:
+    enable: true
+    image: yanet-platform/yanet-announcer
+  autosync: true
+  bird:
+    enable: true
+    image: yanet-platform/yandex-bird2
+    tag: v61.0-test
+  controlplane:
+    enable: true
+    image: yanet-platform/yanet
+  dataplane:
+    enable: true
+    image: yanet-platform/yanet
+  nodename: test.yndx.net
+  preparejob:
+    enable: false
+    image: yanet-platform/yanet
+    tag: latest
+  tag: v63.7
+  type: release

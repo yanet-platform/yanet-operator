@@ -53,17 +53,18 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
-		log.Info("typeOpts is not specified for %s", m.Spec.Type)
+		log.Info(fmt.Sprintf("typeOpts is not specified for %s", m.Spec.Type))
 	}
 
 	// Filling in all init containers
 	initContainers := newDataInitContainers()
 	additionalInitContainers := GetAdditionalInitContainers(
-		config.AdditionalOpts.Dataplain.InitContainers, // all available initContainers in yanetConfig spec
-		perTypeOpts.Dataplain.InitContainers,           // initContainers enabled for specific type in global config
-		m.Spec.Dataplane.Opts.InitContainers,           // initContainers enabled in node spec
+		config.AdditionalOpts.InitContainers, // all available initContainers in yanetConfig spec
+		perTypeOpts.Dataplain.InitContainers, // initContainers enabled for specific type in global config
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
+
+	poststart := GetPostStartExec(config.AdditionalOpts.PostStart, perTypeOpts.Dataplain.PostStart)
 
 	// Creating deployment based on previously created structures
 	depName := fmt.Sprintf("dataplane-%s", m.Spec.NodeName)
@@ -89,7 +90,7 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        depName,
-					Annotations: AnnotationsForYanet(nil),
+					Annotations: AnnotationsForYanet(config.AdditionalOpts.Annotations, perTypeOpts.Dataplain.Annotations),
 					Labels:      LabelsForYanet(nil, m, "dataplane"),
 				},
 				Spec: v1.PodSpec{
@@ -100,11 +101,14 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 							Image:           image,
 							ImagePullPolicy: v1.PullIfNotPresent,
 							Name:            "dataplane",
-							Command:         []string{"/usr/bin/yanet-wrapper"},
+							Command:         []string{"/usr/bin/yanet-dataplane"},
 							Args: []string{
-								"-a", m.Spec.Arch,
-								"-t", m.Spec.Type,
 								"-c", "/etc/yanet/dataplane.conf",
+							},
+							Lifecycle: &v1.Lifecycle{
+								PostStart: &v1.LifecycleHandler{
+									Exec: &v1.ExecAction{Command: poststart},
+								},
 							},
 							VolumeMounts: []v1.VolumeMount{
 								{Name: "dev-hugepages", MountPath: "/dev/hugepages"},
