@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"sync"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -118,6 +119,52 @@ type Images struct {
 type YanetConfigStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+}
+
+// OptsSpec define specs of additional resources
+type AdditionalOpts struct {
+	InitContainers []v1.Container          `json:"initcontainers,omitempty"`
+	PostStart      []NamedLifecycleHandler `json:"poststart,omitempty"`
+	Annotations    []NamedAnnotations      `json:"annotations,omitempty"`
+}
+
+// NamedAnnotations contains Annotations with Name
+type NamedAnnotations struct {
+	Name        string            `json:"name,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
+// NamedLifecycleHandler contains LifecycleHandler with Name
+type NamedLifecycleHandler struct {
+	Name string `json:"name,omitempty"`
+	// Exec without executor, only args!
+	Exec string `json:"exec,omitempty"`
+}
+
+// EnabledOpts contains a struct of enabled options (initContainers, Annotations, etc) that SHOULD be applied to Deployments
+type EnabledOpts struct {
+	Release  DepOpts `json:"release,omitempty"`
+	Balancer DepOpts `json:"balancer,omitempty"`
+}
+
+// DepOpts contains a struct of deployment options (initContainers, Annotations, etc) that SHOULD be applied to Deployments
+type DepOpts struct {
+	Controlplane OptsNames `json:"controlplane,omitempty"`
+	Dataplain    OptsNames `json:"dataplane,omitempty"`
+	Bird         OptsNames `json:"bird,omitempty"`
+	Announcer    OptsNames `json:"announcer,omitempty"`
+}
+
+// OptsNames contains options that SHOULD be applied to Deployments
+type OptsNames struct {
+	InitContainers []string         `json:"initcontainers,omitempty"`
+	PostStart      LifecycleHandler `json:"poststart,omitempty"`
+	Annotations    []string         `json:"annotations,omitempty"`
+}
+
+// LifecycleHandler contains truncated original LifecycleHandler
+type LifecycleHandler struct {
+	Exec []string `json:"exec,omitempty"`
 }
 
 //+kubebuilder:object:root=true

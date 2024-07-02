@@ -50,24 +50,11 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  opts:
-                    description: (Optional) additional opts for deployment.
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
                     type: string
                 type: object
-              arch:
-                default: corei7
-                description: '(Optional) Arch of dataplane(broadwell, corei7 or knl).
-                  Default: corei7'
-                type: string
               autosync:
                 default: false
                 description: '(Optional) Operator enable autosync for this node. Default:
@@ -85,14 +72,6 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  opts:
-                    description: (Optional) additional opts for deployment.
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -110,14 +89,6 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  opts:
-                    description: (Optional) additional opts for deployment.
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -135,14 +106,6 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  opts:
-                    description: (Optional) additional opts for deployment.
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -164,14 +127,6 @@ spec:
                   image:
                     description: image name.
                     type: string
-                  opts:
-                    description: (Optional) additional opts for deployment.
-                    properties:
-                      initcontainers:
-                        items:
-                          type: string
-                        type: array
-                    type: object
                   tag:
                     default: latest
                     description: '(Optional) image tag. Default: latest.'
@@ -187,8 +142,8 @@ spec:
                 type: string
               type:
                 default: release
-                description: '(Optional) Type of dataplane(release, l3balancer  or
-                  firewall). Default: release'
+                description: '(Optional) Type of dataplane(release or balancer). Default:
+                  release'
                 type: string
             type: object
           status:

@@ -42,16 +42,17 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
-		log.Info("typeOpts is not specified for %s", m.Spec.Type)
+		log.Info(fmt.Sprintf("typeOpts is not specified for %s", m.Spec.Type))
 	}
 	// Filling in all init containers
 	initContainers := newAnnouncerInitContainers()
 	additionalInitContainers := GetAdditionalInitContainers(
-		config.AdditionalOpts.Announcer.InitContainers, // all available initContainers in yanetConfig spec
-		perTypeOpts.Announcer.InitContainers,           // initContainers enabled for specific type in global config
-		m.Spec.Announcer.Opts.InitContainers,           // initContainers enabled in node spec
+		config.AdditionalOpts.InitContainers, // all available initContainers in yanetConfig spec
+		perTypeOpts.Announcer.InitContainers, // initContainers enabled for specific type in global config
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
+
+	poststart := GetPostStartExec(config.AdditionalOpts.PostStart, perTypeOpts.Announcer.PostStart)
 
 	// Creating deployment based on previously created structures
 	replicas := int32(0)
@@ -77,7 +78,7 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        depName,
-					Annotations: AnnotationsForYanet(nil),
+					Annotations: AnnotationsForYanet(config.AdditionalOpts.Annotations, perTypeOpts.Announcer.Annotations),
 					Labels:      LabelsForYanet(nil, m, "announcer"),
 				},
 				Spec: v1.PodSpec{
@@ -90,6 +91,11 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 							Name:            "announcer",
 							Command:         []string{"/usr/bin/yanet-announcer"},
 							Args:            []string{"--run"},
+							Lifecycle: &v1.Lifecycle{
+								PostStart: &v1.LifecycleHandler{
+									Exec: &v1.ExecAction{Command: poststart},
+								},
+							},
 							VolumeMounts: []v1.VolumeMount{
 								{Name: "dev-hugepages", MountPath: "/dev/hugepages"},
 								{Name: "etc-yanet", MountPath: "/etc/yanet"},

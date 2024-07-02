@@ -37,8 +37,6 @@ func GetTypeOpts(opts yanetv1alpha1.EnabledOpts, t string) (bool, yanetv1alpha1.
 	switch t {
 	case names.Release:
 		return true, opts.Release
-	case names.FireWall:
-		return true, opts.FireWall
 	case names.Balancer:
 		return true, opts.Balancer
 	default:

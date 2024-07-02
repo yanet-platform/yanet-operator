@@ -6,7 +6,6 @@ import (
 	"golang.org/x/exp/slices"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
-	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"golang.org/x/exp/maps"
 	v1 "k8s.io/api/core/v1"
 	kuberv1 "k8s.io/kubernetes/pkg/apis/core/v1"
@@ -41,17 +40,30 @@ func normalizeContainer(c v1.Container) v1.Container {
 	return c
 }
 
-// GetAdditionalInitContainers filters out initCointainers required for specific setup based on global configuration and yanet spec
-func GetAdditionalInitContainers(initCs []v1.Container, globalNames []string, specialNames []string) []v1.Container {
-	enabledContainersNames := append(globalNames, specialNames...)
+// GetAdditionalInitContainers filters out initCointainers required for specific setup based on global configuration
+func GetAdditionalInitContainers(initCs []v1.Container, names []string) []v1.Container {
 	var resCs []v1.Container
-	uniqCs := helpers.UniqueSliceElements(enabledContainersNames)
 	for _, ic := range initCs {
-		if slices.Contains(uniqCs, ic.Name) {
+		if slices.Contains(names, ic.Name) {
 			resCs = append(resCs, normalizeContainer(ic))
 		}
 	}
 	return resCs
+}
+
+func GetPostStartExec(execs []yanetv1alpha1.NamedLifecycleHandler, names yanetv1alpha1.LifecycleHandler) []string {
+	result := []string{
+		"/bin/bash",
+		"-c",
+	}
+	command := "echo starting..."
+	for _, exec := range execs {
+		if slices.Contains(names.Exec, exec.Name) {
+			command += ";" + exec.Exec
+		}
+	}
+	result = append(result, command)
+	return result
 }
 
 // LabelsForYanet returns the labels for selecting the resources
@@ -67,11 +79,15 @@ func LabelsForYanet(addition map[string]string, m *yanetv1alpha1.Yanet, name str
 }
 
 // AnnotationsForYanet returns annotations for pods
-func AnnotationsForYanet(addition map[string]string) map[string]string {
-	annotations := map[string]string{
-		"checkpointer.ydb.tech/checkpoint":      "true",
-		"checkpointer.ydb.tech/manual-recovery": "true",
+func AnnotationsForYanet(annotations []yanetv1alpha1.NamedAnnotations, names []string) map[string]string {
+	resAnnotations := map[string]string{}
+	for _, ann := range annotations {
+		if slices.Contains(names, ann.Name) {
+			maps.Copy(resAnnotations, ann.Annotations)
+		}
 	}
-	maps.Copy(annotations, addition)
-	return annotations
+	if len(resAnnotations) == 0 {
+		return nil
+	}
+	return resAnnotations
 }

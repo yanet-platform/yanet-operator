@@ -104,11 +104,6 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 		r.Log.Error(err, fmt.Sprintf("AutoDiscovery: can not get version for Node: %s, use latest", node.Name))
 		version = "latest"
 	}
-	err, arch := helpers.HttpGet(fmt.Sprintf("%s/%s", config.AutoDiscovery.ArchUri, node.Name))
-	if err != nil {
-		r.Log.Error(err, fmt.Sprintf("AutoDiscovery: can not get arch for Node: %s, use corei7", node.Name))
-		arch = "corei7"
-	}
 	err, t := helpers.HttpGet(fmt.Sprintf("%s/%s", config.AutoDiscovery.TypeUri, node.Name))
 	if err != nil {
 		r.Log.Error(err, fmt.Sprintf("AutoDiscovery: can not get arch for Node: %s, use release", node.Name))
@@ -121,7 +116,6 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 		},
 		Spec: yanetv1alpha1.YanetSpec{
 			Tag:          version,
-			Arch:         arch,
 			Type:         t,
 			NodeName:     node.Name,
 			Registry:     config.AutoDiscovery.Registry,

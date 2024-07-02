@@ -39,11 +39,11 @@ make docker-build
 2. tag image and push it.
 3. Update crds(if need):
 ```sh
-make manifests; ./bin/kustomize build config/crd > deploy/crds/yanet.yaml
+make manifests; ./bin/kustomize build config/crd > deploy/charts/yanet-operator/crds/yanet.yaml
 ```
 4. Update rbac roles(if need):
 ```sh
-make manifests; ./bin/kustomize build config/rbac/ | sed 's/system/{{ .Values.namespace }}/g' > deploy/templates/rbac.yaml
+make manifests; ./bin/kustomize build config/rbac/ | sed 's/system/{{ .Values.namespace }}/g' > deploy/charts/yanet-operator/templates/rbac.yaml
 ```
 4. Update version in helm chart.
 
