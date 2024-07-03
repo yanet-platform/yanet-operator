@@ -104,7 +104,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		}
 
 		// Check deployment for the needed to update
-		r.Log.Info(fmt.Sprintf("existing deployment: %s", found.String()))
+		//r.Log.Info(fmt.Sprintf("existing deployment: %s", found.String()))
 		if helpers.DeploymentDiff(ctx, dep, found) {
 			updateWindow := time.Duration(config.UpdateWindow) * time.Second
 			requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
@@ -138,7 +138,6 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	podList := &v1.PodList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(yanet.Namespace),
-		client.MatchingFields{"status.phase": "Running"},
 		client.MatchingLabels(map[string]string{
 			"topology-location-host":       yanet.Spec.NodeName,
 			"app.kubernetes.io/created-by": "yanet-operator",
@@ -157,7 +156,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		return ctrl.Result{}, nil
 	}
 
-	podNames := helpers.GetPodNames(podList.Items)
+	podNames := helpers.GetPods(ctx, podList.Items)
 
 	// Update pods status if needed
 	if !reflect.DeepEqual(podNames, yanet.Status.Pods) {

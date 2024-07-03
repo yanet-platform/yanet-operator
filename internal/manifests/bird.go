@@ -73,7 +73,10 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 		replicas = 1
 	}
 	depName := fmt.Sprintf("bird-%s", m.Spec.NodeName)
-	image := fmt.Sprintf("%s:%s", m.Spec.Bird.Image, m.Spec.Bird.Tag)
+	image := fmt.Sprintf("%s:%s", m.Spec.Bird.Image, m.Spec.Tag)
+	if m.Spec.Bird.Tag != "" {
+		image = fmt.Sprintf("%s:%s", m.Spec.Bird.Image, m.Spec.Bird.Tag)
+	}
 	if m.Spec.Registry != "" {
 		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
 	}

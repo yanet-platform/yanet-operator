@@ -69,6 +69,9 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 	// Creating deployment based on previously created structures
 	depName := fmt.Sprintf("dataplane-%s", m.Spec.NodeName)
 	image := fmt.Sprintf("%s:%s", m.Spec.Dataplane.Image, m.Spec.Tag)
+	if m.Spec.Controlplane.Tag != "" {
+		image = fmt.Sprintf("%s:%s", m.Spec.Controlplane.Image, m.Spec.Controlplane.Tag)
+	}
 	if m.Spec.Registry != "" {
 		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
 	}
