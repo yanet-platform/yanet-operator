@@ -19,6 +19,7 @@ package main
 import (
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -65,11 +66,14 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	syncPeriod := 1 * time.Hour
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		MetricsBindAddress:     metricsAddr,
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
+		SyncPeriod:             &syncPeriod,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "9ef029f2.yanet-platform.io",
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily

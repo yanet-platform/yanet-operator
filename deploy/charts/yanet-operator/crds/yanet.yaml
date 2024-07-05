@@ -1691,8 +1691,7 @@ spec:
                     description: image name.
                     type: string
                   tag:
-                    default: latest
-                    description: '(Optional) image tag. Default: latest.'
+                    description: (Optional) image tag.
                     type: string
                 type: object
               autosync:
@@ -1713,8 +1712,7 @@ spec:
                     description: image name.
                     type: string
                   tag:
-                    default: latest
-                    description: '(Optional) image tag. Default: latest.'
+                    description: (Optional) image tag.
                     type: string
                 type: object
               controlplane:
@@ -1730,8 +1728,7 @@ spec:
                     description: image name.
                     type: string
                   tag:
-                    default: latest
-                    description: '(Optional) image tag. Default: latest.'
+                    description: (Optional) image tag.
                     type: string
                 type: object
               dataplane:
@@ -1747,8 +1744,7 @@ spec:
                     description: image name.
                     type: string
                   tag:
-                    default: latest
-                    description: '(Optional) image tag. Default: latest.'
+                    description: (Optional) image tag.
                     type: string
                 type: object
               nodename:
@@ -1768,8 +1764,7 @@ spec:
                     description: image name.
                     type: string
                   tag:
-                    default: latest
-                    description: '(Optional) image tag. Default: latest.'
+                    description: (Optional) image tag.
                     type: string
                 type: object
               registry:
@@ -1790,10 +1785,12 @@ spec:
             description: YanetStatus defines the observed state of Yanet.
             properties:
               pods:
-                description: Resulting pods.
-                items:
-                  type: string
-                type: array
+                additionalProperties:
+                  items:
+                    type: string
+                  type: array
+                description: Resulting pods by status.
+                type: object
             required:
             - pods
             type: object

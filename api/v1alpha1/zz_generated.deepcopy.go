@@ -401,8 +401,18 @@ func (in *YanetStatus) DeepCopyInto(out *YanetStatus) {
 	*out = *in
 	if in.Pods != nil {
 		in, out := &in.Pods, &out.Pods
-		*out = make([]string, len(*in))
-		copy(*out, *in)
+		*out = make(map[v1.PodPhase][]string, len(*in))
+		for key, val := range *in {
+			var outVal []string
+			if val == nil {
+				(*out)[key] = nil
+			} else {
+				in, out := &val, &outVal
+				*out = make([]string, len(*in))
+				copy(*out, *in)
+			}
+			(*out)[key] = outVal
+		}
 	}
 }
 

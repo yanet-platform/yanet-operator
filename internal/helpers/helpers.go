@@ -15,14 +15,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// GetPodNames returns the pod names of the array of pods passed in
-func GetPodNames(pods []v1.Pod) []string {
-	var podNames []string
+// GetPods returns pods by status
+func GetPods(ctx context.Context, pods []v1.Pod) map[v1.PodPhase][]string {
+	logger := log.FromContext(ctx)
+	resultPods := map[v1.PodPhase][]string{}
 	for _, pod := range pods {
-		podNames = append(podNames, pod.Name)
+		logger.Info(fmt.Sprintf("Found pod: %s with status: %s", pod.Name, pod.Status.Phase))
+		resultPods[pod.Status.Phase] = append(resultPods[pod.Status.Phase], pod.Name)
 	}
-	return podNames
+	return resultPods
 }
+
 func GetLabeledNodes(nodeList *v1.NodeList) []v1.Node {
 	var labeledNodes []v1.Node
 	for _, node := range nodeList.Items {
@@ -66,30 +69,30 @@ func GetNodeNames(nodeList *v1.NodeList) []string {
 
 // DeploymentDiff make partial diff for deployments
 func DeploymentDiff(ctx context.Context, first *appsv1.Deployment, second *appsv1.Deployment) bool {
-	Log := log.FromContext(ctx)
+	logger := log.FromContext(ctx)
 	// Check Volumes
 	if diff := cmp.Diff(first.Spec.Template.Spec.Volumes, second.Spec.Template.Spec.Volumes); diff != "" {
-		Log.Info(fmt.Sprintf("Detect Volumes diff (-want +got):\n%s", diff))
+		logger.Info(fmt.Sprintf("Detect Volumes diff (-want +got):\n%s", diff))
 		return true
 	}
 	// Check containers Spec.Template.Spec.Containers
 	if diff := cmp.Diff(first.Spec.Template.Spec.Containers, second.Spec.Template.Spec.Containers); diff != "" {
-		Log.Info(fmt.Sprintf("Detect Containers spec diff (-want +got):\n%s", diff))
+		logger.Info(fmt.Sprintf("Detect Containers spec diff (-want +got):\n%s", diff))
 		return true
 	}
 	// Check containers Spec.Template.Spec.InitContainers
 	if diff := cmp.Diff(first.Spec.Template.Spec.InitContainers, second.Spec.Template.Spec.InitContainers); diff != "" {
-		Log.Info(fmt.Sprintf("Detect InitContainers spec diff (-want +got):\n%s", diff))
+		logger.Info(fmt.Sprintf("Detect InitContainers spec diff (-want +got):\n%s", diff))
 		return true
 	}
 	// Check replicas
 	if diff := cmp.Diff(first.Spec.Replicas, second.Spec.Replicas); diff != "" {
-		Log.Info(fmt.Sprintf("Detect replicas diff (-want +got):\n%s", diff))
+		logger.Info(fmt.Sprintf("Detect replicas diff (-want +got):\n%s", diff))
 		return true
 	}
 	// Check Object Meta
 	if diff := cmp.Diff(first.Spec.Template.ObjectMeta, second.Spec.Template.ObjectMeta); diff != "" {
-		Log.Info(fmt.Sprintf("Detect Object Meta diff (-want +got):\n%s", diff))
+		logger.Info(fmt.Sprintf("Detect Object Meta diff (-want +got):\n%s", diff))
 		return true
 	}
 	return false

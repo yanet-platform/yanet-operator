@@ -24,12 +24,9 @@ spec:
     poststart:
     - exec: sleep 60; /bin/mountpoint -q /etc/yanet/controlplane.conf; /bin/mount
         -o ro,bind /etc/yanet/controlplane.slb.conf /etc/yanet/controlplane.conf;/usr/bin/yanet-cli
-        reload
+        reload 2>&1 >> /reloader.log
       name: reloader
-    - exec: cat /etc/yanet/controlplane.conf | jq -j '.modules.route0.interfaces |
-        keys[] as $k | $k, " ", (.[$k] | .ipAddresses[]), "\n"' | grep kni | while
-        read iface addr;do echo ip -6 link add $(echo $iface | cut -d\. -f1) name
-        $iface type vlan; echo ip -6 addr add $addr dev $iface; done
+    - exec: apt-get install -y jq iproute2; until ip addr | grep kni[0-9]; do sleep 2; done; cat /etc/yanet/controlplane.conf | jq -j '.modules.route0.interfaces | keys[] as $k | (.[$k].ipAddresses)[] as $ip | $k, " ", $ip, "\n"' | grep kni | while read iface addr;do ip link add link $(echo $iface | cut -d\. -f1) name $iface type vlan id $(echo $iface | cut -d\. -f2) || true; ip $(if grep -q "::" <<< $ip; then echo "-6";echo "-4";fi) addr add $addr dev $iface || true; done 2>&1 >> /netconfig.log
       name: netconfig
   autodiscovery:
     enable: false

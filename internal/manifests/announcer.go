@@ -61,6 +61,9 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 	}
 	depName := fmt.Sprintf("announcer-%s", m.Spec.NodeName)
 	image := fmt.Sprintf("%s:%s", m.Spec.Announcer.Image, m.Spec.Tag)
+	if m.Spec.Announcer.Tag != "" {
+		image = fmt.Sprintf("%s:%s", m.Spec.Announcer.Image, m.Spec.Announcer.Tag)
+	}
 	if m.Spec.Registry != "" {
 		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
 	}

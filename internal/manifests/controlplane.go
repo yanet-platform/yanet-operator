@@ -71,6 +71,9 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 
 	depName := fmt.Sprintf("controlplane-%s", m.Spec.NodeName)
 	image := fmt.Sprintf("%s:%s", m.Spec.Controlplane.Image, m.Spec.Tag)
+	if m.Spec.Controlplane.Tag != "" {
+		image = fmt.Sprintf("%s:%s", m.Spec.Controlplane.Image, m.Spec.Controlplane.Tag)
+	}
 	if m.Spec.Registry != "" {
 		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
 	}

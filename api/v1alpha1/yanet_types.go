@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -72,15 +73,13 @@ type Dep struct {
 	// image name.
 	Image string `json:"image,omitempty"`
 	// (Optional) image tag.
-	// Default: latest.
-	// +kubebuilder:default=latest
 	Tag string `json:"tag,omitempty"`
 }
 
 // YanetStatus defines the observed state of Yanet.
 type YanetStatus struct {
-	// Resulting pods.
-	Pods []string `json:"pods"`
+	// Resulting pods by status.
+	Pods map[v1.PodPhase][]string `json:"pods"`
 }
 
 //+kubebuilder:object:root=true
