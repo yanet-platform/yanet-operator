@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.12.0
+    controller-gen.kubebuilder.io/version: v0.14.0
   name: yanets.yanet.yanet-platform.io
 spec:
   group: yanet.yanet-platform.io
@@ -20,14 +20,19 @@ spec:
         description: Yanet is the Schema for the yanets API
         properties:
           apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation
-              of an object. Servers should convert recognized schemas to the latest
-              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
-            description: 'Kind is a string value representing the REST resource this
-              object represents. Servers may infer this from the endpoint the client
-              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
@@ -36,16 +41,19 @@ spec:
             properties:
               allowreboot:
                 default: false
-                description: '(Optional) Allow reboot on prepare stage. Default: false'
+                description: |-
+                  (Optional) Allow reboot on prepare stage.
+                  Default: false
                 type: boolean
               announcer:
                 description: (Optional) base configs for announcer deployment.
                 properties:
                   enable:
                     default: true
-                    description: '(Optional) replicas for this deployment. One with
-                      true options and zero with false. You can make deployment with
-                      zero replicas with this option. Default: true'
+                    description: |-
+                      (Optional) replicas for this deployment. One with true options and zero with false.
+                      You can make deployment with zero replicas with this option.
+                      Default: true
                     type: boolean
                   image:
                     description: image name.
@@ -56,17 +64,19 @@ spec:
                 type: object
               autosync:
                 default: false
-                description: '(Optional) Operator enable autosync for this node. Default:
-                  false'
+                description: |-
+                  (Optional) Operator enable autosync for this node.
+                  Default: false
                 type: boolean
               bird:
                 description: (Optional) base configs for bird deployment.
                 properties:
                   enable:
                     default: true
-                    description: '(Optional) replicas for this deployment. One with
-                      true options and zero with false. You can make deployment with
-                      zero replicas with this option. Default: true'
+                    description: |-
+                      (Optional) replicas for this deployment. One with true options and zero with false.
+                      You can make deployment with zero replicas with this option.
+                      Default: true
                     type: boolean
                   image:
                     description: image name.
@@ -80,9 +90,10 @@ spec:
                 properties:
                   enable:
                     default: true
-                    description: '(Optional) replicas for this deployment. One with
-                      true options and zero with false. You can make deployment with
-                      zero replicas with this option. Default: true'
+                    description: |-
+                      (Optional) replicas for this deployment. One with true options and zero with false.
+                      You can make deployment with zero replicas with this option.
+                      Default: true
                     type: boolean
                   image:
                     description: image name.
@@ -96,9 +107,10 @@ spec:
                 properties:
                   enable:
                     default: true
-                    description: '(Optional) replicas for this deployment. One with
-                      true options and zero with false. You can make deployment with
-                      zero replicas with this option. Default: true'
+                    description: |-
+                      (Optional) replicas for this deployment. One with true options and zero with false.
+                      You can make deployment with zero replicas with this option.
+                      Default: true
                     type: boolean
                   image:
                     description: image name.
@@ -108,7 +120,9 @@ spec:
                     type: string
                 type: object
               nodename:
-                description: Worker node name for deploy. Only one Yanet on node!
+                description: |-
+                  Worker node name for deploy.
+                  Only one Yanet on node!
                   Do not use regex!
                 type: string
               preparejob:
@@ -116,9 +130,10 @@ spec:
                 properties:
                   enable:
                     default: true
-                    description: '(Optional) replicas for this deployment. One with
-                      true options and zero with false. You can make deployment with
-                      zero replicas with this option. Default: true'
+                    description: |-
+                      (Optional) replicas for this deployment. One with true options and zero with false.
+                      You can make deployment with zero replicas with this option.
+                      Default: true
                     type: boolean
                   image:
                     description: image name.
@@ -132,13 +147,15 @@ spec:
                 type: string
               tag:
                 default: latest
-                description: '(Optional) Tag for dataplane/controlplane/anouncer/bird
-                  images. Default: latest'
+                description: |-
+                  (Optional) Tag for dataplane/controlplane/anouncer/bird images.
+                  Default: latest
                 type: string
               type:
                 default: release
-                description: '(Optional) Type of dataplane(release or balancer). Default:
-                  release'
+                description: |-
+                  (Optional) Type of dataplane(release or balancer).
+                  Default: release
                 type: string
             type: object
           status:

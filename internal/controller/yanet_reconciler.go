@@ -70,9 +70,13 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	}
 	for _, dep := range deps {
 		// Set Yanet instance as the owner and controller
-		ctrl.SetControllerReference(yanet, dep, r.Scheme)
+		err := ctrl.SetControllerReference(yanet, dep, r.Scheme)
+		if err != nil {
+			r.Log.Error(err, "Can not set Yanet instance as the owner and controller")
+			return ctrl.Result{}, err
+		}
 		found := &appsv1.Deployment{}
-		err := r.Client.Get(
+		err = r.Client.Get(
 			ctx,
 			types.NamespacedName{Name: dep.Name, Namespace: yanet.Namespace},
 			found,
