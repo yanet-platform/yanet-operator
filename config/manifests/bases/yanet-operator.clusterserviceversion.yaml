@@ -10,6 +10,11 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
+    - description: YanetConfig is the Schema for the yanetconfigs API
+      displayName: Yanet Config
+      kind: YanetConfig
+      name: yanetconfigs.yanet.yanet-platform.io
+      version: v1alpha1
     - description: Yanet is the Schema for the yanets API
       displayName: Yanet
       kind: Yanet

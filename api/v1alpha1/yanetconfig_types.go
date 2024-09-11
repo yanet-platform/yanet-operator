@@ -160,6 +160,7 @@ type OptsNames struct {
 	InitContainers []string         `json:"initcontainers,omitempty"`
 	PostStart      LifecycleHandler `json:"poststart,omitempty"`
 	Annotations    []string         `json:"annotations,omitempty"`
+	HostIpc        bool             `json:"hostipc,omitempty"`
 }
 
 // LifecycleHandler contains truncated original LifecycleHandler

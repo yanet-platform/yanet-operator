@@ -101,6 +101,7 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 				},
 				Spec: v1.PodSpec{
 					HostNetwork:    true,
+					HostIPC:        perTypeOpts.Controlplane.HostIpc,
 					InitContainers: initContainers,
 					Containers: []v1.Container{
 						{
