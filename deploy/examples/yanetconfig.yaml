@@ -35,6 +35,7 @@ spec:
   enabledopts:
     balancer:
       dataplane:
+        hostipc: true
         poststart:
           exec:
           - reloader
