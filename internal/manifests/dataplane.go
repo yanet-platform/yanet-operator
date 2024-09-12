@@ -98,6 +98,7 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 				},
 				Spec: v1.PodSpec{
 					HostNetwork:    true,
+					HostIPC:        perTypeOpts.Dataplain.HostIpc,
 					InitContainers: initContainers,
 					Containers: []v1.Container{
 						{

@@ -99,6 +99,7 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 				},
 				Spec: v1.PodSpec{
 					HostNetwork:    true,
+					HostIPC:        perTypeOpts.Bird.HostIpc,
 					InitContainers: initContainers,
 					Containers: []v1.Container{
 						{

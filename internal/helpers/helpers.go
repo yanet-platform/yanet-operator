@@ -80,6 +80,16 @@ func DeploymentDiff(ctx context.Context, first *appsv1.Deployment, second *appsv
 		logger.Info(fmt.Sprintf("Detect Containers spec diff (-want +got):\n%s", diff))
 		return true
 	}
+	// Check containers Spec.Template.ObjectMeta.Annotations
+	if diff := cmp.Diff(first.Spec.Template.ObjectMeta.Annotations, second.Spec.Template.ObjectMeta.Annotations); diff != "" {
+		logger.Info(fmt.Sprintf("Detect Annotations spec diff (-want +got):\n%s", diff))
+		return true
+	}
+	// Check containers Spec.Template.Spec.HostIPC
+	if diff := cmp.Diff(first.Spec.Template.Spec.HostIPC, second.Spec.Template.Spec.HostIPC); diff != "" {
+		logger.Info(fmt.Sprintf("Detect HostIPC spec diff (-want +got):\n%s", diff))
+		return true
+	}
 	// Check containers Spec.Template.Spec.InitContainers
 	if diff := cmp.Diff(first.Spec.Template.Spec.InitContainers, second.Spec.Template.Spec.InitContainers); diff != "" {
 		logger.Info(fmt.Sprintf("Detect InitContainers spec diff (-want +got):\n%s", diff))

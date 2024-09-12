@@ -1500,6 +1500,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1522,6 +1524,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1544,6 +1548,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1566,6 +1572,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1593,6 +1601,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1615,6 +1625,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1637,6 +1649,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
@@ -1659,6 +1673,8 @@ spec:
                             items:
                               type: string
                             type: array
+                          hostipc:
+                            type: boolean
                           initcontainers:
                             items:
                               type: string
