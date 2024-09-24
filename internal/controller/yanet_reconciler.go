@@ -69,6 +69,8 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		manifests.DeploymentForBird(ctx, yanet, config),
 	}
 	sync := yanetv1alpha1.Sync{}
+	updateWindow := time.Duration(config.UpdateWindow) * time.Second
+	var requeueTimer time.Duration
 	for _, dep := range deps {
 		// Set Yanet instance as the owner and controller
 		err := ctrl.SetControllerReference(yanet, dep, r.Scheme)
@@ -120,8 +122,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 				sync.OutOfSync = append(sync.OutOfSync, dep.Name)
 				continue
 			}
-			updateWindow := time.Duration(config.UpdateWindow) * time.Second
-			requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
+			requeueTimer = r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
 			if requeueTimer > 0 {
 				sync.SyncWaiting = append(sync.SyncWaiting, dep.Name)
 				continue
@@ -184,8 +185,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	}
 	// Requeue if waiting object available
 	if len(sync.SyncWaiting) != 0 {
-		updateWindow := time.Duration(config.UpdateWindow) * time.Second
-		requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
+		requeueTimer = r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
 		return ctrl.Result{RequeueAfter: requeueTimer}, nil
 	}
 	return ctrl.Result{}, nil
