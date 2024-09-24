@@ -68,6 +68,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		manifests.DeploymentForControlplane(ctx, yanet, config),
 		manifests.DeploymentForBird(ctx, yanet, config),
 	}
+	sync := yanetv1alpha1.Sync{}
 	for _, dep := range deps {
 		// Set Yanet instance as the owner and controller
 		err := ctrl.SetControllerReference(yanet, dep, r.Scheme)
@@ -110,17 +111,19 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		// Check deployment for the needed to update
 		//r.Log.Info(fmt.Sprintf("existing deployment: %s", found.String()))
 		if helpers.DeploymentDiff(ctx, dep, found) {
-			updateWindow := time.Duration(config.UpdateWindow) * time.Second
-			requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
-			if requeueTimer > 0 {
-				return ctrl.Result{RequeueAfter: requeueTimer}, nil
-			}
 			r.Log.Info(fmt.Sprintf("Found diff for Deployment: %s", dep.Name))
 			if !yanet.Spec.AutoSync {
 				r.Log.Info(fmt.Sprintf(
 					"Deployment %s requires update, but AutoSync for this host is disabled, do nothing.",
 					dep.Name,
 				))
+				sync.OutOfSync = append(sync.OutOfSync, dep.Name)
+				continue
+			}
+			updateWindow := time.Duration(config.UpdateWindow) * time.Second
+			requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
+			if requeueTimer > 0 {
+				sync.SyncWaiting = append(sync.SyncWaiting, dep.Name)
 				continue
 			}
 			err = r.Client.Update(ctx, dep)
@@ -133,8 +136,11 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 					"Deployment.Name",
 					dep.Name,
 				)
+				sync.Error = append(sync.Error, dep.Name)
+				continue
 			}
 		}
+		sync.Synced = append(sync.Synced, dep.Name)
 	}
 
 	// Update the Yanet status
@@ -162,14 +168,21 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 
 	podNames := helpers.GetPods(ctx, podList.Items)
 
-	// Update pods status if needed
-	if !reflect.DeepEqual(podNames, yanet.Status.Pods) {
+	// Update status if needed
+	if !reflect.DeepEqual(podNames, yanet.Status.Pods) || !reflect.DeepEqual(sync, yanet.Status.Sync) {
 		yanet.Status.Pods = podNames
+		yanet.Status.Sync = sync
 		err := r.Status().Update(ctx, yanet)
 		if err != nil {
 			r.Log.Error(err, "Failed to update Yanet status")
 			return ctrl.Result{}, err
 		}
+	}
+	// Requeue if waiting object available
+	if len(sync.SyncWaiting) != 0 {
+		updateWindow := time.Duration(config.UpdateWindow) * time.Second
+		requeueTimer := r.checkUpdateRequeue(updateWindow, yanet.Spec.NodeName)
+		return ctrl.Result{RequeueAfter: requeueTimer}, nil
 	}
 	return ctrl.Result{}, nil
 }

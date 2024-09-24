@@ -80,6 +80,15 @@ type Dep struct {
 type YanetStatus struct {
 	// Resulting pods by status.
 	Pods map[v1.PodPhase][]string `json:"pods"`
+	Sync Sync                     `json:"sync"`
+}
+
+// Sync defines sync state of Yanet objects.
+type Sync struct {
+	Synced      []string `json:"synced"`
+	OutOfSync   []string `json:"outofsync"`
+	SyncWaiting []string `json:"syncwaiting"`
+	Error       []string `json:"error"`
 }
 
 //+kubebuilder:object:root=true

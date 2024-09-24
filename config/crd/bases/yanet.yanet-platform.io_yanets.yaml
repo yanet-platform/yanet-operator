@@ -168,8 +168,34 @@ spec:
                   type: array
                 description: Resulting pods by status.
                 type: object
+              sync:
+                description: Sync defines sync state of Yanet objects.
+                properties:
+                  error:
+                    items:
+                      type: string
+                    type: array
+                  outofsync:
+                    items:
+                      type: string
+                    type: array
+                  synced:
+                    items:
+                      type: string
+                    type: array
+                  syncwaiting:
+                    items:
+                      type: string
+                    type: array
+                required:
+                - error
+                - outofsync
+                - synced
+                - syncwaiting
+                type: object
             required:
             - pods
+            - sync
             type: object
         type: object
     served: true
