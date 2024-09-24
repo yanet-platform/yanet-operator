@@ -79,7 +79,17 @@ type Dep struct {
 // YanetStatus defines the observed state of Yanet.
 type YanetStatus struct {
 	// Resulting pods by status.
-	Pods map[v1.PodPhase][]string `json:"pods"`
+	Pods map[v1.PodPhase][]string `json:"pods,omitempty"`
+	Sync Sync                     `json:"sync,omitempty"`
+}
+
+// Sync defines sync state of Yanet objects.
+type Sync struct {
+	Synced      []string `json:"synced,omitempty"`
+	OutOfSync   []string `json:"outofsync,omitempty"`
+	SyncWaiting []string `json:"syncwaiting,omitempty"`
+	Error       []string `json:"error,omitempty"`
+	Disabled    []string `json:"disabled,omitempty"`
 }
 
 //+kubebuilder:object:root=true
