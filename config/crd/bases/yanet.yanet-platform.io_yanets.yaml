@@ -187,15 +187,7 @@ spec:
                     items:
                       type: string
                     type: array
-                required:
-                - error
-                - outofsync
-                - synced
-                - syncwaiting
                 type: object
-            required:
-            - pods
-            - sync
             type: object
         type: object
     served: true
