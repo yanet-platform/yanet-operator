@@ -140,7 +140,11 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 				continue
 			}
 		}
-		sync.Synced = append(sync.Synced, dep.Name)
+		if *dep.Spec.Replicas == 0 {
+			sync.Disabled = append(sync.Disabled, dep.Name)
+		} else {
+			sync.Synced = append(sync.Synced, dep.Name)
+		}
 	}
 
 	// Update the Yanet status

@@ -89,6 +89,7 @@ type Sync struct {
 	OutOfSync   []string `json:"outofsync,omitempty"`
 	SyncWaiting []string `json:"syncwaiting,omitempty"`
 	Error       []string `json:"error,omitempty"`
+	Disabled    []string `json:"disabled,omitempty"`
 }
 
 //+kubebuilder:object:root=true

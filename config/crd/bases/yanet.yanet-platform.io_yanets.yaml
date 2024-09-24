@@ -171,6 +171,10 @@ spec:
               sync:
                 description: Sync defines sync state of Yanet objects.
                 properties:
+                  disabled:
+                    items:
+                      type: string
+                    type: array
                   error:
                     items:
                       type: string
