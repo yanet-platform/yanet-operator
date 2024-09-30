@@ -126,7 +126,8 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 					NodeSelector: map[string]string{
 						"kubernetes.io/hostname": m.Spec.NodeName,
 					},
-					Volumes: GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet", "/run/bird"}),
+					Tolerations: TolerationsForYanet(),
+					Volumes:     GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet", "/run/bird"}),
 				},
 			},
 		},

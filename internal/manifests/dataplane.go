@@ -139,7 +139,8 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 					NodeSelector: map[string]string{
 						"kubernetes.io/hostname": m.Spec.NodeName,
 					},
-					Volumes: GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet"}),
+					Tolerations: TolerationsForYanet(),
+					Volumes:     GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet"}),
 				},
 			},
 		},

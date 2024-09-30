@@ -75,6 +75,11 @@ func DeploymentDiff(ctx context.Context, first *appsv1.Deployment, second *appsv
 		logger.Info(fmt.Sprintf("Detect Volumes diff (-want +got):\n%s", diff))
 		return true
 	}
+	// Check Tolerations
+	if diff := cmp.Diff(first.Spec.Template.Spec.Tolerations, second.Spec.Template.Spec.Tolerations); diff != "" {
+		logger.Info(fmt.Sprintf("Detect Tolerations diff (-want +got):\n%s", diff))
+		return true
+	}
 	// Check containers Spec.Template.Spec.Containers
 	if diff := cmp.Diff(first.Spec.Template.Spec.Containers, second.Spec.Template.Spec.Containers); diff != "" {
 		logger.Info(fmt.Sprintf("Detect Containers spec diff (-want +got):\n%s", diff))

@@ -138,7 +138,8 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 					NodeSelector: map[string]string{
 						"kubernetes.io/hostname": m.Spec.NodeName,
 					},
-					Volumes: GetVolumes([]string{"/etc/bird", "/run/yanet", "/run/bird"}),
+					Tolerations: TolerationsForYanet(),
+					Volumes:     GetVolumes([]string{"/etc/bird", "/run/yanet", "/run/bird"}),
 				},
 			},
 		},

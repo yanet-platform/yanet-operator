@@ -91,3 +91,13 @@ func AnnotationsForYanet(annotations []yanetv1alpha1.NamedAnnotations, names []s
 	}
 	return resAnnotations
 }
+
+// TolerationsForYanet returns tolerations for pod template, do not restart pod on node problem
+func TolerationsForYanet() []v1.Toleration {
+	toleration := []v1.Toleration{
+		{Key: "CriticalAddonsOnly", Effect: v1.TaintEffectNoSchedule},
+		{Operator: v1.TolerationOpExists, Effect: v1.TaintEffectNoSchedule},
+		{Operator: v1.TolerationOpExists, Effect: v1.TaintEffectNoExecute},
+	}
+	return toleration
+}
