@@ -61,12 +61,18 @@ func (r *YanetReconciler) checkUpdateRequeue(updateWindow time.Duration, updateH
 
 // Reconcile logic for Yanet object
 func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) (ctrl.Result, error) {
+	// Get nodes for capacity check
+	nodes, err := helpers.GetNodes(ctx, r.Client)
+	if err != nil {
+		r.Log.Error(err, "Failed to get nodes")
+		return ctrl.Result{}, err
+	}
 	// Check if the deployments already exists, if not create a new one
 	deps := []*appsv1.Deployment{
-		manifests.DeploymentForDataplane(ctx, yanet, config),
-		manifests.DeploymentForAnnouncer(ctx, yanet, config),
-		manifests.DeploymentForControlplane(ctx, yanet, config),
-		manifests.DeploymentForBird(ctx, yanet, config),
+		manifests.DeploymentForDataplane(ctx, yanet, config, nodes),
+		manifests.DeploymentForAnnouncer(ctx, yanet, config, nodes),
+		manifests.DeploymentForControlplane(ctx, yanet, config, nodes),
+		manifests.DeploymentForBird(ctx, yanet, config, nodes),
 	}
 	sync := yanetv1alpha1.Sync{}
 	updateWindow := time.Duration(config.UpdateWindow) * time.Second
@@ -158,7 +164,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 			"app.kubernetes.io/created-by": "yanet-operator",
 		}),
 	}
-	err := r.List(ctx, podList, listOpts...)
+	err = r.List(ctx, podList, listOpts...)
 	if err != nil {
 		r.Log.Error(
 			err,

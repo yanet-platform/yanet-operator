@@ -36,6 +36,9 @@ spec:
     balancer:
       dataplane:
         hostipc: true
+        limits:
+          hugepages-1Gi: 90Gi
+          memory: 128Gi
         poststart:
           exec:
           - reloader

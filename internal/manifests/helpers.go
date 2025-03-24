@@ -1,6 +1,7 @@
 package manifests
 
 import (
+	"context"
 	"strings"
 
 	"golang.org/x/exp/slices"
@@ -8,10 +9,9 @@ import (
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"golang.org/x/exp/maps"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	kuberv1 "k8s.io/kubernetes/pkg/apis/core/v1"
 )
-
-var privileged = true
 
 // GetVolumes generate Volumes for deployment
 // TODO: add more type
@@ -20,15 +20,26 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 	hostPathDirectoryOrCreate := v1.HostPathDirectoryOrCreate
 	for _, path := range HostpathOrCreate {
 		name := strings.Split(path, "/")
-		Volumes = append(Volumes, v1.Volume{
-			Name: name[len(name)-2] + "-" + name[len(name)-1],
-			VolumeSource: v1.VolumeSource{
-				HostPath: &v1.HostPathVolumeSource{
-					Path: path,
-					Type: &hostPathDirectoryOrCreate,
+		if strings.Contains(path, "hugepages") {
+			Volumes = append(Volumes, v1.Volume{
+				Name: "hugepage",
+				VolumeSource: v1.VolumeSource{
+					EmptyDir: &v1.EmptyDirVolumeSource{
+						Medium: v1.StorageMediumHugePages,
+					},
 				},
-			},
-		})
+			})
+		} else {
+			Volumes = append(Volumes, v1.Volume{
+				Name: name[len(name)-2] + "-" + name[len(name)-1],
+				VolumeSource: v1.VolumeSource{
+					HostPath: &v1.HostPathVolumeSource{
+						Path: path,
+						Type: &hostPathDirectoryOrCreate,
+					},
+				},
+			})
+		}
 	}
 	return Volumes
 }
@@ -100,4 +111,43 @@ func TolerationsForYanet() []v1.Toleration {
 		{Operator: v1.TolerationOpExists, Effect: v1.TaintEffectNoExecute},
 	}
 	return toleration
+}
+
+// GetResources returns resources map with default values
+func GetResources(
+	ctx context.Context,
+	nodename string,
+	resources v1.ResourceRequirements,
+	nodes v1.NodeList,
+	enableHugepages bool) v1.ResourceRequirements {
+
+	if !enableHugepages {
+		return resources
+	}
+
+	// Set defaults for dataplane
+	// spec.template.spec.containers[0].resources: Forbidden: HugePages require cpu or memory
+	hugepages := resource.MustParse("8Gi")
+	memory := resource.MustParse("8Gi")
+	for _, node := range nodes.Items {
+		if node.Name == nodename {
+			// Append hugepage limits to dataplane, use all of available hugepages on node
+			if huge, ok := node.Status.Capacity["hugepages-1Gi"]; ok {
+				hugepages = huge
+			}
+			break
+		}
+	}
+
+	if resources.Limits == nil {
+		resources.Limits = v1.ResourceList{}
+	}
+	if _, ok := resources.Limits["memory"]; !ok {
+		resources.Limits["memory"] = memory
+	}
+	if _, ok := resources.Limits["hugepages-1Gi"]; !ok {
+		resources.Limits["hugepages-1Gi"] = hugepages
+	}
+
+	return resources
 }

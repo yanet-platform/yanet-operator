@@ -113,9 +113,9 @@ func DeploymentDiff(ctx context.Context, first *appsv1.Deployment, second *appsv
 	return false
 }
 
-func GetNodes(c client.Client) (v1.NodeList, error) {
+func GetNodes(ctx context.Context, c client.Client) (v1.NodeList, error) {
 	nodeList := &v1.NodeList{}
-	err := c.List(context.Background(), nodeList)
+	err := c.List(ctx, nodeList)
 	if err != nil {
 		return *nodeList, err
 	}
