@@ -161,6 +161,12 @@ type OptsNames struct {
 	PostStart      LifecycleHandler `json:"poststart,omitempty"`
 	Annotations    []string         `json:"annotations,omitempty"`
 	HostIpc        bool             `json:"hostipc,omitempty"`
+	// (Optional) Resources for deployment
+	// Use all available hugepages on node for deployment
+	Resources v1.ResourceRequirements `json:"resources,omitempty"`
+	// Default: false
+	// +kubebuilder:default=false
+	Privileged bool `json:"privileged,omitempty"`
 }
 
 // LifecycleHandler contains truncated original LifecycleHandler

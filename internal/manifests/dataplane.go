@@ -12,44 +12,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func newDataInitContainers() []v1.Container {
-	initContainers := []v1.Container{
-		{
-			Image:           "busybox",
-			Name:            "init-hugepages",
-			ImagePullPolicy: "IfNotPresent",
-			Command:         []string{"/bin/sh"},
-			Args: []string{
-				"-c",
-				`cat /etc/yanet/hugepages |
-				tee /sys/devices/system/node/node*/hugepages/hugepages-1048576kB/nr_hugepages`,
-			},
-			VolumeMounts: []v1.VolumeMount{
-				{Name: "dev-hugepages", MountPath: "/dev/hugepages"},
-				{Name: "etc-yanet", MountPath: "/etc/yanet"},
-			},
-			TerminationMessagePath:   "/dev/stdout",
-			TerminationMessagePolicy: "File",
-			SecurityContext: &v1.SecurityContext{
-				Privileged: &privileged,
-				Capabilities: &v1.Capabilities{
-					Add: []v1.Capability{
-						"NET_ADMIN",
-						"NET_RAW",
-						"IPC_LOCK",
-						"SYS_ADMIN",
-						"SYS_RAWIO",
-						"SYS_CHROOT",
-					},
-				},
-			},
-		},
-	}
-	return initContainers
-}
-
 // DeploymentForDataplane return dataplane Deployment object
-func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+func DeploymentForDataplane(
+	ctx context.Context,
+	m *yanetv1alpha1.Yanet,
+	config yanetv1alpha1.YanetConfigSpec,
+	nodes v1.NodeList) *appsv1.Deployment {
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
@@ -57,12 +25,10 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 	}
 
 	// Filling in all init containers
-	initContainers := newDataInitContainers()
-	additionalInitContainers := GetAdditionalInitContainers(
+	initContainers := GetAdditionalInitContainers(
 		config.AdditionalOpts.InitContainers, // all available initContainers in yanetConfig spec
 		perTypeOpts.Dataplain.InitContainers, // initContainers enabled for specific type in global config
 	)
-	initContainers = append(initContainers, additionalInitContainers...)
 
 	poststart := GetPostStartExec(config.AdditionalOpts.PostStart, perTypeOpts.Dataplain.PostStart)
 
@@ -109,28 +75,34 @@ func DeploymentForDataplane(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 							Args: []string{
 								"-c", "/etc/yanet/dataplane.conf",
 							},
+							Resources: GetResources(
+								ctx,
+								m.Spec.NodeName,
+								perTypeOpts.Dataplain.Resources,
+								nodes,
+								true,
+							),
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.LifecycleHandler{
 									Exec: &v1.ExecAction{Command: poststart},
 								},
 							},
 							VolumeMounts: []v1.VolumeMount{
-								{Name: "dev-hugepages", MountPath: "/dev/hugepages"},
+								{Name: "hugepage", MountPath: "/dev/hugepages"},
 								{Name: "etc-yanet", MountPath: "/etc/yanet"},
 								{Name: "run-yanet", MountPath: "/run/yanet"},
 							},
 							TerminationMessagePath:   "/dev/stdout",
 							TerminationMessagePolicy: "File",
 							SecurityContext: &v1.SecurityContext{
-								Privileged: &privileged,
+								Privileged: &perTypeOpts.Dataplain.Privileged,
 								Capabilities: &v1.Capabilities{
 									Add: []v1.Capability{
 										"NET_ADMIN",
-										"NET_RAW",
+										"NET_BIND_SERVICE",
 										"IPC_LOCK",
-										"SYS_ADMIN",
-										"SYS_RAWIO",
-										"SYS_CHROOT",
+										"SYS_MODULE",
+										"SYS_NICE",
 									},
 								},
 							},

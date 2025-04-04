@@ -38,7 +38,11 @@ func newAnnouncerInitContainers() []v1.Container {
 }
 
 // DeploymentForAnnouncer returns a yanet announcer Deployment object
-func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+func DeploymentForAnnouncer(
+	ctx context.Context,
+	m *yanetv1alpha1.Yanet,
+	config yanetv1alpha1.YanetConfigSpec,
+	nodes v1.NodeList) *appsv1.Deployment {
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
@@ -95,13 +99,19 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 							Name:            "announcer",
 							Command:         []string{"/usr/bin/yanet-announcer"},
 							Args:            []string{"--run"},
+							Resources: GetResources(
+								ctx,
+								m.Spec.NodeName,
+								perTypeOpts.Announcer.Resources,
+								nodes,
+								false,
+							),
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.LifecycleHandler{
 									Exec: &v1.ExecAction{Command: poststart},
 								},
 							},
 							VolumeMounts: []v1.VolumeMount{
-								{Name: "dev-hugepages", MountPath: "/dev/hugepages"},
 								{Name: "etc-yanet", MountPath: "/etc/yanet"},
 								{Name: "run-yanet", MountPath: "/run/yanet"},
 								{Name: "run-bird", MountPath: "/run/bird"},
@@ -109,15 +119,14 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 							TerminationMessagePath:   "/dev/stdout",
 							TerminationMessagePolicy: "File",
 							SecurityContext: &v1.SecurityContext{
-								Privileged: &privileged,
+								Privileged: &perTypeOpts.Announcer.Privileged,
 								Capabilities: &v1.Capabilities{
 									Add: []v1.Capability{
 										"NET_ADMIN",
-										"NET_RAW",
+										"NET_BIND_SERVICE",
 										"IPC_LOCK",
-										"SYS_ADMIN",
-										"SYS_RAWIO",
-										"SYS_CHROOT",
+										"SYS_MODULE",
+										"SYS_NICE",
 									},
 								},
 							},
@@ -127,7 +136,7 @@ func DeploymentForAnnouncer(ctx context.Context, m *yanetv1alpha1.Yanet, config 
 						"kubernetes.io/hostname": m.Spec.NodeName,
 					},
 					Tolerations: TolerationsForYanet(),
-					Volumes:     GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet", "/run/bird"}),
+					Volumes:     GetVolumes([]string{"/etc/yanet", "/run/yanet", "/run/bird"}),
 				},
 			},
 		},

@@ -43,16 +43,16 @@ func newControlInitContainers(m *yanetv1alpha1.Yanet) []v1.Container {
 			},
 			TerminationMessagePath:   "/dev/stdout",
 			TerminationMessagePolicy: "File",
-			SecurityContext: &v1.SecurityContext{
-				Privileged: &privileged,
-			},
 		},
 	}
 	return initContainers
 }
 
 // DeploymentForControlplane return dataplane Deployment object
-func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+func DeploymentForControlplane(
+	ctx context.Context, m *yanetv1alpha1.Yanet,
+	config yanetv1alpha1.YanetConfigSpec,
+	nodes v1.NodeList) *appsv1.Deployment {
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
@@ -113,13 +113,19 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 								"-c",
 								"/etc/yanet/controlplane.conf",
 							},
+							Resources: GetResources(
+								ctx,
+								m.Spec.NodeName,
+								perTypeOpts.Controlplane.Resources,
+								nodes,
+								false,
+							),
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.LifecycleHandler{
 									Exec: &v1.ExecAction{Command: poststart},
 								},
 							},
 							VolumeMounts: []v1.VolumeMount{
-								{Name: "dev-hugepages", MountPath: "/dev/hugepages"},
 								{Name: "etc-yanet", MountPath: "/etc/yanet"},
 								{Name: "run-yanet", MountPath: "/run/yanet"},
 								{Name: "run-bird", MountPath: "/run/bird"},
@@ -128,15 +134,14 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 							TerminationMessagePath:   "/dev/stdout",
 							TerminationMessagePolicy: "File",
 							SecurityContext: &v1.SecurityContext{
-								Privileged: &privileged,
+								Privileged: &perTypeOpts.Controlplane.Privileged,
 								Capabilities: &v1.Capabilities{
 									Add: []v1.Capability{
 										"NET_ADMIN",
-										"NET_RAW",
+										"NET_BIND_SERVICE",
 										"IPC_LOCK",
-										"SYS_ADMIN",
-										"SYS_RAWIO",
-										"SYS_CHROOT",
+										"SYS_MODULE",
+										"SYS_NICE",
 									},
 								},
 							},
@@ -146,7 +151,7 @@ func DeploymentForControlplane(ctx context.Context, m *yanetv1alpha1.Yanet, conf
 						"kubernetes.io/hostname": m.Spec.NodeName,
 					},
 					Tolerations: TolerationsForYanet(),
-					Volumes:     GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet", "/run/bird", "/var/spool/yanet-agent"}),
+					Volumes:     GetVolumes([]string{"/etc/yanet", "/run/yanet", "/run/bird", "/var/spool/yanet-agent"}),
 				},
 			},
 		},

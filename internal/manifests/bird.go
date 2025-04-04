@@ -42,16 +42,17 @@ func newBirdInitContainers(m *yanetv1alpha1.Yanet) []v1.Container {
 			},
 			TerminationMessagePath:   "/dev/stdout",
 			TerminationMessagePolicy: "File",
-			SecurityContext: &v1.SecurityContext{
-				Privileged: &privileged,
-			},
 		},
 	}
 	return initContainers
 }
 
 // DeploymentForBird return bird Deployment object
-func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) *appsv1.Deployment {
+func DeploymentForBird(
+	ctx context.Context,
+	m *yanetv1alpha1.Yanet,
+	config yanetv1alpha1.YanetConfigSpec,
+	nodes v1.NodeList) *appsv1.Deployment {
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
@@ -108,6 +109,13 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 							Name:            "bird",
 							Command:         []string{"/usr/sbin/bird"},
 							Args:            []string{"-f"},
+							Resources: GetResources(
+								ctx,
+								m.Spec.NodeName,
+								perTypeOpts.Bird.Resources,
+								nodes,
+								false,
+							),
 							Lifecycle: &v1.Lifecycle{
 								PostStart: &v1.LifecycleHandler{
 									Exec: &v1.ExecAction{Command: poststart},
@@ -121,15 +129,14 @@ func DeploymentForBird(ctx context.Context, m *yanetv1alpha1.Yanet, config yanet
 							TerminationMessagePath:   "/dev/stdout",
 							TerminationMessagePolicy: "File",
 							SecurityContext: &v1.SecurityContext{
-								Privileged: &privileged,
+								Privileged: &perTypeOpts.Bird.Privileged,
 								Capabilities: &v1.Capabilities{
 									Add: []v1.Capability{
 										"NET_ADMIN",
-										"NET_RAW",
+										"NET_BIND_SERVICE",
 										"IPC_LOCK",
-										"SYS_ADMIN",
-										"SYS_RAWIO",
-										"SYS_CHROOT",
+										"SYS_MODULE",
+										"SYS_NICE",
 									},
 								},
 							},
