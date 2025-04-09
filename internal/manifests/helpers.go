@@ -2,6 +2,7 @@ package manifests
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"golang.org/x/exp/slices"
@@ -11,6 +12,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	kuberv1 "k8s.io/kubernetes/pkg/apis/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // GetVolumes generate Volumes for deployment
@@ -121,6 +123,10 @@ func GetResources(
 	nodes v1.NodeList,
 	enableHugepages bool) v1.ResourceRequirements {
 
+	log := log.FromContext(ctx)
+
+	res := resources.DeepCopy()
+
 	if !enableHugepages {
 		return resources
 	}
@@ -135,19 +141,24 @@ func GetResources(
 			if huge, ok := node.Status.Capacity["hugepages-1Gi"]; ok {
 				hugepages = huge
 			}
+			log.Info(fmt.Sprintf(
+				"Get %s hugepages capacity from node %s and use it for limits",
+				hugepages.String(),
+				node.Name),
+			)
 			break
 		}
 	}
 
-	if resources.Limits == nil {
-		resources.Limits = v1.ResourceList{}
+	if res.Limits == nil {
+		res.Limits = v1.ResourceList{}
 	}
-	if _, ok := resources.Limits["memory"]; !ok {
-		resources.Limits["memory"] = memory
+	if _, ok := res.Limits["memory"]; !ok {
+		res.Limits["memory"] = memory
 	}
-	if _, ok := resources.Limits["hugepages-1Gi"]; !ok {
-		resources.Limits["hugepages-1Gi"] = hugepages
+	if _, ok := res.Limits["hugepages-1Gi"]; !ok {
+		res.Limits["hugepages-1Gi"] = hugepages
 	}
 
-	return resources
+	return *res
 }
