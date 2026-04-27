@@ -1,5 +1,5 @@
 /*
-Copyright 2023 YANDEX LLC.
+Copyright 2023-2026 YANDEX LLC.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -40,7 +39,6 @@ type YanetReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	GlobalConfig   *yanetv1alpha1.MutexYanetConfigSpec
-	Log            logr.Logger
 	lock           sync.Mutex
 	lastUpdateTS   time.Time
 	lastUpdateHost string
@@ -66,15 +64,16 @@ type YanetReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.14.1/pkg/reconcile
 func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	r.Log = log.FromContext(ctx)
-	r.Log.Info(fmt.Sprintf("Reconcile loop called for NamespacedName: %s", req.NamespacedName))
+	logger := log.FromContext(ctx)
+	logger.Info(fmt.Sprintf("Reconcile loop called for NamespacedName: %s", req.NamespacedName))
 
+	// Deep copy config under lock to avoid data race on nested slices/maps.
 	r.GlobalConfig.Lock.Lock()
-	config := r.GlobalConfig.Config
+	config := *r.GlobalConfig.Config.DeepCopy()
 	r.GlobalConfig.Lock.Unlock()
 
 	if config.Stop {
-		r.Log.Info("Reconcile loop detected global stop options, do nothing!")
+		logger.Info("Reconcile loop detected global stop options, do nothing!")
 		return ctrl.Result{}, nil
 	}
 
@@ -83,11 +82,11 @@ func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			// Error reading the object - requeue the request.
-			r.Log.Error(err, "Error while getting Yanet object")
+			logger.Error(err, "Error while getting Yanet object")
 			return ctrl.Result{}, err
 		}
 	} else {
-		r.Log.Info(fmt.Sprintf("Reconcile: successfully found Yanet object for NamespacedName: %s", req.NamespacedName))
+		logger.Info(fmt.Sprintf("Reconcile: successfully found Yanet object for NamespacedName: %s", req.NamespacedName))
 		return r.reconcilerYanet(ctx, yanet, config)
 	}
 
@@ -97,17 +96,17 @@ func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	err = r.Client.Get(ctx, req.NamespacedName, node)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			r.Log.Info(fmt.Sprintf(
+			logger.Info(fmt.Sprintf(
 				`Reconcile: Node resource not found in cluster for NamespacedName: %s.
 				Ignoring since object must be deleted`,
 				req.NamespacedName,
 			))
 		} else {
-			r.Log.Error(err, "Failed to get Node object")
+			logger.Error(err, "Failed to get Node object")
 			return ctrl.Result{}, err
 		}
 	} else {
-		r.Log.Info(fmt.Sprintf("Reconcile: successfully found Node object for NamespacedName: %s", req.NamespacedName))
+		logger.Info(fmt.Sprintf("Reconcile: successfully found Node object for NamespacedName: %s", req.NamespacedName))
 		if config.AutoDiscovery.Enable {
 			return r.reconcilerNode(ctx, &config, node)
 		}

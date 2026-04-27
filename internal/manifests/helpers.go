@@ -3,15 +3,13 @@ package manifests
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
-	"golang.org/x/exp/slices"
-
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
-	"golang.org/x/exp/maps"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	kuberv1 "k8s.io/kubernetes/pkg/apis/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -21,7 +19,6 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 	Volumes := []v1.Volume{}
 	hostPathDirectoryOrCreate := v1.HostPathDirectoryOrCreate
 	for _, path := range HostpathOrCreate {
-		name := strings.Split(path, "/")
 		if strings.Contains(path, "hugepages") {
 			Volumes = append(Volumes, v1.Volume{
 				Name: "hugepage",
@@ -32,8 +29,15 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 				},
 			})
 		} else {
+			segments := strings.Split(path, "/")
+			var volumeName string
+			if len(segments) >= 2 {
+				volumeName = segments[len(segments)-2] + "-" + segments[len(segments)-1]
+			} else {
+				volumeName = segments[0]
+			}
 			Volumes = append(Volumes, v1.Volume{
-				Name: name[len(name)-2] + "-" + name[len(name)-1],
+				Name: volumeName,
 				VolumeSource: v1.VolumeSource{
 					HostPath: &v1.HostPathVolumeSource{
 						Path: path,
@@ -47,9 +51,23 @@ func GetVolumes(HostpathOrCreate []string) []v1.Volume {
 }
 
 func normalizeContainer(c v1.Container) v1.Container {
-	// TODO: k8s.io/kubernetes/pkg/apis/core/v1@v1.26.1 is used for compatibility reasons
-	// Upgrade with go itself after https://github.com/kubernetes-sigs/controller-tools/issues/880 is resolved
-	kuberv1.SetDefaults_Container(&c)
+	// Inline defaults that Kubernetes API server would set on a Container,
+	// so that our expected spec matches what the API returns for diff comparison.
+	if c.TerminationMessagePath == "" {
+		c.TerminationMessagePath = "/dev/termination-log"
+	}
+	if c.TerminationMessagePolicy == "" {
+		c.TerminationMessagePolicy = v1.TerminationMessageReadFile
+	}
+	if c.ImagePullPolicy == "" {
+		// Mimic Kubernetes defaulting: if tag is ":latest" or absent → Always, else IfNotPresent
+		c.ImagePullPolicy = v1.PullIfNotPresent
+	}
+	for i := range c.Ports {
+		if c.Ports[i].Protocol == "" {
+			c.Ports[i].Protocol = v1.ProtocolTCP
+		}
+	}
 	return c
 }
 
