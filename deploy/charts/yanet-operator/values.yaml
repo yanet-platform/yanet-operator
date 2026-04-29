@@ -1,9 +1,9 @@
 replicaCount: 2
 
 image:
-  repository: yanet-platform/yanet-operator
+  repository: yanetplatform/yanet-operator
   pullPolicy: IfNotPresent
-  tag: "latest"
+  # tag: ""  # If not set, defaults to .Chart.AppVersion from Chart.yaml
 
 imagePullSecrets: []
 nameOverride: ""
@@ -32,6 +32,40 @@ tolerations: []
 nodeSelector: {}
 
 affinity: {}
+
+# Webhook configuration
+webhook:
+  enabled: true
+  port: 9443
+  certManager:
+    enabled: false
+  # Certificate generation using kube-webhook-certgen
+  certGen:
+    image:
+      repository: registry.k8s.io/ingress-nginx/kube-webhook-certgen
+      tag: v1.5.2
+      pullPolicy: IfNotPresent
+
+# Metrics configuration
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    release: kube-prometheus-stack
+
+# Grafana dashboards configuration
+grafana:
+  dashboards:
+    enabled: true
+    # Namespace where the dashboard ConfigMap will be created
+    namespace: kube-mon
+    # Labels to add to the ConfigMap
+    # These labels are used by Grafana sidecar to discover dashboards
+    labels:
+      grafana_dashboard: "1"
+    # Annotations to add to the ConfigMap
+    annotations: {}
 
 yanetconfig:
   spec:

@@ -1,6 +1,12 @@
 apiVersion: v2
 name: yanet-operator
-description: A Helm chart for Kubernetes
+description: A Helm chart for yanet-operator - Kubernetes operator for YANET deployments
 type: application
-version: 0.1.2
-appVersion: "0.15"
+# Version is set manually and used for Helm chart versioning
+version: 0.1.6
+# appVersion is automatically synced with version during CI/CD build
+# It determines the Docker image tag: yanetplatform/yanet-operator:<appVersion>
+appVersion: "0.0.0-dev"
+maintainers:
+  - name: yanet-platform
+    url: https://github.com/yanet-platform

@@ -8,7 +8,6 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -46,100 +45,88 @@ func DeploymentForAnnouncer(
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
-		log.Info(fmt.Sprintf("typeOpts is not specified for %s", m.Spec.Type))
+		log.Info("typeOpts is not specified", "type", m.Spec.Type)
 	}
-	// Filling in all init containers
+
+	// Build init containers (wait-bird + additional)
 	initContainers := newAnnouncerInitContainers()
 	additionalInitContainers := GetAdditionalInitContainers(
-		config.AdditionalOpts.InitContainers, // all available initContainers in yanetConfig spec
-		perTypeOpts.Announcer.InitContainers, // initContainers enabled for specific type in global config
+		config.AdditionalOpts.InitContainers,
+		perTypeOpts.Announcer.InitContainers,
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
 
+	// Prepare poststart hook
 	poststart := GetPostStartExec(config.AdditionalOpts.PostStart, perTypeOpts.Announcer.PostStart)
 
-	// Creating deployment based on previously created structures
+	// Determine image and tag
+	image := m.Spec.Announcer.Image
+	tag := m.Spec.Tag
+	if m.Spec.Announcer.Tag != "" {
+		tag = m.Spec.Announcer.Tag
+	}
+
+	// Calculate replicas
 	replicas := int32(0)
 	if m.Spec.Announcer.Enable {
 		replicas = 1
 	}
-	depName := fmt.Sprintf("announcer-%s", m.Spec.NodeName)
-	image := fmt.Sprintf("%s:%s", m.Spec.Announcer.Image, m.Spec.Tag)
-	if m.Spec.Announcer.Tag != "" {
-		image = fmt.Sprintf("%s:%s", m.Spec.Announcer.Image, m.Spec.Announcer.Tag)
-	}
-	if m.Spec.Registry != "" {
-		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
-	}
-	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      depName,
-			Namespace: m.Namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: LabelsForYanet(nil, m, "announcer"),
-			},
-			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        depName,
-					Annotations: AnnotationsForYanet(config.AdditionalOpts.Annotations, perTypeOpts.Announcer.Annotations),
-					Labels:      LabelsForYanet(nil, m, "announcer"),
-				},
-				Spec: v1.PodSpec{
-					HostNetwork:    true,
-					HostIPC:        perTypeOpts.Announcer.HostIpc,
-					InitContainers: initContainers,
-					Containers: []v1.Container{
-						{
-							Image:           image,
-							ImagePullPolicy: v1.PullIfNotPresent,
-							Name:            "announcer",
-							Command:         []string{"/usr/bin/yanet-announcer"},
-							Args:            []string{"--run"},
-							Resources: GetResources(
-								ctx,
-								m.Spec.NodeName,
-								perTypeOpts.Announcer.Resources,
-								nodes,
-								false,
-							),
-							Lifecycle: &v1.Lifecycle{
-								PostStart: &v1.LifecycleHandler{
-									Exec: &v1.ExecAction{Command: poststart},
-								},
-							},
-							VolumeMounts: []v1.VolumeMount{
-								{Name: "etc-yanet", MountPath: "/etc/yanet"},
-								{Name: "run-yanet", MountPath: "/run/yanet"},
-								{Name: "run-bird", MountPath: "/run/bird"},
-							},
-							TerminationMessagePath:   "/dev/stdout",
-							TerminationMessagePolicy: "File",
-							SecurityContext: &v1.SecurityContext{
-								Privileged: &perTypeOpts.Announcer.Privileged,
-								Capabilities: &v1.Capabilities{
-									Add: []v1.Capability{
-										"NET_ADMIN",
-										"NET_BIND_SERVICE",
-										"IPC_LOCK",
-										"SYS_MODULE",
-										"SYS_NICE",
-									},
-								},
-							},
-						},
-					},
-					NodeSelector: map[string]string{
-						"kubernetes.io/hostname": m.Spec.NodeName,
-					},
-					Tolerations: TolerationsForYanet(),
-					Volumes:     GetVolumes([]string{"/etc/yanet", "/run/yanet", "/run/bird"}),
-				},
+
+	// Build security context
+	privileged := perTypeOpts.Announcer.Privileged
+	securityCtx := &v1.SecurityContext{
+		Privileged: &privileged,
+		Capabilities: &v1.Capabilities{
+			Add: []v1.Capability{
+				"NET_ADMIN",
+				"NET_BIND_SERVICE",
+				"IPC_LOCK",
+				"SYS_MODULE",
+				"SYS_NICE",
 			},
 		},
 	}
-	return dep
+
+	// Build deployment using builder pattern
+	return NewDeploymentBuilder().
+		WithYanet(m).
+		WithName(fmt.Sprintf("announcer-%s", m.Spec.NodeName)).
+		WithComponentName("announcer").
+		WithReplicas(replicas).
+		WithImage(m.Spec.Registry, image, tag).
+		WithHostNetwork(true).
+		WithHostIPC(perTypeOpts.Announcer.HostIpc).
+		WithAnnotations(AnnotationsForYanet(
+			config.AdditionalOpts.Annotations,
+			perTypeOpts.Announcer.Annotations,
+		)).
+		WithNodeSelector(map[string]string{
+			"kubernetes.io/hostname": m.Spec.NodeName,
+		}).
+		WithTolerations(TolerationsForYanet()).
+		WithContainer("announcer",
+			[]string{"/usr/bin/yanet-announcer"},
+			[]string{"--run"},
+		).
+		WithVolumeMounts([]v1.VolumeMount{
+			{Name: "etc-yanet", MountPath: "/etc/yanet"},
+			{Name: "run-yanet", MountPath: "/run/yanet"},
+			{Name: "run-bird", MountPath: "/run/bird"},
+		}).
+		WithResources(GetResources(
+			ctx,
+			m.Spec.NodeName,
+			perTypeOpts.Announcer.Resources,
+			nodes,
+			false,
+		)).
+		WithSecurityContext(securityCtx).
+		WithLifecycle(&v1.Lifecycle{
+			PostStart: &v1.LifecycleHandler{
+				Exec: &v1.ExecAction{Command: poststart},
+			},
+		}).
+		WithInitContainers(initContainers).
+		WithVolumes(GetVolumes([]string{"/etc/yanet", "/run/yanet", "/run/bird"})).
+		Build()
 }

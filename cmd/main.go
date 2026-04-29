@@ -131,6 +131,7 @@ func main() {
 	if err = (&controller.YanetReconciler{
 		Client:       mgr.GetClient(),
 		Scheme:       mgr.GetScheme(),
+		Recorder:     mgr.GetEventRecorderFor("yanet-controller"), //nolint:staticcheck // SA1019: old API still works
 		GlobalConfig: &GlobalConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Yanet")
@@ -142,6 +143,15 @@ func main() {
 		GlobalConfig: &GlobalConfig,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "YanetConfig")
+		os.Exit(1)
+	}
+
+	if err = (&yanetv1alpha1.Yanet{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "Yanet")
+		os.Exit(1)
+	}
+	if err = (&yanetv1alpha1.YanetConfig{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "YanetConfig")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder

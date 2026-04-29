@@ -18,7 +18,7 @@ package controller
 
 import (
 	"context"
-	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,30 +50,36 @@ type YanetConfigReconciler struct {
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.15.0/pkg/reconcile
 func (r *YanetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	startTime := time.Now()
 	logger := log.FromContext(ctx)
-	logger.Info(fmt.Sprintf("Reconcile config loop called for NamespacedName: %s", req.NamespacedName))
+	logger.Info("Reconcile config loop called", "namespacedName", req.NamespacedName)
 
 	config := &yanetv1alpha1.YanetConfig{}
 	err := r.Client.Get(ctx, req.NamespacedName, config)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info(fmt.Sprintf(
-				`Reconcile config: YanetConfig resource not found in cluster for NamespacedName: %s.
-				Ignoring since object must be deleted`,
-				req.NamespacedName,
-			))
+			logger.Info("YanetConfig resource not found, ignoring since object must be deleted",
+				"namespacedName", req.NamespacedName)
+			yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "not_found").Inc()
 		} else {
 			logger.Error(err, "Failed to get YanetConfig object")
+			yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
 			return ctrl.Result{}, err
 		}
 	} else {
-		logger.Info(fmt.Sprintf("Reconcile config: successfully found YanetConfig object for NamespacedName: %s", req.NamespacedName))
-		logger.Info(fmt.Sprintf("Reconcile config: update GlobalConfig with new config: %+v", config))
+		logger.Info("Successfully found YanetConfig object", "namespacedName", req.NamespacedName)
+		logger.V(1).Info("Updating GlobalConfig with new config", "config", config.Spec)
 		// TODO: add config validator
 		r.GlobalConfig.Lock.Lock()
-		r.GlobalConfig.Config = config.Spec
+		r.GlobalConfig.Config = *config.Spec.DeepCopy()
 		r.GlobalConfig.Lock.Unlock()
+
+		yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "success").Inc()
 	}
+
+	// Record reconciliation duration
+	duration := time.Since(startTime).Seconds()
+	yanetConfigReconcileDuration.WithLabelValues(req.Name, req.Namespace).Observe(duration)
 
 	return ctrl.Result{}, nil
 }

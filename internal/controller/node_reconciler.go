@@ -39,12 +39,12 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 	logger := log.FromContext(ctx)
 	for label := range node.Labels {
 		if label == "node-role.kubernetes.io/control-plane" {
-			logger.Info(fmt.Sprintf("AutoDiscovery: found new Node with name: %s but it is controlplane, skip it.", node.Name))
+			logger.Info("AutoDiscovery: found control-plane node, skipping", "node", node.Name)
 			return ctrl.Result{}, nil
 		}
 	}
-	logger.Info(fmt.Sprintf("AutoDiscovery: found new Node with name: %s", node.Name))
-	logger.Info(fmt.Sprintf("AutoDiscovery: try find existing Yanet object for Node: %s", node.Name))
+	logger.Info("AutoDiscovery: found new worker node", "node", node.Name)
+	logger.Info("AutoDiscovery: looking for existing Yanet object", "node", node.Name)
 
 	yanet := &yanetv1alpha1.Yanet{}
 	u := &unstructured.UnstructuredList{}
@@ -71,23 +71,20 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 		err = r.Client.Get(ctx, nn, yanet)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				logger.Info(fmt.Sprintf(
-					`AutoDiscovery: Yanet resource not found in cluster for NamespacedName: %s.
-					Ignoring since object must be deleted`,
-					nn,
-				))
+				logger.Info("AutoDiscovery: Yanet resource not found, ignoring since object must be deleted",
+					"namespacedName", nn)
 			} else {
 				logger.Error(err, fmt.Sprintf("AutoDiscovery: failed to get Yanet object with NamespacedName: %s.", nn))
 				return ctrl.Result{}, err
 			}
 		}
 		if yanet.Spec.NodeName == node.Name {
-			logger.Info(fmt.Sprintf("AutoDiscovery: Yanet object for NamespacedName: %s already exist.", nn))
+			logger.Info("AutoDiscovery: Yanet object already exists", "namespacedName", nn, "node", node.Name)
 			return ctrl.Result{}, nil
 		}
 	}
 
-	logger.Info(fmt.Sprintf("AutoDiscovery: try to create Yanet object for Node: %s", node.Name))
+	logger.Info("AutoDiscovery: creating new Yanet object", "node", node.Name)
 	dataplane := &yanetv1alpha1.Dep{
 		Image: config.AutoDiscovery.Images.Dataplane,
 	}
@@ -103,12 +100,12 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 
 	version, err := helpers.HttpGet(fmt.Sprintf("%s/%s", config.AutoDiscovery.ConfigsUri, node.Name))
 	if err != nil {
-		logger.Error(err, fmt.Sprintf("AutoDiscovery: can not get version for Node: %s, use latest", node.Name))
+		logger.Error(err, "AutoDiscovery: cannot get version, using latest", "node", node.Name)
 		version = "latest"
 	}
 	t, err := helpers.HttpGet(fmt.Sprintf("%s/%s", config.AutoDiscovery.TypeUri, node.Name))
 	if err != nil {
-		logger.Error(err, fmt.Sprintf("AutoDiscovery: can not get type for Node: %s, use release", node.Name))
+		logger.Error(err, "AutoDiscovery: cannot get type, using release", "node", node.Name)
 		t = "release"
 	}
 	newyanet := &yanetv1alpha1.Yanet{
@@ -127,10 +124,10 @@ func (r *YanetReconciler) reconcilerNode(ctx context.Context, config *yanetv1alp
 			Bird:         *bird,
 		},
 	}
-	logger.Info(fmt.Sprintf("AutoDiscovery: create new Yanet object for Node: %s", node.Name))
+	logger.Info("AutoDiscovery: creating new Yanet object", "node", node.Name, "version", version, "type", t)
 	err = r.Client.Create(ctx, newyanet)
 	if err != nil {
-		logger.Error(err, fmt.Sprintf("AutoDiscovery: can not create new Yanet object for Node: %s", node.Name))
+		logger.Error(err, "AutoDiscovery: failed to create new Yanet object", "node", node.Name)
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil

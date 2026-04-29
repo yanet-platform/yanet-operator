@@ -39,9 +39,9 @@ type YanetConfigSpec struct {
 	Stop bool `json:"stop,omitempty"`
 	// (Optional) AutoDiscovery configure new worker node initializer.
 	AutoDiscovery AutoDiscovery `json:"autodiscovery,omitempty"`
-	// (Optional) Period in seconds between yanet resources reconcilation on different nodes.
-	// When the value is non-zero, the operator expects number of seconds between end of resource reconcilation on one node
-	// and resource reconcilation start on another node.
+	// (Optional) Period in seconds between yanet resources reconciliation on different nodes.
+	// When the value is non-zero, the operator expects number of seconds between end of resource reconciliation on one node
+	// and resource reconciliation start on another node.
 	// Default: 0
 	// +kubebuilder:default=0
 	UpdateWindow int `json:"updatewindow,omitempty"`
