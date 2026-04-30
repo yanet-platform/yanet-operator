@@ -1,0 +1,33 @@
+# v1alpha1 YanetConfig — must be ACCEPTED.
+# Based on deploy/examples/yanetconfig.yaml, trimmed to what the v1 webhook checks
+# (updatewindow >= 0, optional autodiscovery sanity).
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+  namespace: yanet
+spec:
+  autodiscovery:
+    enable: false
+    namespace: yanet
+    registry: dockerhub.io
+  stop: false
+  updatewindow: 10
+  enabledopts:
+    release:
+      dataplane:
+        annotations: [checkpointer]
+      controlplane:
+        annotations: [telegraf, checkpointer]
+      bird:
+        annotations: [checkpointer]
+      announcer:
+        annotations: [checkpointer]
+  additionalopts:
+    annotations:
+      - name: telegraf
+        annotations:
+          telegraf.influxdata.com/ports: "8080"
+      - name: checkpointer
+        annotations:
+          checkpointer.ydb.tech/checkpoint: "true"

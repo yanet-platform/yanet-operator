@@ -77,8 +77,8 @@ func TestHttpGet_ErrorStatus(t *testing.T) {
 				t.Fatal("expected error, got nil")
 			}
 
-			if !strings.Contains(err.Error(), "HTTP") {
-				t.Errorf("error should contain 'HTTP', got: %v", err)
+			if !strings.Contains(err.Error(), "http") {
+				t.Errorf("error should contain 'http', got: %v", err)
 			}
 		})
 	}

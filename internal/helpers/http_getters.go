@@ -28,7 +28,7 @@ func HttpGet(uri string) (string, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, uri, string(body))
+		return "", fmt.Errorf("http %d from %s: %s", resp.StatusCode, uri, string(body))
 	}
 
 	return string(body), nil

@@ -16,4 +16,6 @@ metadata:
 data:
   yanet-operator.json: |-
 {{ .Files.Get "dashboards/yanet-operator.json" | indent 4 }}
+  yanet-operator-v2.json: |-
+{{ .Files.Get "dashboards/yanet-operator-v2.json" | indent 4 }}
 {{- end }}

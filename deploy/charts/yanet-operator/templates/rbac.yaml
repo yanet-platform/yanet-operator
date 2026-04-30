@@ -10,6 +10,9 @@ metadata:
     app.kubernetes.io/part-of: yanet-operator
   name: controller-manager
   namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -23,6 +26,9 @@ metadata:
     app.kubernetes.io/part-of: yanet-operator
   name: leader-election-role
   namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
 rules:
 - apiGroups:
   - ""
@@ -69,6 +75,9 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: manager-role
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
 rules:
 - apiGroups:
   - admissionregistration.k8s.io
@@ -93,9 +102,21 @@ rules:
   - update
   - watch
 - apiGroups:
-  - coordination.k8s.io
+  - ""
   resources:
-  - configmap
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
   verbs:
   - create
   - delete
@@ -123,6 +144,14 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
 - apiGroups:
   - ""
   resources:
@@ -191,6 +220,59 @@ rules:
   - get
   - patch
   - update
+# v2alpha1 (independent CRDs: yanetsv2 / yanetconfigsv2)
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigsv2
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigsv2/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetconfigsv2/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetsv2
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetsv2/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - yanet.yanet-platform.io
+  resources:
+  - yanetsv2/status
+  verbs:
+  - get
+  - patch
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -245,6 +327,9 @@ metadata:
     app.kubernetes.io/name: rolebinding
     app.kubernetes.io/part-of: yanet-operator
   name: leader-election-rolebinding
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -265,6 +350,9 @@ metadata:
     app.kubernetes.io/name: clusterrolebinding
     app.kubernetes.io/part-of: yanet-operator
   name: manager-rolebinding
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -285,6 +373,9 @@ metadata:
     app.kubernetes.io/name: clusterrolebinding
     app.kubernetes.io/part-of: yanet-operator
   name: proxy-rolebinding
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-1"
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

@@ -1,0 +1,56 @@
+# v2alpha1 YanetConfig — must be ACCEPTED.
+# Trimmed version of deploy/examples/v2alpha1-yanetconfig-full.yaml: two patches,
+# one boxType (release) referencing them, all five hardcoded components present.
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetConfigV2
+metadata:
+  name: config-v2
+  namespace: yanet
+spec:
+  stop: false
+  updateWindow: 60
+  images:
+    registry: docker.io/test
+  components:
+    controlplane:
+      image: {name: controlplane, tag: test}
+      port: 8080
+      portRange: 1
+    dataplane:
+      image: {name: dataplane, tag: test}
+      port: 8090
+    bird:
+      image: {name: bird, tag: test}
+      port: 179
+    birdAdapter:
+      image: {name: bird-adapter, tag: test}
+      port: 50052
+    announcer:
+      image: {name: announcer, tag: test}
+      port: 9090
+  patches:
+    - name: telegraf
+      patch:
+        spec:
+          template:
+            metadata:
+              annotations:
+                telegraf.influxdata.com/ports: "8080"
+    - name: checkpointer
+      patch:
+        spec:
+          template:
+            metadata:
+              annotations:
+                checkpointer.ydb.tech/checkpoint: "true"
+  boxTypes:
+    - name: release
+      components:
+        controlplane:
+          patches: [telegraf, checkpointer]
+        dataplane:
+          patches: [telegraf, checkpointer]
+        bird:
+          patches: [checkpointer]
+        announcer:
+          patches: [checkpointer]

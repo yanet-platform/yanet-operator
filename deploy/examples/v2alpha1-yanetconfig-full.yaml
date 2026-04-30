@@ -1,0 +1,302 @@
+# Full YanetConfig v2alpha1 example (final model).
+# Demonstrates all three layers:
+#   1. spec.components — palette of components (5 hardcoded + dynamic operators[])
+#   2. spec.patches    — named registry of strategic-merge Deployment patch fragments
+#   3. spec.boxTypes   — box presets: which components are enabled and which patches to apply
+#
+# See also: yanet-operator/YANET2_MIGRATION_PLAN/17-final-model.md
+---
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetConfigV2
+metadata:
+  name: cluster-defaults
+  namespace: yanet
+spec:
+  # ============================================================
+  # Global kill switch + node-restart throttling (same as v1).
+  # ============================================================
+  stop: false           # true → reconcile loop does nothing (cluster-wide kill switch)
+  updateWindow: 60      # seconds: GLOBAL throttling between node restarts across the WHOLE cluster
+                        # (protects against mass simultaneous restarts of network boxes)
+
+  # Global image settings.
+  images:
+    registry: cr.yandex/yanet
+    # pullPolicy defaults to IfNotPresent when omitted.
+    # Set to Always for :latest tags or during active development.
+    pullPolicy: IfNotPresent
+    pullSecrets:
+      - name: cr-secret
+
+  # ============================================================
+  # 1) COMPONENTS — component palette
+  # ============================================================
+  components:
+    # --- Hardcoded components (5 fixed names) ---
+    controlplane:
+      image: {name: controlplane, tag: v2.1.0}
+      port: 8080            # round-robin Service listens on this port over all CP instances
+      portRange: 4          # when numa>1, each CP instance listens on port+i (8080..8083)
+      config:
+        # hostPath is the HOST directory mounted into the container at /etc/yanet2.
+        # fileName tells the binary which file to open: --config=/etc/yanet2/controlplane.conf.
+        hostPath: /etc/yanet2
+        fileName: controlplane.conf
+      numa: 1               # default; for multi-NUMA — 2/4
+
+    dataplane:
+      image: {name: dataplane, tag: v2.1.0}
+      port: 8090            # outside cp range 8080..8083
+      hugepages:
+        size: 1Gi
+        count: 8
+      hostNetwork: true     # default for DPDK
+      config:
+        hostPath: /etc/yanet2
+        fileName: dataplane.yaml
+
+    bird:
+      image: {name: bird, tag: "2.15"}
+      port: 179             # BGP
+      config:
+        # hostPath is the HOST directory mounted into the container at /etc/bird.
+        # Bird reads its config from /etc/bird/bird.conf (or /etc/bird/bird6.conf) inside the Pod.
+        hostPath: /etc/bird
+
+    # NOTE: birdAdapter is a SEPARATE Deployment (not a sidecar to bird),
+    # so the adapter can be updated without restarting bird.
+    # bird ↔ birdAdapter communicate via a shared hostPath (e.g. /run/bird/bird.sock).
+    # Process: /usr/bin/yanet-bird-adapter server -c /etc/yanet2/bird-adapter.yaml
+    birdAdapter:
+      image: {name: bird-adapter, tag: v0.3}
+      port: 50052           # gRPC listen_addr port
+      config:
+        # Inline config rendered to a ConfigMap and mounted at /etc/yanet2/bird-adapter.yaml.
+        # gateway_endpoint targets the round-robin controlplane Service (cp.port = 8080).
+        inline: |
+          # YANET BIRD Adapter Configuration
+
+          # Logging configuration
+          logging:
+            # Log level: debug, info, warn, error
+            level: debug
+
+          # gRPC endpoint to listen on for adapter service (all interfaces)
+          listen_addr: "0.0.0.0:50052"
+
+          # gRPC endpoint of the RouteService gateway for RIB updates
+          # Resolves to the round-robin controlplane Service (cp.port = 8080).
+          gateway_endpoint: "route-operator:9001"
+
+    announcer:
+      image: {name: announcer, tag: v0.2}
+      port: 9090
+      config:
+        hostPath: /etc/yanet2
+        fileName: announcer.yaml
+
+    # --- Dynamic operators (array, no hardcoded names) ---
+    operators:
+      - name: antiddos
+        containers:
+          - name: operator
+            image: {name: antiddos-operator, tag: v0.5}
+          - name: agent
+            image: {name: antiddos-agent, tag: v0.5}
+            hostIPC: true
+      - name: route
+        port: 9001
+        containers:
+          - name: route
+            image: {name: route-operator, tag: v0.4}
+
+  # ============================================================
+  # 2) PATCHES — named registry of strategic merge patches.
+  #    Each patch is a fragment of appsv1.Deployment (RawExtension).
+  # ============================================================
+  patches:
+    # --- Universal (applied almost everywhere) ---
+    - name: tolerations
+      patch:
+        spec:
+          template:
+            spec:
+              tolerations:
+                - effect: NoSchedule
+                  key: CriticalAddonsOnly
+                - effect: NoSchedule
+                  operator: Exists
+                - effect: NoExecute
+                  operator: Exists
+
+    - name: telegraf
+      patch:
+        spec:
+          template:
+            metadata:
+              annotations:
+                telegraf.influxdata.com/ports: "8080"
+
+    - name: checkpointer
+      patch:
+        spec:
+          template:
+            metadata:
+              annotations:
+                checkpointer.ydb.tech/checkpoint: "true"
+                checkpointer.ydb.tech/manual-recovery: "true"
+
+    # --- controlplane ---
+    - name: cp-reloader-poststart
+      patch:
+        spec:
+          template:
+            spec:
+              hostIPC: true
+              containers:
+                - name: controlplane
+                  lifecycle:
+                    postStart:
+                      exec:
+                        command:
+                          - /bin/sh
+                          - -c
+                          - |
+                            sleep 60
+                            mountpoint -q /etc/yanet/controlplane.conf
+                            mount -o ro,bind /etc/yanet/controlplane.slb.conf /etc/yanet/controlplane.conf
+                            yanet-cli reload 2>&1 >> /reloader.log
+
+    - name: cp-resources-release
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  resources:
+                    requests: {cpu: "1",  memory: 16Gi}
+                    limits:   {cpu: "6",  memory: 128Gi}
+
+    - name: cp-resources-balancer
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  resources:
+                    requests: {cpu: "1",  memory: 32Gi}
+                    limits:   {cpu: "6",  memory: 128Gi}
+
+    # --- dataplane ---
+    - name: dp-privileged
+      patch:
+        spec:
+          template:
+            spec:
+              hostIPC: true
+              containers:
+                - name: dataplane
+                  securityContext:
+                    privileged: true
+                  resources:
+                    limits: {memory: 32Gi}
+
+    - name: firewall-max-memory
+      # Pinpoint override for boxType=firewall.
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: dataplane
+                  resources:
+                    limits: {memory: 64Gi}
+
+    # --- bird / announcer ---
+    - name: bird-resources
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: bird
+                  resources:
+                    requests: {cpu: 100m, memory: 4Gi}
+                    limits:   {cpu: "6", memory: 64Gi}
+
+    - name: announcer-resources
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: announcer
+                  resources:
+                    requests: {cpu: 100m, memory: 4Gi}
+                    limits:   {cpu: "4", memory: 32Gi}
+
+    # --- generic netconfig initContainer example ---
+    - name: netconfig-init
+      patch:
+        spec:
+          template:
+            spec:
+              initContainers:
+                - name: netconfig
+                  image: ubuntu:22.04
+                  command:
+                    - /bin/sh
+                    - -c
+                    - |
+                      apt-get install -y jq iproute2
+                      until ip addr | grep kni[0-9]; do sleep 2; done
+                      # ... read controlplane.conf and configure interfaces
+
+  # ============================================================
+  # 3) BOX TYPES — box presets.
+  #    Per enabled component — list of patch names.
+  #    Patches are applied in declared order.
+  #    If a section is absent — the component is DISABLED for this boxType.
+  # ============================================================
+  boxTypes:
+    # ---- release: cp + dp + bird + announcer (standard)
+    - name: release
+      components:
+        controlplane:
+          patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-release]
+        dataplane:
+          patches: [tolerations, telegraf, checkpointer, dp-privileged]
+        bird:
+          patches: [tolerations, telegraf, checkpointer, bird-resources]
+        announcer:
+          patches: [tolerations, telegraf, checkpointer, announcer-resources]
+      # operators: {}   # not enabled
+
+    # ---- balancer: cp + dp + bird + birdAdapter (no announcer)
+    - name: balancer
+      components:
+        controlplane:
+          patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
+        dataplane:
+          patches: [tolerations, telegraf, checkpointer, dp-privileged]
+        bird:
+          patches: [tolerations, telegraf, checkpointer, bird-resources]
+        birdAdapter:
+          patches: [tolerations, telegraf, checkpointer]
+
+    # ---- firewall: cp + dp (max memory) + bird + birdAdapter + antiddos
+    - name: firewall
+      components:
+        controlplane:
+          patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
+        dataplane:
+          patches: [tolerations, telegraf, checkpointer, dp-privileged, firewall-max-memory]
+        bird:
+          patches: [tolerations, telegraf, checkpointer, bird-resources]
+        birdAdapter:
+          patches: [tolerations, telegraf, checkpointer]
+      operators:
+        antiddos:
+          patches: [tolerations, telegraf]

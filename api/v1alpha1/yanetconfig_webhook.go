@@ -31,6 +31,7 @@ var yanetconfiglog = logf.Log.WithName("yanetconfig-webhook")
 // SetupWebhookWithManager will setup the manager to manage the webhooks
 func (r *YanetConfig) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, r).
+		WithValidator(r).
 		Complete()
 }
 

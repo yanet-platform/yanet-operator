@@ -79,6 +79,15 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 helm-crds: manifests kustomize ## Build CRDs for Helm chart.
 	$(KUSTOMIZE) build config/crd > deploy/charts/yanet-operator/crds/yanet.yaml
 
+.PHONY: helm-deps
+helm-deps: ## Pull Helm chart sub-charts (e.g. node-feature-discovery) into charts/.
+	helm dependency update deploy/charts/yanet-operator
+
+.PHONY: helm-lint
+helm-lint: helm-deps ## Lint and template Helm chart with deps resolved.
+	helm lint deploy/charts/yanet-operator
+	helm template test deploy/charts/yanet-operator --debug >/dev/null
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	$(call docker-go,go fmt ./...)
@@ -123,17 +132,14 @@ test-docker-integration: ## Run integration tests in Docker container.
 		KUBEBUILDER_ASSETS=\$$(/go/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path) go test -v ./internal/controller/... -coverprofile cover-integration.out)
 
 .PHONY: lint
-lint: golangci-lint ## Run golangci-lint linter.
-	$(GOLANGCI_LINT) run
-
-.PHONY: lint-fix
-lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
-	$(GOLANGCI_LINT) run --fix
-
-.PHONY: lint-docker
-lint-docker: ## Run golangci-lint linter in Docker container.
+lint: ## Run golangci-lint linter in Docker container.
 	$(call docker-go,go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest && \
 		GOFLAGS=-buildvcs=false /go/bin/golangci-lint run --timeout=5m)
+
+.PHONY: lint-fix
+lint-fix: ## Run golangci-lint linter and perform fixes in Docker container.
+	$(call docker-go,go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest && \
+		GOFLAGS=-buildvcs=false /go/bin/golangci-lint run --fix --timeout=5m)
 
 ##@ Build
 

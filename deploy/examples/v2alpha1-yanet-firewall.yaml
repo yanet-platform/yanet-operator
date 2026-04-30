@@ -1,0 +1,18 @@
+# Yanet CR (boxType=firewall) — with antiddos operator.
+# Demonstrates that an entire box can be described in 5 fields.
+---
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetV2
+metadata:
+  name: edge-pop1-firewall
+  namespace: yanet
+spec:
+  boxType: firewall
+  nodeSelector:
+    role: yanet-edge
+    type: firewall
+  enabled: true
+  autoSync: true
+  # No patches, no inline component specs.
+  # Everything (incl. antiddos operator + firewall-max-memory patch) is already defined
+  # in YanetConfig.boxTypes[firewall].

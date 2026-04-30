@@ -1,0 +1,23 @@
+# v2alpha1 Yanet — must be ACCEPTED. References the boxType "release" defined
+# in 03-yanetconfig-v2-valid.yaml. Per-component `enabled: false` makes the
+# reconciler render Deployments with replicas=0, while `autoSync: true` keeps
+# the reconcile loop active so we can verify the generated Deployments.
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetV2
+metadata:
+  name: test-node-v2.example.com
+  namespace: yanet
+spec:
+  boxType: release
+  autoSync: true
+  nodeSelector:
+    kubernetes.io/hostname: test-node-v2-does-not-exist
+  components:
+    controlplane:
+      enabled: false
+    dataplane:
+      enabled: false
+    bird:
+      enabled: false
+    announcer:
+      enabled: false

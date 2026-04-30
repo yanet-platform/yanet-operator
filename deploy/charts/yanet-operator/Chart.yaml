@@ -5,8 +5,18 @@ type: application
 # Version is set manually and used for Helm chart versioning
 version: 0.1.6
 # appVersion is automatically synced with version during CI/CD build
-# It determines the Docker image tag: yanetplatform/yanet-operator:<appVersion>
+# It determines the Docker image tag: ghcr.io/yanet-platform/yanet-operator:<appVersion>
 appVersion: "0.0.0-dev"
 maintainers:
   - name: yanet-platform
     url: https://github.com/yanet-platform
+
+# Optional dependency: Node Feature Discovery exposes the
+# feature.node.kubernetes.io/cpu-numa_nodes_count label that the v2
+# reconciler reads to decide controlplane NUMA fan-out.
+# Toggle with `node-feature-discovery.enabled: true` in values.yaml.
+dependencies:
+  - name: node-feature-discovery
+    version: "0.18.3"
+    repository: "oci://registry-k8s-io.mirror.yandex.net/nfd/charts"
+    condition: node-feature-discovery.enabled

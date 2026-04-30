@@ -176,6 +176,11 @@ type LifecycleHandler struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:storageversion
+//+kubebuilder:resource:shortName=yntcfg,categories=yanet
+//+kubebuilder:printcolumn:name="UpdateWindow",type=integer,JSONPath=`.spec.updatewindow`
+//+kubebuilder:printcolumn:name="Stop",type=boolean,JSONPath=`.spec.stop`
+//+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // YanetConfig is the Schema for the yanetconfigs API
 type YanetConfig struct {

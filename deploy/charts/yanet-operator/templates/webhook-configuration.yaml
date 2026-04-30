@@ -5,7 +5,12 @@ metadata:
   name: {{ include "yanet-operator.fullname" . }}-validating-webhook-configuration
   labels:
     {{- include "yanet-operator.labels" . | nindent 4 }}
+# v1 and v2 now live in disjoint CRDs (yanets / yanetsv2,
+# yanetconfigs / yanetconfigsv2) so each webhook rule targets a
+# different resource and there is no overlap. matchPolicy: Exact is
+# kept defensively in case of future version additions.
 webhooks:
+# ---------- v1alpha1 ----------
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -13,7 +18,8 @@ webhooks:
       name: {{ include "yanet-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
       path: /validate-yanet-yanet-platform-io-v1alpha1-yanet
-  failurePolicy: Fail
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  matchPolicy: Exact
   name: validate.yanet.yanet-platform.io
   rules:
   - apiGroups:
@@ -33,7 +39,8 @@ webhooks:
       name: {{ include "yanet-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
       path: /validate-yanet-yanet-platform-io-v1alpha1-yanetconfig
-  failurePolicy: Fail
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  matchPolicy: Exact
   name: validate.yanetconfig.yanet-platform.io
   rules:
   - apiGroups:
@@ -45,5 +52,48 @@ webhooks:
     - UPDATE
     resources:
     - yanetconfigs
+  sideEffects: None
+# ---------- v2alpha1 ----------
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "yanet-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-yanet-yanet-platform-io-v2alpha1-yanetv2
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  matchPolicy: Exact
+  name: vyanetv2.kb.io
+  rules:
+  - apiGroups:
+    - yanet.yanet-platform.io
+    apiVersions:
+    - v2alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - yanetsv2
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "yanet-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-yanet-yanet-platform-io-v2alpha1-yanetconfigv2
+  failurePolicy: {{ .Values.webhook.failurePolicy }}
+  matchPolicy: Exact
+  name: vyanetconfigv2.kb.io
+  rules:
+  - apiGroups:
+    - yanet.yanet-platform.io
+    apiVersions:
+    - v2alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - yanetconfigsv2
   sideEffects: None
 {{- end }}

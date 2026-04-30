@@ -1,0 +1,9 @@
+# v1alpha1 YanetConfig — must be REJECTED by validate.yanetconfig.yanet-platform.io.
+# Reason: spec.updatewindow must be >= 0.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config-v1-bad
+  namespace: yanet
+spec:
+  updatewindow: -1

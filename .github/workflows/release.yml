@@ -1,6 +1,6 @@
 # Create GitHub Release with artifacts when a version tag is pushed
 # Triggered on: version tags (v*)
-# Artifacts: Docker images (Docker Hub, GHCR), Helm chart (OCI), install.yaml
+# Artifacts: Docker images (GHCR), Helm chart (OCI), install.yaml
 name: Release
 
 on:
@@ -9,7 +9,6 @@ on:
       - 'v*'  # Trigger on version tags like v0.1.6
 
 env:
-  DOCKERHUB_REPO: yanetplatform/yanet-operator
   GHCR_REPO: ghcr.io/${{ github.repository }}
   CHART_NAME: yanet-operator
 
@@ -35,12 +34,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -53,7 +46,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.DOCKERHUB_REPO }}
             ${{ env.GHCR_REPO }}
           tags: |
             type=semver,pattern={{version}}
@@ -102,10 +94,6 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
 
-      - name: Log in to Docker Hub
-        run: |
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-
       - name: Extract chart version
         id: chart_version
         run: |
@@ -119,6 +107,10 @@ jobs:
           sed -i "s/^appVersion:.*/appVersion: \"${GIT_TAG}\"/" deploy/charts/yanet-operator/Chart.yaml
           echo "Synced appVersion to ${GIT_TAG}"
 
+      - name: Update Helm dependencies
+        run: |
+          helm dependency update deploy/charts/yanet-operator
+
       - name: Package Helm chart
         run: |
           helm package deploy/charts/yanet-operator
@@ -126,10 +118,6 @@ jobs:
       - name: Push Helm chart to GitHub Container Registry
         run: |
           helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}
-
-      - name: Push Helm chart to Docker Hub
-        run: |
-          helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://registry-1.docker.io/yanetplatform
 
       - name: Upload chart artifact
         uses: actions/upload-artifact@v4
@@ -164,7 +152,7 @@ jobs:
 
       - name: Build install.yaml
         env:
-          IMG: ${{ env.DOCKERHUB_REPO }}:${{ needs.docker.outputs.version }}
+          IMG: ${{ env.GHCR_REPO }}:${{ needs.docker.outputs.version }}
         run: |
           make build-installer
 
@@ -227,16 +215,6 @@ jobs:
           kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml
           ```
 
-          ### Helm Install (Docker Hub OCI)
-
-          ```bash
-          helm install yanet-operator \
-            oci://registry-1.docker.io/yanetplatform/yanet-operator \
-            --version ${{ needs.helm.outputs.chart_version }} \
-            --namespace yanet-system \
-            --create-namespace
-          ```
-
           ### Helm Install (GitHub Container Registry)
 
           ```bash
@@ -252,13 +230,11 @@ jobs:
           ### Docker Images
 
           **Multi-platform (amd64, arm64):**
-          - Docker Hub: `docker.io/${{ env.DOCKERHUB_REPO }}:${{ needs.docker.outputs.version }}`
           - GHCR: `${{ env.GHCR_REPO }}:${{ needs.docker.outputs.version }}`
 
           ### Helm Chart
 
           **OCI Registries:**
-          - Docker Hub: `oci://registry-1.docker.io/yanetplatform/yanet-operator:${{ needs.helm.outputs.chart_version }}`
           - GHCR: `oci://ghcr.io/${{ github.repository_owner }}/yanet-operator:${{ needs.helm.outputs.chart_version }}`
 
           ### Kubernetes Manifests
@@ -277,10 +253,10 @@ jobs:
 
           ```bash
           # Verify Docker image
-          docker pull ${{ env.DOCKERHUB_REPO }}:${{ needs.docker.outputs.version }}
+          docker pull ${{ env.GHCR_REPO }}:${{ needs.docker.outputs.version }}
 
           # Verify Helm chart
-          helm show chart oci://registry-1.docker.io/yanetplatform/yanet-operator --version ${{ needs.helm.outputs.chart_version }}
+          helm show chart oci://ghcr.io/${{ github.repository_owner }}/yanet-operator --version ${{ needs.helm.outputs.chart_version }}
 
           # Check operator version
           kubectl get deployment yanet-operator -n yanet-system -o jsonpath='{.spec.template.spec.containers[0].image}'

@@ -1,0 +1,9 @@
+# v2alpha1 Yanet — must be REJECTED by vyanet-v2.kb.io.
+# Reason: boxType is not declared in any YanetConfig in the cluster.
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetV2
+metadata:
+  name: yanet-v2-unknown-boxtype
+  namespace: yanet
+spec:
+  boxType: this-box-does-not-exist

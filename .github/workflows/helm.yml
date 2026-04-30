@@ -1,4 +1,4 @@
-# Package and publish Helm chart to Docker Hub OCI and GHCR
+# Package and publish Helm chart to GHCR
 # Triggered on: push to main/master, version tags, and PRs
 name: Helm Chart
 
@@ -13,7 +13,6 @@ on:
 
 env:
   GHCR_REGISTRY: ghcr.io                      # GitHub Container Registry
-  DOCKERHUB_REGISTRY: registry-1.docker.io    # Docker Hub OCI registry
   CHART_NAME: yanet-operator
 
 jobs:
@@ -30,13 +29,22 @@ jobs:
       with:
         version: 'latest'
     
+    - name: Update Helm dependencies
+      run: |
+        helm dependency update deploy/charts/yanet-operator
+
     - name: Lint Helm chart
       run: |
         helm lint deploy/charts/yanet-operator
-    
+
     - name: Template Helm chart
       run: |
         helm template test deploy/charts/yanet-operator --debug
+
+    - name: Template Helm chart with NFD enabled
+      run: |
+        helm template test deploy/charts/yanet-operator --debug \
+          --set node-feature-discovery.enabled=true
 
   package-and-push:
     name: Package and Push Helm Chart
@@ -57,12 +65,7 @@ jobs:
     - name: Log in to GitHub Container Registry
       run: |
         echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.GHCR_REGISTRY }} --username ${{ github.actor }} --password-stdin
-    
-    - name: Log in to Docker Hub
-      if: github.event_name != 'pull_request'
-      run: |
-        echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login ${{ env.DOCKERHUB_REGISTRY }} --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-    
+
     - name: Extract chart version
       id: chart_version
       run: |
@@ -76,6 +79,10 @@ jobs:
         sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
         echo "Synced appVersion to ${CHART_VERSION}"
     
+    - name: Update Helm dependencies
+      run: |
+        helm dependency update deploy/charts/yanet-operator
+
     - name: Package Helm chart
       run: |
         helm package deploy/charts/yanet-operator
@@ -83,12 +90,7 @@ jobs:
     - name: Push Helm chart to GitHub Container Registry
       run: |
         helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.GHCR_REGISTRY }}/${{ github.repository_owner }}
-    
-    - name: Push Helm chart to Docker Hub
-      if: github.event_name != 'pull_request'
-      run: |
-        helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.DOCKERHUB_REGISTRY }}/yanetplatform
-    
+
     - name: Upload chart artifact
       uses: actions/upload-artifact@v4
       with:
@@ -126,9 +128,17 @@ jobs:
     - name: Load image into kind
       run: |
         kind load docker-image yanet-operator:test --name chart-testing
-    
-    - name: Install chart
+
+    - name: Update Helm dependencies
       run: |
+        helm dependency update deploy/charts/yanet-operator
+
+    - name: Install chart (with webhook enabled)
+      run: |
+        # webhook.enabled=true exercises:
+        #   - kube-webhook-certgen pre-install Job → Secret with TLS cert
+        #   - ValidatingWebhookConfiguration for v1alpha1 + v2alpha1
+        #   - post-install Job that patches caBundle
         helm install test deploy/charts/yanet-operator \
           --wait \
           --timeout 5m \
@@ -139,20 +149,46 @@ jobs:
           --set image.pullPolicy=Never \
           --set replicaCount=1 \
           --set metrics.serviceMonitor.enabled=false \
-          --set webhook.enabled=false \
-          --set grafana.dashboards.namespace=yanet
-  
+          --set webhook.enabled=true \
+          --set grafana.dashboards.enabled=false
+
     - name: Verify installation
       run: |
         kubectl get deployment -n yanet
         kubectl get pods -n yanet
-        kubectl logs -n yanet -l app.kubernetes.io/name=yanet-operator --tail=50 || true
+        # v1 CRDs
         kubectl get crd yanets.yanet.yanet-platform.io
         kubectl get crd yanetconfigs.yanet.yanet-platform.io
+        # v2 CRDs (separate CRDs, not extra versions of v1)
+        kubectl get crd yanetsv2.yanet.yanet-platform.io
+        kubectl get crd yanetconfigsv2.yanet.yanet-platform.io
+        echo "=== ValidatingWebhookConfiguration ==="
+        kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io \
+          -l app.kubernetes.io/name=yanet-operator -o yaml
 
-    - name: Check deployment status
+    - name: Check operator rollout status
       run: |
         kubectl rollout status deployment/yanet-operator -n yanet --timeout=2m
+
+    - name: Wait for webhook server to become ready
+      run: |
+        # Give the operator a chance to register all 4 webhook paths
+        # (controller-runtime registers them lazily after leader election).
+        for i in $(seq 1 30); do
+          if kubectl -n yanet logs -l app.kubernetes.io/name=yanet-operator --tail=-1 \
+              | grep -q "Registering webhook.*/validate-yanet-yanet-platform-io-v2alpha1-yanetconfig"; then
+            echo "webhook server ready"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "webhook server did not register all paths in time"
+        kubectl -n yanet logs -l app.kubernetes.io/name=yanet-operator --tail=200
+        exit 1
+
+    - name: Run webhook end-to-end tests
+      run: |
+        NS=yanet bash deploy/tests/webhooks/run.sh
 
     - name: Debug on failure
       if: failure()
@@ -163,6 +199,11 @@ jobs:
         kubectl describe pods -n yanet
         echo "=== Events ==="
         kubectl get events -n yanet --sort-by='.lastTimestamp'
+        echo "=== ValidatingWebhookConfiguration ==="
+        kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io \
+          -l app.kubernetes.io/name=yanet-operator -o yaml || true
+        echo "=== Operator log (full) ==="
+        kubectl -n yanet logs -l app.kubernetes.io/name=yanet-operator --tail=-1 || true
 
     - name: Uninstall chart
       if: always()
