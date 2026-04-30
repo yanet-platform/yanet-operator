@@ -1,0 +1,170 @@
+# Package and publish Helm chart to Docker Hub OCI and GHCR
+# Triggered on: push to main/master, version tags, and PRs
+name: Helm Chart
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'        # Version tags like v0.1.0
+      - 'chart-v*'  # Chart-specific tags like chart-v0.1.0
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  GHCR_REGISTRY: ghcr.io                      # GitHub Container Registry
+  DOCKERHUB_REGISTRY: registry-1.docker.io    # Docker Hub OCI registry
+  CHART_NAME: yanet-operator
+
+jobs:
+  lint:
+    name: Lint Helm Chart
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: 'latest'
+    
+    - name: Lint Helm chart
+      run: |
+        helm lint deploy/charts/yanet-operator
+    
+    - name: Template Helm chart
+      run: |
+        helm template test deploy/charts/yanet-operator --debug
+
+  package-and-push:
+    name: Package and Push Helm Chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: 'latest'
+    
+    - name: Log in to GitHub Container Registry
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.GHCR_REGISTRY }} --username ${{ github.actor }} --password-stdin
+    
+    - name: Log in to Docker Hub
+      if: github.event_name != 'pull_request'
+      run: |
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login ${{ env.DOCKERHUB_REGISTRY }} --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+    
+    - name: Extract chart version
+      id: chart_version
+      run: |
+        CHART_VERSION=$(grep '^version:' deploy/charts/yanet-operator/Chart.yaml | awk '{print $2}')
+        echo "version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+        echo "Chart version: ${CHART_VERSION}"
+    
+    - name: Sync appVersion with version
+      run: |
+        CHART_VERSION=$(grep '^version:' deploy/charts/yanet-operator/Chart.yaml | awk '{print $2}')
+        sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
+        echo "Synced appVersion to ${CHART_VERSION}"
+    
+    - name: Package Helm chart
+      run: |
+        helm package deploy/charts/yanet-operator
+    
+    - name: Push Helm chart to GitHub Container Registry
+      run: |
+        helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.GHCR_REGISTRY }}/${{ github.repository_owner }}
+    
+    - name: Push Helm chart to Docker Hub
+      if: github.event_name != 'pull_request'
+      run: |
+        helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.DOCKERHUB_REGISTRY }}/yanetplatform
+    
+    - name: Upload chart artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: helm-chart
+        path: ${{ env.CHART_NAME }}-*.tgz
+
+  test:
+    name: Test Helm Chart
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26.2'
+        cache: true
+    
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: 'latest'
+    
+    - name: Set up kind
+      uses: helm/kind-action@v1
+      with:
+        cluster_name: chart-testing
+    
+    - name: Build operator image
+      run: |
+        make docker-build IMG=yanet-operator:test
+    
+    - name: Load image into kind
+      run: |
+        kind load docker-image yanet-operator:test --name chart-testing
+    
+    - name: Install chart
+      run: |
+        helm install test deploy/charts/yanet-operator \
+          --wait \
+          --timeout 5m \
+          --create-namespace \
+          --namespace yanet \
+          --set image.repository=yanet-operator \
+          --set image.tag=test \
+          --set image.pullPolicy=Never \
+          --set replicaCount=1 \
+          --set metrics.serviceMonitor.enabled=false \
+          --set webhook.enabled=false \
+          --set grafana.dashboards.namespace=yanet
+  
+    - name: Verify installation
+      run: |
+        kubectl get deployment -n yanet
+        kubectl get pods -n yanet
+        kubectl logs -n yanet -l app.kubernetes.io/name=yanet-operator --tail=50 || true
+        kubectl get crd yanets.yanet.yanet-platform.io
+        kubectl get crd yanetconfigs.yanet.yanet-platform.io
+
+    - name: Check deployment status
+      run: |
+        kubectl rollout status deployment/yanet-operator -n yanet --timeout=2m
+
+    - name: Debug on failure
+      if: failure()
+      run: |
+        echo "=== Deployment Status ==="
+        kubectl describe deployment -n yanet
+        echo "=== Pod Status ==="
+        kubectl describe pods -n yanet
+        echo "=== Events ==="
+        kubectl get events -n yanet --sort-by='.lastTimestamp'
+
+    - name: Uninstall chart
+      if: always()
+      run: |
+        helm uninstall test -n yanet || true

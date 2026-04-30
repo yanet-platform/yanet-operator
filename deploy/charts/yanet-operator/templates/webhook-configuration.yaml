@@ -1,0 +1,49 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-validating-webhook-configuration
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "yanet-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-yanet-yanet-platform-io-v1alpha1-yanet
+  failurePolicy: Fail
+  name: validate.yanet.yanet-platform.io
+  rules:
+  - apiGroups:
+    - yanet.yanet-platform.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - yanets
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "yanet-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /validate-yanet-yanet-platform-io-v1alpha1-yanetconfig
+  failurePolicy: Fail
+  name: validate.yanetconfig.yanet-platform.io
+  rules:
+  - apiGroups:
+    - yanet.yanet-platform.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - yanetconfigs
+  sideEffects: None
+{{- end }}

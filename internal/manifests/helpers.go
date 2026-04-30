@@ -15,10 +15,10 @@ import (
 
 // GetVolumes generate Volumes for deployment
 // TODO: add more type
-func GetVolumes(HostpathOrCreate []string) []v1.Volume {
+func GetVolumes(hostpathOrCreate []string) []v1.Volume {
 	Volumes := []v1.Volume{}
 	hostPathDirectoryOrCreate := v1.HostPathDirectoryOrCreate
-	for _, path := range HostpathOrCreate {
+	for _, path := range hostpathOrCreate {
 		if strings.Contains(path, "hugepages") {
 			Volumes = append(Volumes, v1.Volume{
 				Name: "hugepage",

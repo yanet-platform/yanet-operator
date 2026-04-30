@@ -1,0 +1,64 @@
+{{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-cert-gen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ include "yanet-operator.fullname" . }}-webhook-cert-gen
+      labels:
+        {{- include "yanet-operator.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "yanet-operator.serviceAccountName" . }}
+      containers:
+      - name: cert-generator
+        image: "{{ .Values.webhook.certGen.image.repository }}:{{ .Values.webhook.certGen.image.tag }}"
+        imagePullPolicy: {{ .Values.webhook.certGen.image.pullPolicy }}
+        args:
+        - create
+        - --host={{ include "yanet-operator.fullname" . }}-webhook-service,{{ include "yanet-operator.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
+        - --namespace={{ .Release.Namespace }}
+        - --cert-name=tls.crt
+        - --key-name=tls.key
+        - --secret-name={{ include "yanet-operator.fullname" . }}-webhook-certs
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-update-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      name: {{ include "yanet-operator.fullname" . }}-webhook-update-ca
+      labels:
+        {{- include "yanet-operator.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "yanet-operator.serviceAccountName" . }}
+      containers:
+      - name: ca-updater
+        image: "{{ .Values.webhook.certGen.image.repository }}:{{ .Values.webhook.certGen.image.tag }}"
+        imagePullPolicy: {{ .Values.webhook.certGen.image.pullPolicy }}
+        args:
+        - patch
+        - --namespace={{ .Release.Namespace }}
+        - --secret-name={{ include "yanet-operator.fullname" . }}-webhook-certs
+        - --webhook-name={{ include "yanet-operator.fullname" . }}-validating-webhook-configuration
+        - --patch-validating=true
+        - --patch-mutating=false
+{{- end }}

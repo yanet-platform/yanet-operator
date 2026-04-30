@@ -8,7 +8,6 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -56,100 +55,88 @@ func DeploymentForBird(
 	log := log.FromContext(ctx)
 	ok, perTypeOpts := helpers.GetTypeOpts(config.EnabledOpts, m.Spec.Type)
 	if !ok {
-		log.Info(fmt.Sprintf("typeOpts is not specified for %s", m.Spec.Type))
+		log.Info("typeOpts is not specified", "type", m.Spec.Type)
 	}
-	// Filling in all init containers
+
+	// Build init containers (wait-controlplane + additional)
 	initContainers := newBirdInitContainers(m)
 	additionalInitContainers := GetAdditionalInitContainers(
-		config.AdditionalOpts.InitContainers, // all available initContainers in yanetConfig spec
-		perTypeOpts.Bird.InitContainers,      // initContainers enabled for specific type in global config
+		config.AdditionalOpts.InitContainers,
+		perTypeOpts.Bird.InitContainers,
 	)
 	initContainers = append(initContainers, additionalInitContainers...)
 
+	// Prepare poststart hook
 	poststart := GetPostStartExec(config.AdditionalOpts.PostStart, perTypeOpts.Bird.PostStart)
 
-	// Creating deployment based on previously created structures
+	// Determine image and tag
+	image := m.Spec.Bird.Image
+	tag := m.Spec.Tag
+	if m.Spec.Bird.Tag != "" {
+		tag = m.Spec.Bird.Tag
+	}
+
+	// Calculate replicas
 	replicas := int32(0)
 	if m.Spec.Bird.Enable {
 		replicas = 1
 	}
-	depName := fmt.Sprintf("bird-%s", m.Spec.NodeName)
-	image := fmt.Sprintf("%s:%s", m.Spec.Bird.Image, m.Spec.Tag)
-	if m.Spec.Bird.Tag != "" {
-		image = fmt.Sprintf("%s:%s", m.Spec.Bird.Image, m.Spec.Bird.Tag)
-	}
-	if m.Spec.Registry != "" {
-		image = fmt.Sprintf("%s/%s", m.Spec.Registry, image)
-	}
-	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      depName,
-			Namespace: m.Namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: LabelsForYanet(nil, m, "bird"),
-			},
-			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
-			Template: v1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        depName,
-					Annotations: AnnotationsForYanet(config.AdditionalOpts.Annotations, perTypeOpts.Bird.Annotations),
-					Labels:      LabelsForYanet(nil, m, "bird"),
-				},
-				Spec: v1.PodSpec{
-					HostNetwork:    true,
-					HostIPC:        perTypeOpts.Bird.HostIpc,
-					InitContainers: initContainers,
-					Containers: []v1.Container{
-						{
-							Image:           image,
-							ImagePullPolicy: v1.PullIfNotPresent,
-							Name:            "bird",
-							Command:         []string{"/usr/sbin/bird"},
-							Args:            []string{"-f"},
-							Resources: GetResources(
-								ctx,
-								m.Spec.NodeName,
-								perTypeOpts.Bird.Resources,
-								nodes,
-								false,
-							),
-							Lifecycle: &v1.Lifecycle{
-								PostStart: &v1.LifecycleHandler{
-									Exec: &v1.ExecAction{Command: poststart},
-								},
-							},
-							VolumeMounts: []v1.VolumeMount{
-								{Name: "etc-bird", MountPath: "/etc/bird"},
-								{Name: "run-yanet", MountPath: "/run/yanet"},
-								{Name: "run-bird", MountPath: "/run/bird"},
-							},
-							TerminationMessagePath:   "/dev/stdout",
-							TerminationMessagePolicy: "File",
-							SecurityContext: &v1.SecurityContext{
-								Privileged: &perTypeOpts.Bird.Privileged,
-								Capabilities: &v1.Capabilities{
-									Add: []v1.Capability{
-										"NET_ADMIN",
-										"NET_BIND_SERVICE",
-										"IPC_LOCK",
-										"SYS_MODULE",
-										"SYS_NICE",
-									},
-								},
-							},
-						},
-					},
-					NodeSelector: map[string]string{
-						"kubernetes.io/hostname": m.Spec.NodeName,
-					},
-					Tolerations: TolerationsForYanet(),
-					Volumes:     GetVolumes([]string{"/etc/bird", "/run/yanet", "/run/bird"}),
-				},
+
+	// Build security context
+	privileged := perTypeOpts.Bird.Privileged
+	securityCtx := &v1.SecurityContext{
+		Privileged: &privileged,
+		Capabilities: &v1.Capabilities{
+			Add: []v1.Capability{
+				"NET_ADMIN",
+				"NET_BIND_SERVICE",
+				"IPC_LOCK",
+				"SYS_MODULE",
+				"SYS_NICE",
 			},
 		},
 	}
-	return dep
+
+	// Build deployment using builder pattern
+	return NewDeploymentBuilder().
+		WithYanet(m).
+		WithName(fmt.Sprintf("bird-%s", m.Spec.NodeName)).
+		WithComponentName("bird").
+		WithReplicas(replicas).
+		WithImage(m.Spec.Registry, image, tag).
+		WithHostNetwork(true).
+		WithHostIPC(perTypeOpts.Bird.HostIpc).
+		WithAnnotations(AnnotationsForYanet(
+			config.AdditionalOpts.Annotations,
+			perTypeOpts.Bird.Annotations,
+		)).
+		WithNodeSelector(map[string]string{
+			"kubernetes.io/hostname": m.Spec.NodeName,
+		}).
+		WithTolerations(TolerationsForYanet()).
+		WithContainer("bird",
+			[]string{"/usr/sbin/bird"},
+			[]string{"-f"},
+		).
+		WithVolumeMounts([]v1.VolumeMount{
+			{Name: "etc-bird", MountPath: "/etc/bird"},
+			{Name: "run-yanet", MountPath: "/run/yanet"},
+			{Name: "run-bird", MountPath: "/run/bird"},
+		}).
+		WithResources(GetResources(
+			ctx,
+			m.Spec.NodeName,
+			perTypeOpts.Bird.Resources,
+			nodes,
+			false,
+		)).
+		WithSecurityContext(securityCtx).
+		WithLifecycle(&v1.Lifecycle{
+			PostStart: &v1.LifecycleHandler{
+				Exec: &v1.ExecAction{Command: poststart},
+			},
+		}).
+		WithInitContainers(initContainers).
+		WithVolumes(GetVolumes([]string{"/etc/bird", "/run/yanet", "/run/bird"})).
+		Build()
 }

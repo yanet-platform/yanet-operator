@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   name: {{ include "yanet-operator.fullname" . }}
   labels:
     {{- include "yanet-operator.labels" . | nindent 4 }}
@@ -37,6 +37,12 @@ spec:
           - /manager
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.webhook.enabled }}
+          ports:
+          - containerPort: {{ .Values.webhook.port }}
+            name: webhook
+            protocol: TCP
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -51,8 +57,20 @@ spec:
             periodSeconds: 10
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if .Values.webhook.enabled }}
+          volumeMounts:
+          - name: webhook-certs
+            mountPath: /tmp/k8s-webhook-server/serving-certs
+            readOnly: true
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.webhook.enabled }}
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: {{ include "yanet-operator.fullname" . }}-webhook-certs
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

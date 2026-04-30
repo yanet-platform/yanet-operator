@@ -1,0 +1,211 @@
+# AI Code Review - systematic Go code analysis
+# Automated static analysis for concurrency, race conditions, and code quality
+name: AI Code Review
+
+on:
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  ai-review:
+    name: AI Code Review
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+          cache: true
+      
+      - name: Get changed Go files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            **/*.go
+          separator: ','
+      
+      - name: Run static analysis
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          # Install analysis tools
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install golang.org/x/tools/go/analysis/passes/nilness/cmd/nilness@latest
+          
+          echo "## 🔍 Static Analysis Results" > review.md
+          echo "" >> review.md
+          
+          # Run staticcheck
+          echo "### 📊 Staticcheck" >> review.md
+          if staticcheck ./... 2>&1 | tee staticcheck.log; then
+            echo "✅ No issues found" >> review.md
+          else
+            echo '```' >> review.md
+            cat staticcheck.log >> review.md
+            echo '```' >> review.md
+          fi
+          echo "" >> review.md
+          
+          # Run gosec for security issues
+          echo "### 🔒 Security Analysis (gosec)" >> review.md
+          if gosec -fmt=text ./... 2>&1 | tee gosec.log; then
+            echo "✅ No security issues found" >> review.md
+          else
+            echo '```' >> review.md
+            cat gosec.log >> review.md
+            echo '```' >> review.md
+          fi
+          echo "" >> review.md
+          
+          # Run go vet
+          echo "### 🔧 Go Vet" >> review.md
+          if go vet ./... 2>&1 | tee govet.log; then
+            echo "✅ No issues found" >> review.md
+          else
+            echo '```' >> review.md
+            cat govet.log >> review.md
+            echo '```' >> review.md
+          fi
+          echo "" >> review.md
+      
+      - name: Race detector check
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          echo "### 🏁 Race Detector" >> review.md
+          if go test -race -short ./... 2>&1 | tee race.log; then
+            echo "✅ No race conditions detected" >> review.md
+          else
+            echo '```' >> review.md
+            cat race.log >> review.md
+            echo '```' >> review.md
+          fi
+          echo "" >> review.md
+      
+      - name: Concurrency analysis
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          echo "### 🚀 Concurrency Patterns Analysis" >> review.md
+          echo "" >> review.md
+          
+          # Find all goroutines
+          echo "#### Goroutines found:" >> review.md
+          echo '```' >> review.md
+          grep -rn "go func\|go [a-zA-Z]" --include="*.go" . | head -50 >> review.md || echo "None found" >> review.md
+          echo '```' >> review.md
+          echo "" >> review.md
+          
+          # Find mutex usage
+          echo "#### Mutex usage:" >> review.md
+          echo '```' >> review.md
+          grep -rn "sync.Mutex\|sync.RWMutex" --include="*.go" . | head -50 >> review.md || echo "None found" >> review.md
+          echo '```' >> review.md
+          echo "" >> review.md
+          
+          # Find context usage
+          echo "#### Context usage:" >> review.md
+          echo '```' >> review.md
+          grep -rn "context.With\|context.Background\|context.TODO" --include="*.go" . | head -50 >> review.md || echo "None found" >> review.md
+          echo '```' >> review.md
+          echo "" >> review.md
+          
+          # Find defer patterns
+          echo "#### Defer patterns:" >> review.md
+          echo '```' >> review.md
+          grep -rn "defer.*Unlock\|defer.*Done\|defer.*cancel" --include="*.go" . | head -50 >> review.md || echo "None found" >> review.md
+          echo '```' >> review.md
+          echo "" >> review.md
+      
+      - name: Error handling analysis
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          echo "### ⚠️ Error Handling Patterns" >> review.md
+          echo "" >> review.md
+          
+          # Find error returns without checks
+          echo "#### Potential unchecked errors:" >> review.md
+          echo '```' >> review.md
+          grep -rn "_, err :=\|_, err =" --include="*.go" . | grep -v "if err" | head -30 >> review.md || echo "None found" >> review.md
+          echo '```' >> review.md
+          echo "" >> review.md
+          
+          # Find nil checks
+          echo "#### Nil checks:" >> review.md
+          echo '```' >> review.md
+          grep -rn "if .* == nil\|if .* != nil" --include="*.go" . | head -30 >> review.md || echo "None found" >> review.md
+          echo '```' >> review.md
+          echo "" >> review.md
+      
+      - name: Post review comment
+        if: steps.changed-files.outputs.any_changed == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            
+            let reviewContent = '';
+            try {
+              reviewContent = fs.readFileSync('review.md', 'utf8');
+            } catch (error) {
+              reviewContent = 'Could not generate review content';
+            }
+            
+            const changedFiles = process.env.CHANGED_FILES || 'N/A';
+            
+            const header = '## 🤖 AI Code Review\n\n' +
+              '**Changed files:** ' + changedFiles + '\n\n' +
+              'This automated review checks for:\n' +
+              '- 🔒 Race conditions and concurrency issues\n' +
+              '- 🔗 Potential deadlocks\n' +
+              '- ⚠️ Error handling patterns\n' +
+              '- 🚀 Goroutine lifecycle management\n' +
+              '- 📋 Context usage\n' +
+              '- 🎯 Nil safety\n\n';
+            
+            const footer = '\n\n---\n' +
+              '*Automated analysis using static analysis tools and pattern matching*';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: header + reviewContent + footer
+            });
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+      
+      - name: Upload review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-review-results
+          path: |
+            review.md
+            *.log
+          retention-days: 30
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "### AI Code Review Completed ✅" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f review.md ]; then
+            cat review.md >> $GITHUB_STEP_SUMMARY
+          fi

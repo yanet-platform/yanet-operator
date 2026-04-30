@@ -68,7 +68,7 @@ func GetNodeNames(nodeList *v1.NodeList) []string {
 }
 
 // DeploymentDiff make partial diff for deployments
-func DeploymentDiff(ctx context.Context, first *appsv1.Deployment, second *appsv1.Deployment) bool {
+func DeploymentDiff(ctx context.Context, first, second *appsv1.Deployment) bool {
 	logger := log.FromContext(ctx)
 	// Check Volumes
 	if diff := cmp.Diff(first.Spec.Template.Spec.Volumes, second.Spec.Template.Spec.Volumes); diff != "" {

@@ -69,7 +69,8 @@ type Dep struct {
 	// You can make deployment with zero replicas with this option.
 	// Default: true
 	// +kubebuilder:default=true
-	Enable bool `json:"enable,omitempty"`
+	// +optional
+	Enable bool `json:"enable"`
 	// image name.
 	Image string `json:"image,omitempty"`
 	// (Optional) image tag.
@@ -81,6 +82,9 @@ type YanetStatus struct {
 	// Resulting pods by status.
 	Pods map[v1.PodPhase][]string `json:"pods,omitempty"`
 	Sync Sync                     `json:"sync,omitempty"`
+	// Conditions represent the latest available observations of the Yanet's state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // Sync defines sync state of Yanet objects.

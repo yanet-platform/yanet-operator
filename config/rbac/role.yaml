@@ -5,6 +5,22 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -20,17 +36,6 @@ rules:
   - coordination.k8s.io
   resources:
   - configmap
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - coordination.k8s.io
-  resources:
   - leases
   verbs:
   - create
@@ -41,57 +46,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - patch
-- apiGroups:
-  - ""
-  resources:
-  - nodes
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - yanet.yanet-platform.io
   resources:
   - yanetconfigs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - yanet.yanet-platform.io
-  resources:
-  - yanetconfigs/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - yanet.yanet-platform.io
-  resources:
-  - yanetconfigs/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - yanet.yanet-platform.io
-  resources:
   - yanets
   verbs:
   - create
@@ -104,12 +61,14 @@ rules:
 - apiGroups:
   - yanet.yanet-platform.io
   resources:
+  - yanetconfigs/finalizers
   - yanets/finalizers
   verbs:
   - update
 - apiGroups:
   - yanet.yanet-platform.io
   resources:
+  - yanetconfigs/status
   - yanets/status
   verbs:
   - get

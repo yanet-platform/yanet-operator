@@ -1,0 +1,303 @@
+# Create GitHub Release with artifacts when a version tag is pushed
+# Triggered on: version tags (v*)
+# Artifacts: Docker images (Docker Hub, GHCR), Helm chart (OCI), install.yaml
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v0.1.6
+
+env:
+  DOCKERHUB_REPO: yanetplatform/yanet-operator
+  GHCR_REPO: ghcr.io/${{ github.repository }}
+  CHART_NAME: yanet-operator
+
+jobs:
+  # Build and push multi-platform Docker images
+  docker:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.DOCKERHUB_REPO }}
+            ${{ env.GHCR_REPO }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push multi-platform images
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+
+      - name: Image digest
+        run: echo "${{ steps.meta.outputs.tags }}"
+
+  # Package and push Helm chart to OCI registries
+  helm:
+    name: Package Helm Chart
+    runs-on: ubuntu-latest
+    needs: docker
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      chart_version: ${{ steps.chart_version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Log in to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login registry-1.docker.io --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
+
+      - name: Extract chart version
+        id: chart_version
+        run: |
+          CHART_VERSION=$(grep '^version:' deploy/charts/yanet-operator/Chart.yaml | awk '{print $2}')
+          echo "version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Chart version: ${CHART_VERSION}"
+
+      - name: Sync appVersion with git tag
+        run: |
+          GIT_TAG=${GITHUB_REF#refs/tags/v}
+          sed -i "s/^appVersion:.*/appVersion: \"${GIT_TAG}\"/" deploy/charts/yanet-operator/Chart.yaml
+          echo "Synced appVersion to ${GIT_TAG}"
+
+      - name: Package Helm chart
+        run: |
+          helm package deploy/charts/yanet-operator
+
+      - name: Push Helm chart to GitHub Container Registry
+        run: |
+          helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}
+
+      - name: Push Helm chart to Docker Hub
+        run: |
+          helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://registry-1.docker.io/yanetplatform
+
+      - name: Upload chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ env.CHART_NAME }}-*.tgz
+          retention-days: 90
+
+  # Generate install.yaml manifest
+  manifests:
+    name: Generate Manifests
+    runs-on: ubuntu-latest
+    needs: docker
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+          cache: true
+
+      - name: Install kustomize
+        run: |
+          make kustomize
+
+      - name: Generate manifests
+        run: |
+          make manifests
+
+      - name: Build install.yaml
+        env:
+          IMG: ${{ env.DOCKERHUB_REPO }}:${{ needs.docker.outputs.version }}
+        run: |
+          make build-installer
+
+      - name: Upload install.yaml artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-yaml
+          path: dist/install.yaml
+          retention-days: 90
+
+  # Create GitHub Release with artifacts and release notes
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [docker, helm, manifests]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
+
+      - name: Download Helm chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+
+      - name: Download install.yaml artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: install-yaml
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 ${VERSION}^ 2>/dev/null || echo "")
+
+          # Generate changelog
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since ${PREV_TAG}" > release_notes.md
+            echo "" >> release_notes.md
+            git log ${PREV_TAG}..${VERSION} --pretty=format:"- %s (%h)" --no-merges >> release_notes.md
+          else
+            echo "## Initial Release" > release_notes.md
+          fi
+
+          # Add installation instructions
+          cat >> release_notes.md << 'EOF'
+
+          ## 🚀 Installation
+
+          ### Quick Install (kubectl)
+
+          ```bash
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml
+          ```
+
+          ### Helm Install (Docker Hub OCI)
+
+          ```bash
+          helm install yanet-operator \
+            oci://registry-1.docker.io/yanetplatform/yanet-operator \
+            --version ${{ needs.helm.outputs.chart_version }} \
+            --namespace yanet-system \
+            --create-namespace
+          ```
+
+          ### Helm Install (GitHub Container Registry)
+
+          ```bash
+          helm install yanet-operator \
+            oci://ghcr.io/${{ github.repository_owner }}/yanet-operator \
+            --version ${{ needs.helm.outputs.chart_version }} \
+            --namespace yanet-system \
+            --create-namespace
+          ```
+
+          ## 📦 Artifacts
+
+          ### Docker Images
+
+          **Multi-platform (amd64, arm64):**
+          - Docker Hub: `docker.io/${{ env.DOCKERHUB_REPO }}:${{ needs.docker.outputs.version }}`
+          - GHCR: `${{ env.GHCR_REPO }}:${{ needs.docker.outputs.version }}`
+
+          ### Helm Chart
+
+          **OCI Registries:**
+          - Docker Hub: `oci://registry-1.docker.io/yanetplatform/yanet-operator:${{ needs.helm.outputs.chart_version }}`
+          - GHCR: `oci://ghcr.io/${{ github.repository_owner }}/yanet-operator:${{ needs.helm.outputs.chart_version }}`
+
+          ### Kubernetes Manifests
+
+          - `install.yaml` — Complete installation manifest (CRDs + Operator)
+
+          ## 📚 Documentation
+
+          - [README](https://github.com/${{ github.repository }}/blob/${VERSION}/README.md)
+          - [Testing Guide](https://github.com/${{ github.repository }}/blob/${VERSION}/README_TESTS.md)
+          - [Validation Webhooks](https://github.com/${{ github.repository }}/blob/${VERSION}/README_WEBHOOKS.md)
+          - [Prometheus Metrics](https://github.com/${{ github.repository }}/blob/${VERSION}/README_METRICS.md)
+          - [Release Guide](https://github.com/${{ github.repository }}/blob/${VERSION}/README_RELEASES.md)
+
+          ## ✅ Verification
+
+          ```bash
+          # Verify Docker image
+          docker pull ${{ env.DOCKERHUB_REPO }}:${{ needs.docker.outputs.version }}
+
+          # Verify Helm chart
+          helm show chart oci://registry-1.docker.io/yanetplatform/yanet-operator --version ${{ needs.helm.outputs.chart_version }}
+
+          # Check operator version
+          kubectl get deployment yanet-operator -n yanet-system -o jsonpath='{.spec.template.spec.containers[0].image}'
+          ```
+          EOF
+
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: |
+            ${{ env.CHART_NAME }}-*.tgz
+            install.yaml
+          draft: false
+          prerelease: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

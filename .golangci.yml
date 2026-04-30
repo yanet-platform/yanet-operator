@@ -1,0 +1,83 @@
+# GolangCI-Lint configuration for yanet-operator
+
+run:
+  timeout: 5m
+  tests: true
+  skip-dirs:
+    - vendor
+    - config
+    - hack
+    - bin
+
+linters:
+  enable:
+    - errcheck      # Check error handling
+    - gosimple      # Simplify code
+    - govet         # Go vet
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Static analysis
+    - unused        # Detect unused code
+    - gofmt         # Check formatting
+    - goimports     # Check imports
+    - misspell      # Check spelling
+    - revive        # Replacement for golint
+    - gosec         # Security checks
+    - unconvert     # Detect unnecessary conversions
+    - gocritic      # Code critique
+  
+  disable:
+    - typecheck     # Disabled due to potential issues with generated code
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  
+  govet:
+    check-shadowing: true
+  
+  revive:
+    rules:
+      - name: exported
+        disabled: true  # Disabled for generated code
+  
+  gosec:
+    excludes:
+      - G404  # Weak random number generator (not critical for operator)
+  
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - performance
+      - style
+    disabled-checks:
+      - commentedOutCode
+      - ifElseChain
+      - hugeParam
+      - rangeValCopy
+
+issues:
+  exclude-rules:
+    # Exclude generated files
+    - path: zz_generated\.deepcopy\.go
+      linters:
+        - all
+    
+    # Exclude test files from some checks
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+    
+    # Exclude suite_test.go (setup file)
+    - path: suite_test\.go
+      linters:
+        - all
+  
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
