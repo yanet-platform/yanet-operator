@@ -3425,6 +3425,14 @@ spec:
                     description: (Optional) image tag.
                     type: string
                 type: object
+              intel:
+                default: false
+                description: |-
+                  (Optional) Mount Intel ice DDP firmware directory from host into dataplane.
+                  When true, /lib/firmware/intel/ice/ddp is mounted from the host node (type: Directory).
+                  Required on nodes with Intel E810 NICs that need custom DDP profiles.
+                  Default: false
+                type: boolean
               nodename:
                 description: |-
                   Worker node name for deploy.

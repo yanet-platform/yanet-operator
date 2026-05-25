@@ -61,6 +61,12 @@ type YanetSpec struct {
 	// Default: false
 	// +kubebuilder:default=false
 	AllowReboot bool `json:"allowreboot,omitempty"`
+	// (Optional) Mount Intel ice DDP firmware directory from host into dataplane.
+	// When true, /lib/firmware/intel/ice/ddp is mounted from the host node (type: Directory).
+	// Required on nodes with Intel E810 NICs that need custom DDP profiles.
+	// Default: false
+	// +kubebuilder:default=false
+	Intel bool `json:"intel,omitempty"`
 }
 
 // Deployment base configs.
