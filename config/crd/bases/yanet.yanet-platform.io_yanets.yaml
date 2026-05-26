@@ -8,13 +8,36 @@ metadata:
 spec:
   group: yanet.yanet-platform.io
   names:
+    categories:
+    - yanet
     kind: Yanet
     listKind: YanetList
     plural: yanets
+    shortNames:
+    - ynt
     singular: yanet
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.nodename
+      name: Node
+      type: string
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .spec.autosync
+      name: AutoSync
+      type: boolean
+    - jsonPath: .status.conditions[?(@.type=="Available")].status
+      name: Available
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Progressing")].status
+      name: Progressing
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Yanet is the Schema for the yanets API
@@ -119,6 +142,14 @@ spec:
                     description: (Optional) image tag.
                     type: string
                 type: object
+              intel:
+                default: false
+                description: |-
+                  (Optional) Mount Intel ice DDP firmware directory from host into dataplane.
+                  When true, /lib/firmware/intel/ice/ddp is mounted from the host node (type: Directory).
+                  Required on nodes with Intel E810 NICs that need custom DDP profiles.
+                  Default: false
+                type: boolean
               nodename:
                 description: |-
                   Worker node name for deploy.

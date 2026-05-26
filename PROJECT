@@ -29,4 +29,22 @@ resources:
   kind: YanetConfig
   path: github.com/yanet-platform/yanet-operator/api/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: false
+  domain: yanet-platform.io
+  group: yanet
+  kind: Yanet
+  path: github.com/yanet-platform/yanet-operator/api/v2alpha1
+  version: v2alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: false
+  domain: yanet-platform.io
+  group: yanet
+  kind: YanetConfig
+  path: github.com/yanet-platform/yanet-operator/api/v2alpha1
+  version: v2alpha1
 version: "3"

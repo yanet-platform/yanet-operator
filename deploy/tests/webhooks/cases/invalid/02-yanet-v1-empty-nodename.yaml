@@ -1,0 +1,9 @@
+# v1alpha1 Yanet — must be REJECTED by validate.yanet.yanet-platform.io.
+# Reason: spec.nodename cannot be empty.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: Yanet
+metadata:
+  name: yanet-v1-empty-nodename
+  namespace: yanet
+spec:
+  type: release

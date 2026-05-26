@@ -4,6 +4,12 @@ kind: YanetConfig
 metadata:
   name: config
   namespace: {{ $.Release.Namespace }}
+  annotations:
+    # Apply after operator Deployment and webhook CA update job (weight 1) are done
+    # so the webhook endpoint is reachable before this CR is created.
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation
 spec:
    {{- with .spec }}
      {{- toYaml . | nindent 2 }}

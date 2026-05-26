@@ -8,13 +8,27 @@ metadata:
 spec:
   group: yanet.yanet-platform.io
   names:
+    categories:
+    - yanet
     kind: YanetConfig
     listKind: YanetConfigList
     plural: yanetconfigs
+    shortNames:
+    - yntcfg
     singular: yanetconfig
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.updatewindow
+      name: UpdateWindow
+      type: integer
+    - jsonPath: .spec.stop
+      name: Stop
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: YanetConfig is the Schema for the yanetconfigs API

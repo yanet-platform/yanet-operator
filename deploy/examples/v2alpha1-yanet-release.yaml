@@ -1,0 +1,17 @@
+# Minimal Yanet CR (boxType=release).
+# Uses the boxType definition from YanetConfig "cluster-defaults".
+---
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetV2
+metadata:
+  name: example-release
+  namespace: yanet
+spec:
+  boxType: release
+  # Pin to a single host by its Kubernetes hostname label.
+  nodeSelector:
+    kubernetes.io/hostname: example-release
+  enabled: true
+  autoSync: true
+  # All components, patches and resources are defined in YanetConfig.boxTypes[release].
+  # Nothing else is required here.

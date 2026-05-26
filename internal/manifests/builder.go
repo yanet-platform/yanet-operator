@@ -19,7 +19,7 @@ type DeploymentBuilder struct {
 	componentName string
 	replicas      int32
 
-	// Yanet context
+	// YanetV2 context
 	yanet *yanetv1alpha1.Yanet
 
 	// Image configuration
@@ -78,7 +78,7 @@ func (b *DeploymentBuilder) WithComponentName(name string) *DeploymentBuilder {
 	return b
 }
 
-// WithYanet sets Yanet CR reference and automatically sets namespace
+// WithYanet sets YanetV2 CR reference and automatically sets namespace
 func (b *DeploymentBuilder) WithYanet(yanet *yanetv1alpha1.Yanet) *DeploymentBuilder {
 	b.yanet = yanet
 	b.namespace = yanet.Namespace
@@ -266,7 +266,7 @@ func (b *DeploymentBuilder) buildImageName() string {
 }
 
 // buildLabels constructs labels for deployment
-// Uses provided labels or generates default labels from Yanet CR
+// Uses provided labels or generates default labels from YanetV2 CR
 func (b *DeploymentBuilder) buildLabels() map[string]string {
 	if b.labels != nil {
 		return b.labels

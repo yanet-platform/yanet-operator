@@ -6,7 +6,7 @@ Kubernetes operator for managing YANET (Yet Another Network) deployments on work
 
 ```bash
 helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
+  oci://ghcr.io/yanet-platform/yanet-operator \
   --version 0.1.6 \
   --namespace yanet-system \
   --create-namespace
@@ -81,7 +81,7 @@ yanetconfig:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of operator replicas | `2` |
-| `image.repository` | Operator image repository | `yanetplatform/yanet-operator` |
+| `image.repository` | Operator image repository | `ghcr.io/yanet-platform/yanet-operator` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `metrics.enabled` | Enable Prometheus metrics | `true` |
 | `metrics.serviceMonitor.enabled` | Create ServiceMonitor | `true` |
@@ -104,7 +104,7 @@ yanetconfig:
 
 ```bash
 helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
+  oci://ghcr.io/yanet-platform/yanet-operator \
   --namespace yanet-system \
   --create-namespace
 ```
@@ -113,7 +113,7 @@ helm install yanet-operator \
 
 ```bash
 helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
+  oci://ghcr.io/yanet-platform/yanet-operator \
   --namespace yanet-system \
   --create-namespace \
   --set grafana.dashboards.namespace=monitoring
@@ -123,7 +123,7 @@ helm install yanet-operator \
 
 ```bash
 helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
+  oci://ghcr.io/yanet-platform/yanet-operator \
   --namespace yanet-system \
   --create-namespace \
   --set metrics.enabled=false \
@@ -134,7 +134,7 @@ helm install yanet-operator \
 
 ```bash
 helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
+  oci://ghcr.io/yanet-platform/yanet-operator \
   --namespace yanet-system \
   --create-namespace \
   --set webhook.certManager.enabled=true
@@ -144,7 +144,7 @@ helm install yanet-operator \
 
 ```bash
 helm upgrade yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
+  oci://ghcr.io/yanet-platform/yanet-operator \
   --namespace yanet-system
 ```
 
@@ -159,4 +159,4 @@ helm uninstall yanet-operator --namespace yanet-system
 - [Prometheus Metrics](../../README_METRICS.md)
 - [Validation Webhooks](../../README_WEBHOOKS.md)
 - [Testing Guide](../../README_TESTS.md)
-- [Architecture Analysis](../../ARCHITECTURE_ANALYSIS.md)
+- [Architecture](../../ARCHITECTURE.md)

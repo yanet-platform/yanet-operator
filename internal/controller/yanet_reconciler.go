@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"time"
 
@@ -27,6 +26,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -52,7 +52,7 @@ func (r *YanetReconciler) checkUpdateRequeue(logger logr.Logger, updateWindow ti
 	timerExpired := r.lastUpdateTS.Add(updateWindow).Before(timeNow)
 	if !timerExpired && updateHost != r.lastUpdateHost {
 		retryTimer = updateWindow - timeNow.Sub(r.lastUpdateTS)
-		logger.Info("Yanet update try too early, will retry",
+		logger.Info("YanetV2 update try too early, will retry",
 			"lastUpdateTime", r.lastUpdateTS,
 			"lastUpdateHost", r.lastUpdateHost,
 			"retryIn", retryTimer)
@@ -64,7 +64,7 @@ func (r *YanetReconciler) checkUpdateRequeue(logger logr.Logger, updateWindow ti
 	return retryTimer
 }
 
-// Reconcile logic for Yanet object
+// Reconcile logic for YanetV2 object
 func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet, config yanetv1alpha1.YanetConfigSpec) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -72,8 +72,9 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	if !yanet.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(yanet, yanetFinalizer) {
 			// Perform cleanup if needed
-			logger.Info("Yanet is being deleted, running cleanup")
-			r.Recorder.Event(yanet, v1.EventTypeNormal, "Cleanup", "Running cleanup before deletion")
+			logger.Info("YanetV2 is being deleted, running cleanup (no-op; deletion is handled by ownerReferences GC)")
+			r.Recorder.Eventf(yanet, nil, v1.EventTypeNormal, "Cleanup", "Finalize",
+				"Cleanup (no-op; deletion is handled by ownerReferences GC)")
 
 			// Remove finalizer to allow deletion
 			controllerutil.RemoveFinalizer(yanet, yanetFinalizer)
@@ -113,9 +114,9 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	updateWindow := time.Duration(config.UpdateWindow) * time.Second
 	var requeueTimer time.Duration
 	for _, dep := range deps {
-		// Set Yanet instance as the owner and controller
+		// Set YanetV2 instance as the owner and controller
 		if setErr := ctrl.SetControllerReference(yanet, dep, r.Scheme); setErr != nil {
-			logger.Error(setErr, "Can not set Yanet instance as the owner and controller")
+			logger.Error(setErr, "Can not set YanetV2 instance as the owner and controller")
 			return ctrl.Result{}, setErr
 		}
 		found := &appsv1.Deployment{}
@@ -144,13 +145,13 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 					"Deployment.Name",
 					dep.Name,
 				)
-				r.Recorder.Event(yanet, v1.EventTypeWarning, "DeploymentCreateFailed",
-					fmt.Sprintf("Failed to create deployment %s: %v", dep.Name, err))
+				r.Recorder.Eventf(yanet, nil, v1.EventTypeWarning, "DeploymentCreateFailed", "Create",
+					"Failed to create deployment %s: %v", dep.Name, err)
 				sync.Error = append(sync.Error, dep.Name)
 				continue
 			}
-			r.Recorder.Event(yanet, v1.EventTypeNormal, "DeploymentCreated",
-				fmt.Sprintf("Created deployment %s", dep.Name))
+			r.Recorder.Eventf(yanet, nil, v1.EventTypeNormal, "DeploymentCreated", "Create",
+				"Created deployment %s", dep.Name)
 			// Deployment created successfully — record in sync status and skip diff check
 			if *dep.Spec.Replicas == 0 {
 				sync.Disabled = append(sync.Disabled, dep.Name)
@@ -178,8 +179,8 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 			}
 			requeueTimer = r.checkUpdateRequeue(logger, updateWindow, yanet.Spec.NodeName)
 			if requeueTimer > 0 {
-				r.Recorder.Event(yanet, v1.EventTypeNormal, "UpdateWindowWait",
-					fmt.Sprintf("Waiting %s before updating %s (UpdateWindow)", requeueTimer, dep.Name))
+				r.Recorder.Eventf(yanet, nil, v1.EventTypeNormal, "UpdateWindowWait", "Update",
+					"Waiting %s before updating %s (UpdateWindow)", requeueTimer, dep.Name)
 				sync.SyncWaiting = append(sync.SyncWaiting, dep.Name)
 				continue
 			}
@@ -196,13 +197,13 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 					"Deployment.Name",
 					dep.Name,
 				)
-				r.Recorder.Event(yanet, v1.EventTypeWarning, "DeploymentUpdateFailed",
-					fmt.Sprintf("Failed to update deployment %s: %v", dep.Name, err))
+				r.Recorder.Eventf(yanet, nil, v1.EventTypeWarning, "DeploymentUpdateFailed", "Update",
+					"Failed to update deployment %s: %v", dep.Name, err)
 				sync.Error = append(sync.Error, dep.Name)
 				continue
 			}
-			r.Recorder.Event(yanet, v1.EventTypeNormal, "DeploymentUpdated",
-				fmt.Sprintf("Updated deployment %s", dep.Name))
+			r.Recorder.Eventf(yanet, nil, v1.EventTypeNormal, "DeploymentUpdated", "Update",
+				"Updated deployment %s", dep.Name)
 		}
 		if *dep.Spec.Replicas == 0 {
 			sync.Disabled = append(sync.Disabled, dep.Name)
@@ -211,7 +212,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		}
 	}
 
-	// Update the Yanet status
+	// Update the YanetV2 status
 	// List the pods for this yanet's crds
 	podList := &v1.PodList{}
 	listOpts := []client.ListOption{
@@ -226,7 +227,7 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 		logger.Error(
 			err,
 			"Can not find pods for status update, may be replicaCount = 0 in config",
-			"Yanet.Namespace",
+			"YanetV2.Namespace",
 			yanet.Namespace,
 			"host",
 			yanet.Spec.NodeName,
@@ -243,17 +244,31 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 	outOfSyncCount := len(sync.OutOfSync) + len(sync.Error)
 	yanetDeploymentsOutOfSync.WithLabelValues(yanet.Name, yanet.Namespace).Set(float64(outOfSyncCount))
 
-	// Update status if needed
+	// Update status if needed. Wrap in RetryOnConflict to handle the 409
+	// that occurs when two replicas (or two rapid reconcile cycles triggered
+	// by Pod/Deployment events) race to write status with the same
+	// resourceVersion.
 	if !reflect.DeepEqual(podNames, yanet.Status.Pods) ||
 		!reflect.DeepEqual(sync, yanet.Status.Sync) ||
 		!reflect.DeepEqual(conditions, yanet.Status.Conditions) {
-		yanet.Status.Pods = podNames
-		yanet.Status.Sync = sync
-		yanet.Status.Conditions = conditions
-		err := r.Status().Update(ctx, yanet)
-		if err != nil {
-			logger.Error(err, "Failed to update Yanet status")
-			return ctrl.Result{}, err
+		retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			// Re-fetch the latest version before each attempt so the
+			// resourceVersion is always current.
+			fresh := &yanetv1alpha1.Yanet{}
+			if getErr := r.Client.Get(ctx, types.NamespacedName{
+				Name:      yanet.Name,
+				Namespace: yanet.Namespace,
+			}, fresh); getErr != nil {
+				return getErr
+			}
+			fresh.Status.Pods = podNames
+			fresh.Status.Sync = sync
+			fresh.Status.Conditions = conditions
+			return r.Status().Update(ctx, fresh)
+		})
+		if retryErr != nil {
+			logger.Error(retryErr, "Failed to update Yanet status")
+			return ctrl.Result{}, retryErr
 		}
 	}
 	// Requeue if waiting object available

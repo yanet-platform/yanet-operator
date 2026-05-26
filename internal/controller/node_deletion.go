@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -31,8 +30,8 @@ import (
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 )
 
-// handleNodeDeletion handles cleanup when a worker node is deleted
-// It finds and deletes the corresponding Yanet CRD
+// handleNodeDeletion handles cleanup when a worker node is deleted.
+// It finds and deletes the corresponding v1alpha1 Yanet CR.
 func (r *YanetReconciler) handleNodeDeletion(ctx context.Context, nodeName string) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -73,14 +72,14 @@ func (r *YanetReconciler) handleNodeDeletion(ctx context.Context, nodeName strin
 				"namespace", yanet.Namespace,
 				"node", nodeName)
 
-			r.Recorder.Event(yanet, v1.EventTypeNormal, "NodeDeleted",
-				fmt.Sprintf("Worker node %s deleted, cleaning up Yanet resource", nodeName))
+			r.Recorder.Eventf(yanet, nil, v1.EventTypeNormal, "NodeDeleted", "Cleanup",
+				"Worker node %s deleted, cleaning up Yanet resource", nodeName)
 
 			err = r.Client.Delete(ctx, yanet)
 			if err != nil && !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to delete Yanet resource for deleted node")
-				r.Recorder.Event(yanet, v1.EventTypeWarning, "CleanupFailed",
-					fmt.Sprintf("Failed to delete Yanet for deleted node: %v", err))
+				r.Recorder.Eventf(yanet, nil, v1.EventTypeWarning, "CleanupFailed", "Delete",
+					"Failed to delete Yanet for deleted node: %v", err)
 				return ctrl.Result{}, err
 			}
 

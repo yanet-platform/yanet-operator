@@ -1,0 +1,49 @@
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetV2
+metadata:
+  labels:
+    app.kubernetes.io/name: yanet-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: yanet-sample
+spec:
+  placement:
+    nodeSelector:
+      kubernetes.io/hostname: node1.example.com
+    type: release
+  
+  images:
+    registry: dockerhub.io
+    prefix: yanet2
+    tag: "2.0"
+    pullPolicy: IfNotPresent
+  
+  components:
+    controlplane:
+      enabled: true
+      image:
+        name: yanet-controlplane-director
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1"
+    
+    dataplane:
+      enabled: true
+      image:
+        name: yanet-dataplane
+      resources:
+        requests:
+          memory: "8Gi"
+          hugepages-1Gi: "8Gi"
+      securityContext:
+        privileged: true
+      hostNetwork: true
+      hostIPC: true
+  
+  config:
+    hostPath: /etc/yanet
+    files:
+      controlplane: controlplane-director.yaml
+      dataplane: dataplane.yaml
+  
+  autosync: true

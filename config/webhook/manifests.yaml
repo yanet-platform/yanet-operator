@@ -44,3 +44,43 @@ webhooks:
     resources:
     - yanetconfigs
   sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-yanet-yanet-platform-io-v2alpha1-yanetconfigv2
+  failurePolicy: Fail
+  name: vyanetconfigv2.kb.io
+  rules:
+  - apiGroups:
+    - yanet.yanet-platform.io
+    apiVersions:
+    - v2alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - yanetconfigsv2
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-yanet-yanet-platform-io-v2alpha1-yanetv2
+  failurePolicy: Fail
+  name: vyanetv2.kb.io
+  rules:
+  - apiGroups:
+    - yanet.yanet-platform.io
+    apiVersions:
+    - v2alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - yanetsv2
+  sideEffects: None

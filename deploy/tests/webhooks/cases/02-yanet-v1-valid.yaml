@@ -1,0 +1,29 @@
+# v1alpha1 Yanet — must be ACCEPTED. All components have enable: false so the
+# reconciler renders Deployments with replicas=0 (no image pulls needed in CI).
+# Based on deploy/examples/yanet.yaml.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: Yanet
+metadata:
+  name: test-node-v1.example.com
+  namespace: yanet
+spec:
+  allowreboot: false
+  autosync: true
+  nodename: test-node-v1.example.com
+  tag: latest
+  type: release
+  announcer:
+    enable: false
+    image: yanet-platform/yanet-announcer
+  bird:
+    enable: false
+    image: yanet-platform/yandex-bird2
+  controlplane:
+    enable: false
+    image: yanet-platform/yanet
+  dataplane:
+    enable: false
+    image: yanet-platform/yanet
+  preparejob:
+    enable: false
+    image: yanet-platform/yanet

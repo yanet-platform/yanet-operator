@@ -4,6 +4,8 @@
 resources:
 - bases/yanet.yanet-platform.io_yanets.yaml
 - bases/yanet.yanet-platform.io_yanetconfigs.yaml
+- bases/yanet.yanet-platform.io_yanetsv2.yaml
+- bases/yanet.yanet-platform.io_yanetconfigsv2.yaml
 #+kubebuilder:scaffold:crdkustomizeresource
 
 patches:

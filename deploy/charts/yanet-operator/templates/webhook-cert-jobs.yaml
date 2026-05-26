@@ -1,5 +1,90 @@
 {{- if and .Values.webhook.enabled (not .Values.webhook.certManager.enabled) }}
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade,post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade,post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade,post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen
+subjects:
+- kind: ServiceAccount
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen-{{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade,post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+  verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen-{{ .Release.Namespace }}
+  labels:
+    {{- include "yanet-operator.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade,post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen-{{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: {{ include "yanet-operator.fullname" . }}-webhook-certgen
+  namespace: {{ .Release.Namespace }}
+---
+# Certificate generation job: runs on install and upgrade.
+# kube-webhook-certgen create is idempotent — it patches the existing Secret
+# rather than failing if it already exists, so running on every upgrade is safe.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -9,6 +94,7 @@ metadata:
     {{- include "yanet-operator.labels" . | nindent 4 }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "1"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   template:
@@ -18,7 +104,7 @@ spec:
         {{- include "yanet-operator.labels" . | nindent 8 }}
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "yanet-operator.serviceAccountName" . }}
+      serviceAccountName: {{ include "yanet-operator.fullname" . }}-webhook-certgen
       containers:
       - name: cert-generator
         image: "{{ .Values.webhook.certGen.image.repository }}:{{ .Values.webhook.certGen.image.tag }}"
@@ -31,6 +117,10 @@ spec:
         - --key-name=tls.key
         - --secret-name={{ include "yanet-operator.fullname" . }}-webhook-certs
 ---
+# CA patch job: fills caBundle in ValidatingWebhookConfiguration after the
+# cert has been generated (pre-*) and the VWC created/updated (main phase).
+# Running on both post-install and post-upgrade ensures the caBundle is always
+# in sync with the TLS secret even when Helm resets it to empty during upgrade.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,6 +130,7 @@ metadata:
     {{- include "yanet-operator.labels" . | nindent 4 }}
   annotations:
     helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "1"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   template:
@@ -49,7 +140,7 @@ spec:
         {{- include "yanet-operator.labels" . | nindent 8 }}
     spec:
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "yanet-operator.serviceAccountName" . }}
+      serviceAccountName: {{ include "yanet-operator.fullname" . }}-webhook-certgen
       containers:
       - name: ca-updater
         image: "{{ .Values.webhook.certGen.image.repository }}:{{ .Values.webhook.certGen.image.tag }}"
@@ -62,3 +153,4 @@ spec:
         - --patch-validating=true
         - --patch-mutating=false
 {{- end }}
+

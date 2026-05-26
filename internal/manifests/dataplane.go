@@ -81,11 +81,7 @@ func DeploymentForDataplane(
 			[]string{"/usr/bin/yanet-dataplane"},
 			[]string{"-c", "/etc/yanet/dataplane.conf"},
 		).
-		WithVolumeMounts([]v1.VolumeMount{
-			{Name: "hugepage", MountPath: "/dev/hugepages"},
-			{Name: "etc-yanet", MountPath: "/etc/yanet"},
-			{Name: "run-yanet", MountPath: "/run/yanet"},
-		}).
+		WithVolumeMounts(dataplaneVolumeMounts(m.Spec.Intel)).
 		WithResources(GetResources(
 			ctx,
 			m.Spec.NodeName,
@@ -100,6 +96,48 @@ func DeploymentForDataplane(
 			},
 		}).
 		WithInitContainers(initContainers).
-		WithVolumes(GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet"})).
+		WithVolumes(dataplaneVolumes(m.Spec.Intel)).
 		Build()
+}
+
+// intelIceDDPVolumeName is the name of the volume for Intel ice DDP firmware.
+const intelIceDDPVolumeName = "ice-ddp"
+
+// intelIceDDPHostPath is the host path for Intel ice DDP firmware.
+const intelIceDDPHostPath = "/lib/firmware/intel/ice/ddp"
+
+// dataplaneVolumeMounts returns volume mounts for the dataplane container.
+// When intel is true, adds the ice-ddp firmware mount required for Intel E810 NICs.
+func dataplaneVolumeMounts(intel bool) []v1.VolumeMount {
+	mounts := []v1.VolumeMount{
+		{Name: "hugepage", MountPath: "/dev/hugepages"},
+		{Name: "etc-yanet", MountPath: "/etc/yanet"},
+		{Name: "run-yanet", MountPath: "/run/yanet"},
+	}
+	if intel {
+		mounts = append(mounts, v1.VolumeMount{
+			Name:      intelIceDDPVolumeName,
+			MountPath: intelIceDDPHostPath,
+		})
+	}
+	return mounts
+}
+
+// dataplaneVolumes returns volumes for the dataplane pod.
+// When intel is true, adds the ice-ddp HostPath volume for Intel E810 NIC firmware.
+func dataplaneVolumes(intel bool) []v1.Volume {
+	volumes := GetVolumes([]string{"/dev/hugepages", "/etc/yanet", "/run/yanet"})
+	if intel {
+		hostPathDirectory := v1.HostPathDirectory
+		volumes = append(volumes, v1.Volume{
+			Name: intelIceDDPVolumeName,
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{
+					Path: intelIceDDPHostPath,
+					Type: &hostPathDirectory,
+				},
+			},
+		})
+	}
+	return volumes
 }

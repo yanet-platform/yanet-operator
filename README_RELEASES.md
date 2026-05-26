@@ -7,8 +7,8 @@ This document describes the release process for yanet-operator.
 Releases are fully automated via GitHub Actions. When you push a version tag, the CI/CD pipeline:
 
 1. **Builds multi-platform Docker images** (amd64, arm64)
-2. **Publishes to Docker Hub and GHCR**
-3. **Packages and publishes Helm chart** to OCI registries
+2. **Publishes to GHCR**
+3. **Packages and publishes Helm chart** to GHCR OCI registry
 4. **Generates installation manifests** (`install.yaml`)
 5. **Creates GitHub Release** with artifacts and release notes
 
@@ -39,12 +39,12 @@ GitHub Actions will automatically:
 
 1. **Build Docker images** — [`docker` job](.github/workflows/release.yml)
    - Platforms: `linux/amd64`, `linux/arm64`
-   - Registries: Docker Hub, GHCR
+   - Registries: GHCR
    - Tags: `v0.1.7`, `0.1.7`, `0.1`, `0`, `latest`
 
 2. **Package Helm chart** — [`helm` job](.github/workflows/release.yml)
    - Syncs `appVersion` with git tag
-   - Publishes to Docker Hub OCI and GHCR
+   - Publishes to GHCR OCI
 
 3. **Generate manifests** — [`manifests` job](.github/workflows/release.yml)
    - Creates `install.yaml` with all resources
@@ -58,14 +58,13 @@ GitHub Actions will automatically:
 
 ```bash
 # Check Docker images
-docker pull yanetplatform/yanet-operator:0.1.7
 docker pull ghcr.io/yanet-platform/yanet-operator:0.1.7
 
 # Verify multi-platform support
-docker manifest inspect yanetplatform/yanet-operator:0.1.7
+docker manifest inspect ghcr.io/yanet-platform/yanet-operator:0.1.7
 
 # Check Helm chart
-helm show chart oci://registry-1.docker.io/yanetplatform/yanet-operator --version 0.1.7
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.7
 
 # Test installation
 kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v0.1.7/install.yaml
@@ -77,12 +76,6 @@ Each release includes:
 
 ### Docker Images
 
-**Docker Hub:**
-- `yanetplatform/yanet-operator:0.1.7` (version)
-- `yanetplatform/yanet-operator:0.1` (minor)
-- `yanetplatform/yanet-operator:0` (major)
-- `yanetplatform/yanet-operator:latest`
-
 **GitHub Container Registry:**
 - `ghcr.io/yanet-platform/yanet-operator:0.1.7`
 - `ghcr.io/yanet-platform/yanet-operator:0.1`
@@ -92,15 +85,6 @@ Each release includes:
 **Platforms:** `linux/amd64`, `linux/arm64`
 
 ### Helm Charts
-
-**Docker Hub OCI:**
-```bash
-helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
-  --version 0.1.7 \
-  --namespace yanet-system \
-  --create-namespace
-```
 
 **GitHub Container Registry:**
 ```bash
@@ -154,8 +138,6 @@ VERSION="0.1.7"
 docker buildx create --use
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --tag yanetplatform/yanet-operator:${VERSION} \
-  --tag yanetplatform/yanet-operator:latest \
   --tag ghcr.io/yanet-platform/yanet-operator:${VERSION} \
   --tag ghcr.io/yanet-platform/yanet-operator:latest \
   --push \
@@ -171,10 +153,6 @@ sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" deploy/charts/yanet-operat
 # Package chart
 helm package deploy/charts/yanet-operator
 
-# Push to Docker Hub
-helm registry login registry-1.docker.io
-helm push yanet-operator-${VERSION}.tgz oci://registry-1.docker.io/yanetplatform
-
 # Push to GHCR
 helm registry login ghcr.io
 helm push yanet-operator-${VERSION}.tgz oci://ghcr.io/yanet-platform
@@ -184,7 +162,7 @@ helm push yanet-operator-${VERSION}.tgz oci://ghcr.io/yanet-platform
 
 ```bash
 make manifests
-make build-installer IMG=yanetplatform/yanet-operator:${VERSION}
+make build-installer IMG=ghcr.io/yanet-platform/yanet-operator:${VERSION}
 ```
 
 ### 4. Create GitHub Release
@@ -209,20 +187,16 @@ gh run view <run-id> --log
 
 **Common issues:**
 
-1. **Docker Hub authentication fails**
-   - Verify `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets
-   - Check token permissions (read, write, delete)
-
-2. **GHCR authentication fails**
+1. **GHCR authentication fails**
    - Ensure `packages: write` permission in workflow
    - Verify `GITHUB_TOKEN` has correct scopes
 
-3. **Helm push fails**
+2. **Helm push fails**
    - Check chart version in `Chart.yaml`
    - Verify OCI registry credentials
    - Ensure chart version doesn't already exist
 
-4. **Manifest generation fails**
+3. **Manifest generation fails**
    - Run `make manifests` locally to check for errors
    - Verify kustomize installation
 
@@ -257,7 +231,7 @@ gh release delete v${VERSION} --yes
 git tag -d v${VERSION}
 git push origin :refs/tags/v${VERSION}
 
-# Delete Docker images (manual via Docker Hub/GHCR UI)
+# Delete Docker images (manual via GHCR UI)
 # Delete Helm charts (manual via registry UI)
 ```
 
@@ -265,7 +239,6 @@ git push origin :refs/tags/v${VERSION}
 
 Track release health:
 
-- **Docker Hub pulls:** https://hub.docker.com/r/yanetplatform/yanet-operator
 - **GHCR downloads:** https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator
 - **GitHub releases:** https://github.com/yanet-platform/yanet-operator/releases
 - **Helm chart versions:** `helm search repo yanet-operator --versions`
@@ -276,14 +249,7 @@ GitHub repository secrets:
 
 | Secret | Description | Required For |
 |--------|-------------|--------------|
-| `DOCKERHUB_USERNAME` | Docker Hub username | Docker image publishing |
-| `DOCKERHUB_TOKEN` | Docker Hub access token | Docker image publishing |
 | `GITHUB_TOKEN` | Auto-provided by GitHub | GHCR, releases |
-
-**Setup Docker Hub token:**
-1. Go to https://hub.docker.com/settings/security
-2. Create new access token with read/write/delete permissions
-3. Add to GitHub: Settings → Secrets → Actions → New repository secret
 
 ## 📚 Related Documentation
 
@@ -291,7 +257,7 @@ GitHub repository secrets:
 - [Testing Guide](README_TESTS.md) — How to run tests
 - [Validation Webhooks](README_WEBHOOKS.md) — Admission control
 - [Prometheus Metrics](README_METRICS.md) — Monitoring
-- [Architecture Analysis](ARCHITECTURE_ANALYSIS.md) — Design decisions
+- [Architecture](ARCHITECTURE.md) — Design decisions
 
 ## 🎓 Best Practices
 
@@ -317,12 +283,12 @@ GitHub repository secrets:
 
 5. **Verify multi-platform images**
    ```bash
-   docker manifest inspect yanetplatform/yanet-operator:0.1.7
+   docker manifest inspect ghcr.io/yanet-platform/yanet-operator:0.1.7
    ```
 
 6. **Test Helm chart installation**
    ```bash
-   helm install test oci://registry-1.docker.io/yanetplatform/yanet-operator \
+   helm install test oci://ghcr.io/yanet-platform/yanet-operator \
      --version 0.1.7 \
      --namespace test \
      --create-namespace \
@@ -350,8 +316,8 @@ git push origin main v0.1.7
 gh run watch
 
 # 5. Verify
-docker pull yanetplatform/yanet-operator:0.1.7
-helm show chart oci://registry-1.docker.io/yanetplatform/yanet-operator --version 0.1.7
+docker pull ghcr.io/yanet-platform/yanet-operator:0.1.7
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.7
 ```
 
 ---

@@ -29,7 +29,7 @@ import (
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 )
 
-// YanetConfigReconciler reconciles a YanetConfig object
+// YanetConfigReconciler reconciles a YanetConfigV2 object
 type YanetConfigReconciler struct {
 	client.Client
 	Scheme       *runtime.Scheme
@@ -43,7 +43,7 @@ type YanetConfigReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the YanetConfig object against the actual cluster state, and then
+// the YanetConfigV2 object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
@@ -58,16 +58,16 @@ func (r *YanetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Client.Get(ctx, req.NamespacedName, config)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			logger.Info("YanetConfig resource not found, ignoring since object must be deleted",
+			logger.Info("YanetConfigV2 resource not found, ignoring since object must be deleted",
 				"namespacedName", req.NamespacedName)
 			yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "not_found").Inc()
 		} else {
-			logger.Error(err, "Failed to get YanetConfig object")
+			logger.Error(err, "Failed to get YanetConfigV2 object")
 			yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
 			return ctrl.Result{}, err
 		}
 	} else {
-		logger.Info("Successfully found YanetConfig object", "namespacedName", req.NamespacedName)
+		logger.Info("Successfully found YanetConfigV2 object", "namespacedName", req.NamespacedName)
 		logger.V(1).Info("Updating GlobalConfig with new config", "config", config.Spec)
 		// TODO: add config validator
 		r.GlobalConfig.Lock.Lock()

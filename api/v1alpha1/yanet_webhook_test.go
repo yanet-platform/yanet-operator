@@ -125,6 +125,28 @@ func TestYanetValidateUpdate(t *testing.T) {
 		errMsg  string
 	}{
 		{
+			name: "allow finalizer removal when object is being deleted",
+			old: &Yanet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-node",
+					Finalizers: []string{"yanet.yanet-platform.io/finalizer"},
+				},
+				Spec: YanetSpec{
+					NodeName: "test-node",
+					Type:     "release",
+				},
+			},
+			new: &Yanet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-node",
+					DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
+					Finalizers:        []string{},
+				},
+				Spec: YanetSpec{},
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid update - same nodename",
 			old: &Yanet{
 				ObjectMeta: metav1.ObjectMeta{

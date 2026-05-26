@@ -33,6 +33,7 @@ spec:
         - name: {{ .Chart.Name }}
           args:
           - --leader-elect
+          - --webhook-enabled={{ .Values.webhook.enabled }}
           command:
           - /manager
           securityContext:

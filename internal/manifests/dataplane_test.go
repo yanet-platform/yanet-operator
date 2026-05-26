@@ -171,3 +171,184 @@ func TestDeploymentForDataplane_CustomTag(t *testing.T) {
 		t.Errorf("expected image %q, got %q", expectedImage, container.Image)
 	}
 }
+
+func TestDeploymentForDataplane_IntelEnabled(t *testing.T) {
+	yanet := &yanetv1alpha1.Yanet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-yanet",
+			Namespace: "default",
+		},
+		Spec: yanetv1alpha1.YanetSpec{
+			NodeName: "test-node",
+			Tag:      "1.0.0",
+			Intel:    true,
+			Dataplane: yanetv1alpha1.Dep{
+				Enable: true,
+				Image:  "yanet-dataplane",
+			},
+		},
+	}
+
+	config := yanetv1alpha1.YanetConfigSpec{}
+	nodes := v1.NodeList{}
+
+	dep := DeploymentForDataplane(context.Background(), yanet, config, nodes)
+
+	// Check that ice-ddp VolumeMount is present
+	container := dep.Spec.Template.Spec.Containers[0]
+	foundMount := false
+	for _, vm := range container.VolumeMounts {
+		if vm.Name == intelIceDDPVolumeName && vm.MountPath == intelIceDDPHostPath {
+			foundMount = true
+			break
+		}
+	}
+	if !foundMount {
+		t.Errorf("expected VolumeMount %q at %q, not found in %v", intelIceDDPVolumeName, intelIceDDPHostPath, container.VolumeMounts)
+	}
+
+	// Check that ice-ddp Volume (HostPath Directory) is present
+	foundVolume := false
+	for _, vol := range dep.Spec.Template.Spec.Volumes {
+		if vol.Name != intelIceDDPVolumeName {
+			continue
+		}
+		if vol.HostPath == nil {
+			t.Errorf("expected HostPath volume for %q, but HostPath is nil", intelIceDDPVolumeName)
+			break
+		}
+		if vol.HostPath.Path != intelIceDDPHostPath {
+			t.Errorf("expected HostPath.Path %q, got %q", intelIceDDPHostPath, vol.HostPath.Path)
+		}
+		if vol.HostPath.Type == nil || *vol.HostPath.Type != v1.HostPathDirectory {
+			t.Errorf("expected HostPath.Type Directory, got %v", vol.HostPath.Type)
+		}
+		foundVolume = true
+		break
+	}
+	if !foundVolume {
+		t.Errorf("expected Volume %q not found in %v", intelIceDDPVolumeName, dep.Spec.Template.Spec.Volumes)
+	}
+}
+
+func TestDeploymentForDataplane_IntelDisabled(t *testing.T) {
+	yanet := &yanetv1alpha1.Yanet{
+		Spec: yanetv1alpha1.YanetSpec{
+			NodeName: "test-node",
+			Tag:      "1.0.0",
+			Intel:    false,
+			Dataplane: yanetv1alpha1.Dep{
+				Enable: true,
+				Image:  "yanet-dataplane",
+			},
+		},
+	}
+
+	config := yanetv1alpha1.YanetConfigSpec{}
+	nodes := v1.NodeList{}
+
+	dep := DeploymentForDataplane(context.Background(), yanet, config, nodes)
+
+	// Ensure ice-ddp VolumeMount is absent when Intel is false
+	container := dep.Spec.Template.Spec.Containers[0]
+	for _, vm := range container.VolumeMounts {
+		if vm.Name == intelIceDDPVolumeName {
+			t.Errorf("unexpected VolumeMount %q found when Intel=false", intelIceDDPVolumeName)
+		}
+	}
+
+	// Ensure ice-ddp Volume is absent when Intel is false
+	for _, vol := range dep.Spec.Template.Spec.Volumes {
+		if vol.Name == intelIceDDPVolumeName {
+			t.Errorf("unexpected Volume %q found when Intel=false", intelIceDDPVolumeName)
+		}
+	}
+}
+
+func TestDataplaneVolumeMounts(t *testing.T) {
+	tests := []struct {
+		name          string
+		intel         bool
+		expectIceDDP  bool
+		expectedCount int
+	}{
+		{
+			name:          "intel disabled",
+			intel:         false,
+			expectIceDDP:  false,
+			expectedCount: 3,
+		},
+		{
+			name:          "intel enabled",
+			intel:         true,
+			expectIceDDP:  true,
+			expectedCount: 4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mounts := dataplaneVolumeMounts(tt.intel)
+			if len(mounts) != tt.expectedCount {
+				t.Errorf("expected %d mounts, got %d", tt.expectedCount, len(mounts))
+			}
+			foundIceDDP := false
+			for _, m := range mounts {
+				if m.Name != intelIceDDPVolumeName {
+					continue
+				}
+				foundIceDDP = true
+				if m.MountPath != intelIceDDPHostPath {
+					t.Errorf("expected MountPath %q, got %q", intelIceDDPHostPath, m.MountPath)
+				}
+			}
+			if foundIceDDP != tt.expectIceDDP {
+				t.Errorf("expectIceDDP=%v but foundIceDDP=%v", tt.expectIceDDP, foundIceDDP)
+			}
+		})
+	}
+}
+
+func TestDataplaneVolumes(t *testing.T) {
+	tests := []struct {
+		name         string
+		intel        bool
+		expectIceDDP bool
+	}{
+		{
+			name:         "intel disabled",
+			intel:        false,
+			expectIceDDP: false,
+		},
+		{
+			name:         "intel enabled",
+			intel:        true,
+			expectIceDDP: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			volumes := dataplaneVolumes(tt.intel)
+			foundIceDDP := false
+			for _, vol := range volumes {
+				if vol.Name != intelIceDDPVolumeName {
+					continue
+				}
+				foundIceDDP = true
+				if vol.HostPath == nil {
+					t.Fatal("expected HostPath to be non-nil for ice-ddp volume")
+				}
+				if vol.HostPath.Path != intelIceDDPHostPath {
+					t.Errorf("expected path %q, got %q", intelIceDDPHostPath, vol.HostPath.Path)
+				}
+				if vol.HostPath.Type == nil || *vol.HostPath.Type != v1.HostPathDirectory {
+					t.Errorf("expected HostPathDirectory type, got %v", vol.HostPath.Type)
+				}
+			}
+			if foundIceDDP != tt.expectIceDDP {
+				t.Errorf("expectIceDDP=%v but foundIceDDP=%v", tt.expectIceDDP, foundIceDDP)
+			}
+		})
+	}
+}

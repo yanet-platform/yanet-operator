@@ -1,10 +1,11 @@
 # yanet-operator
 
-[![Docker Hub](https://img.shields.io/docker/v/yanetplatform/yanet-operator?label=Docker%20Hub&logo=docker)](https://hub.docker.com/r/yanetplatform/yanet-operator)
 [![GitHub Container Registry](https://img.shields.io/badge/GHCR-latest-blue?logo=github)](https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator)
-[![Helm Chart](https://img.shields.io/badge/Helm-OCI-0f1689?logo=helm)](https://hub.docker.com/r/yanetplatform/yanet-operator)
+[![Helm Chart](https://img.shields.io/badge/Helm-OCI-0f1689?logo=helm)](https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator)
 
 Kubernetes operator for managing YANET (Yet Another Network) deployments on worker nodes.
+
+> **🚀 v2alpha1 API Available!** Component-based API (boxTypes + strategic-merge patches) with multi-node support via `nodeSelector` and per-NUMA controlplane fan-out. See [YANET2_ARCH.md](YANET2_ARCH.md) for architecture details.
 
 ## Features
 
@@ -24,14 +25,7 @@ Kubernetes operator for managing YANET (Yet Another Network) deployments on work
 ### Installation via Helm (Recommended)
 
 ```bash
-# Install from Docker Hub OCI registry
-helm install yanet-operator \
-  oci://registry-1.docker.io/yanetplatform/yanet-operator \
-  --version 0.1.5 \
-  --namespace yanet-system \
-  --create-namespace
-
-# Or install from GitHub Container Registry
+# Install from GitHub Container Registry
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
   --version 0.1.5 \
@@ -45,6 +39,27 @@ helm install yanet-operator \
 # Apply CRDs and operator deployment
 kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/latest/download/install.yaml
 ```
+
+## API Versions
+
+v1 and v2 live in the same API group (`yanet.yanet-platform.io`) but as
+**separate CRDs** with disjoint controllers and webhooks. There is no
+storage-version dispatch and no in-process conversion.
+
+### v1alpha1 — `yanets` / `yanetconfigs` (legacy, in production)
+Single-node management with the `nodename` field; per-installation
+component spec embedded directly in the `Yanet` CR.
+
+### v2alpha1 — `yanetsv2` / `yanetconfigsv2` ✨
+Component palette + named strategic-merge patches + named `boxTypes`
+live in `YanetConfigV2`. The `YanetV2` CR is minimal: pick a `boxType`,
+select nodes via `nodeSelector`, optionally override per-container
+`image.{name,tag}` and `enabled` flags. Per-NUMA controlplane fan-out is
+driven by the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`.
+
+See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
+[`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable
+samples.
 
 ## Usage
 
@@ -92,8 +107,8 @@ spec:
 - ✅ [Validation Webhooks](README_WEBHOOKS.md) — Admission control and validation rules
 - 📈 [Prometheus Metrics](README_METRICS.md) — Monitoring and observability
 - 🚀 [Release Guide](README_RELEASES.md) — How to create and publish releases
-- 🏗️ [Architecture Analysis](ARCHITECTURE_ANALYSIS.md) — Design decisions and roadmap
-- 🤖 [AI Development Guide](FOR_AI.md) — Guidelines for AI assistants
+- 🏗️ [Architecture](ARCHITECTURE.md) — Design decisions and roadmap
+- 🤖 [AI Development Guide](AGENTS.md) — Guidelines for AI assistants
 
 ## Development
 
@@ -134,10 +149,10 @@ make run
 
 ```bash
 # Build image
-make docker-build IMG=yanetplatform/yanet-operator:v0.1.5
+make docker-build IMG=ghcr.io/yanet-platform/yanet-operator:v0.1.5
 
-# Push to Docker Hub
-make docker-push IMG=yanetplatform/yanet-operator:v0.1.5
+# Push to GHCR
+make docker-push IMG=ghcr.io/yanet-platform/yanet-operator:v0.1.5
 ```
 
 ### Deploy to Cluster
@@ -147,7 +162,7 @@ make docker-push IMG=yanetplatform/yanet-operator:v0.1.5
 make install
 
 # Deploy operator
-make deploy IMG=yanetplatform/yanet-operator:v0.1.5
+make deploy IMG=ghcr.io/yanet-platform/yanet-operator:v0.1.5
 
 # Create sample resources
 kubectl apply -f config/samples/
@@ -227,8 +242,8 @@ make manifests
 The project uses GitHub Actions for automated testing and publishing:
 
 - **Tests** — Run on every push and PR
-- **Docker Images** — Published to Docker Hub and GHCR on version tags
-- **Helm Charts** — Published to OCI registries on version tags
+- **Docker Images** — Published to GHCR on version tags
+- **Helm Charts** — Published to GHCR OCI registry on version tags
 
 See [GITHUB_ACTIONS_DOCKER.md](GITHUB_ACTIONS_DOCKER.md) for setup instructions.
 
@@ -240,7 +255,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 - [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 - [YANET Platform](https://github.com/yanet-platform)
-- [Docker Hub Repository](https://hub.docker.com/r/yanetplatform/yanet-operator)
+- [GHCR Repository](https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator)
 
 ## License
 

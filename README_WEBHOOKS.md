@@ -2,9 +2,20 @@
 
 ## Overview
 
-yanet-operator uses Kubernetes Admission Webhooks to validate `Yanet` and `YanetConfig` resources before creation or update.
+yanet-operator uses Kubernetes Admission Webhooks to validate all four
+CRDs before creation or update:
 
-## Yanet Validation
+- v1alpha1: `Yanet`, `YanetConfig`
+- v2alpha1: `YanetV2`, `YanetConfigV2`
+
+This document describes the v1alpha1 rules in detail. For the v2alpha1
+validators (`vyanetv2.kb.io`, `vyanetconfigv2.kb.io`) — boxType
+immutability, cross-references between components/patches/boxTypes,
+strategic-merge dry-run of every NamedPatch — see the dedicated webhook
+section in [ARCHITECTURE.md](ARCHITECTURE.md) and the test cases under
+[`deploy/tests/webhooks/cases/`](deploy/tests/webhooks/cases/).
+
+## Yanet Validation (v1alpha1)
 
 ### Validation Rules
 
@@ -130,12 +141,20 @@ webhook:
 
 ## Disabling Webhook
 
-To disable webhook:
+To disable webhook, set `webhook.enabled: false` in values.yaml:
 
 ```yaml
 webhook:
   enabled: false
 ```
+
+When disabled:
+- Webhook server is not started (flag `--webhook-enabled=false`)
+- TLS certificates are not mounted into the pod
+- ValidatingWebhookConfiguration is not created
+- No certificate generation jobs run
+
+This is useful for development or testing environments where webhook validation is not required.
 
 ## Troubleshooting
 
@@ -212,9 +231,12 @@ helm upgrade yanet-operator ./deploy/charts/yanet-operator
 
 ## Files
 
-- [`api/v1alpha1/yanet_webhook.go`](api/v1alpha1/yanet_webhook.go) — Yanet validation
-- [`api/v1alpha1/yanetconfig_webhook.go`](api/v1alpha1/yanetconfig_webhook.go) — YanetConfig validation
+- [`api/v1alpha1/yanet_webhook.go`](api/v1alpha1/yanet_webhook.go) — v1 Yanet validation
+- [`api/v1alpha1/yanetconfig_webhook.go`](api/v1alpha1/yanetconfig_webhook.go) — v1 YanetConfig validation
+- [`api/v2alpha1/yanet_webhook.go`](api/v2alpha1/yanet_webhook.go) — v2 YanetV2 validation (boxType refs, immutability)
+- [`api/v2alpha1/yanetconfig_webhook.go`](api/v2alpha1/yanetconfig_webhook.go) — v2 YanetConfigV2 validation (uniqueness, cross-refs, strategic-merge dry-run)
 - [`deploy/charts/yanet-operator/templates/webhook-service.yaml`](deploy/charts/yanet-operator/templates/webhook-service.yaml) — Service for webhook
 - [`deploy/charts/yanet-operator/templates/webhook-cert-jobs.yaml`](deploy/charts/yanet-operator/templates/webhook-cert-jobs.yaml) — Jobs for certificate generation
-- [`deploy/charts/yanet-operator/templates/webhook-configuration.yaml`](deploy/charts/yanet-operator/templates/webhook-configuration.yaml) — ValidatingWebhookConfiguration
+- [`deploy/charts/yanet-operator/templates/webhook-configuration.yaml`](deploy/charts/yanet-operator/templates/webhook-configuration.yaml) — ValidatingWebhookConfiguration (all four CRDs)
 - [`config/webhook/manifests.yaml`](config/webhook/manifests.yaml) — Generated webhook manifest
+- [`deploy/tests/webhooks/`](deploy/tests/webhooks/) — End-to-end webhook test harness (used by the helm CI job)

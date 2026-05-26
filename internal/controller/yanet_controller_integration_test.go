@@ -39,7 +39,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 		interval = time.Millisecond * 250
 	)
 
-	Context("When reconciling a Yanet resource with type=release", func() {
+	Context("When reconciling a YanetV2 resource with type=release", func() {
 		const (
 			yanetName      = "test-node-1"
 			yanetNamespace = "default"
@@ -64,7 +64,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
 
-			By("Creating a YanetConfig")
+			By("Creating a YanetConfigV2")
 			config := &yanetv1alpha1.YanetConfig{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      yanetConfigName.Name,
@@ -148,14 +148,14 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 
 		AfterEach(func() {
 			By("Cleaning up resources")
-			// Delete Yanet
+			// Delete YanetV2
 			yanet := &yanetv1alpha1.Yanet{}
 			err := k8sClient.Get(ctx, yanetLookupKey, yanet)
 			if err == nil {
 				Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
 			}
 
-			// Delete YanetConfig
+			// Delete YanetConfigV2
 			config := &yanetv1alpha1.YanetConfig{}
 			err = k8sClient.Get(ctx, yanetConfigName, config)
 			if err == nil {
@@ -171,7 +171,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 		})
 
 		It("Should create all 4 deployments with correct configuration", func() {
-			By("Creating a Yanet resource")
+			By("Creating a YanetV2 resource")
 			yanet := &yanetv1alpha1.Yanet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      yanetName,
@@ -271,7 +271,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			Expect(announcerDep.Spec.Template.Spec.InitContainers).Should(HaveLen(1))
 			Expect(announcerDep.Spec.Template.Spec.InitContainers[0].Name).Should(Equal("wait-bird"))
 
-			By("Checking Yanet status is updated")
+			By("Checking YanetV2 status is updated")
 			Eventually(func() bool {
 				updatedYanet := &yanetv1alpha1.Yanet{}
 				err := k8sClient.Get(ctx, yanetLookupKey, updatedYanet)
@@ -283,7 +283,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 		})
 
 		It("Should respect AutoSync=false and not create deployments", func() {
-			By("Creating a Yanet resource with AutoSync=false")
+			By("Creating a YanetV2 resource with AutoSync=false")
 			yanet := &yanetv1alpha1.Yanet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      yanetName + "-nosync",
@@ -333,7 +333,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			Expect(k8sClient.Create(ctx, disabledNode)).Should(Succeed())
 
-			By("Creating a Yanet resource with dataplane disabled")
+			By("Creating a YanetV2 resource with dataplane disabled")
 			yanet := &yanetv1alpha1.Yanet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      yanetName + "-disabled",
@@ -393,7 +393,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 		})
 	})
 
-	Context("When YanetConfig is updated", func() {
+	Context("When YanetConfigV2 is updated", func() {
 		const (
 			configName      = "test-config-update"
 			configNamespace = "default"
@@ -403,7 +403,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 		configKey := types.NamespacedName{Name: configName, Namespace: configNamespace}
 
 		It("Should update GlobalConfig in memory", func() {
-			By("Creating initial YanetConfig")
+			By("Creating initial YanetConfigV2")
 			config := &yanetv1alpha1.YanetConfig{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      configName,
@@ -433,7 +433,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			Expect(configReconciler.GlobalConfig.Config.Stop).Should(BeFalse())
 			configReconciler.GlobalConfig.Lock.Unlock()
 
-			By("Updating YanetConfig")
+			By("Updating YanetConfigV2")
 			updatedConfig := &yanetv1alpha1.YanetConfig{}
 			Expect(k8sClient.Get(ctx, configKey, updatedConfig)).Should(Succeed())
 			updatedConfig.Spec.UpdateWindow = 60

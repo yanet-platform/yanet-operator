@@ -24,7 +24,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -113,7 +113,7 @@ func TestHandleNodeDeletion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create fake client with existing Yanet resources
+			// Create fake client with existing YanetV2 resources
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tt.existingYanets...).
@@ -123,7 +123,7 @@ func TestHandleNodeDeletion(t *testing.T) {
 			r := &YanetReconciler{
 				Client:   fakeClient,
 				Scheme:   scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			// Call handleNodeDeletion
@@ -136,7 +136,7 @@ func TestHandleNodeDeletion(t *testing.T) {
 				return
 			}
 
-			// If deletion expected, verify Yanet was deleted
+			// If deletion expected, verify YanetV2 was deleted
 			if tt.expectDeletion {
 				yanetList := &yanetv1alpha1.YanetList{}
 				err = fakeClient.List(ctx, yanetList)
@@ -144,10 +144,10 @@ func TestHandleNodeDeletion(t *testing.T) {
 					t.Fatalf("Failed to list Yanets: %v", err)
 				}
 
-				// Check that Yanet for deleted node is gone
+				// Check that YanetV2 for deleted node is gone
 				for _, yanet := range yanetList.Items {
 					if yanet.Spec.NodeName == tt.nodeName {
-						t.Errorf("Yanet for node %s still exists after handleNodeDeletion", tt.nodeName)
+						t.Errorf("YanetV2 for node %s still exists after handleNodeDeletion", tt.nodeName)
 					}
 				}
 			}

@@ -61,6 +61,12 @@ type YanetSpec struct {
 	// Default: false
 	// +kubebuilder:default=false
 	AllowReboot bool `json:"allowreboot,omitempty"`
+	// (Optional) Mount Intel ice DDP firmware directory from host into dataplane.
+	// When true, /lib/firmware/intel/ice/ddp is mounted from the host node (type: Directory).
+	// Required on nodes with Intel E810 NICs that need custom DDP profiles.
+	// Default: false
+	// +kubebuilder:default=false
+	Intel bool `json:"intel,omitempty"`
 }
 
 // Deployment base configs.
@@ -98,6 +104,14 @@ type Sync struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
+//+kubebuilder:storageversion
+//+kubebuilder:resource:shortName=ynt,categories=yanet
+//+kubebuilder:printcolumn:name="Node",type=string,JSONPath=`.spec.nodename`
+//+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
+//+kubebuilder:printcolumn:name="AutoSync",type=boolean,JSONPath=`.spec.autosync`
+//+kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`
+//+kubebuilder:printcolumn:name="Progressing",type=string,JSONPath=`.status.conditions[?(@.type=="Progressing")].status`
+//+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Yanet is the Schema for the yanets API
 type Yanet struct {

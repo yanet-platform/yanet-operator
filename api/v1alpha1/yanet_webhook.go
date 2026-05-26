@@ -31,6 +31,7 @@ var yanetlog = logf.Log.WithName("yanet-webhook")
 // SetupWebhookWithManager will setup the manager to manage the webhooks
 func (r *Yanet) SetupWebhookWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, r).
+		WithValidator(r).
 		Complete()
 }
 
@@ -48,6 +49,13 @@ func (r *Yanet) ValidateCreate(ctx context.Context, obj *Yanet) (admission.Warni
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
 func (r *Yanet) ValidateUpdate(ctx context.Context, oldObj, newObj *Yanet) (admission.Warnings, error) {
 	yanetlog.Info("validate update", "name", newObj.Name)
+
+	// Skip validation when the object is being deleted (e.g. finalizer removal update).
+	// The controller needs to patch the object to remove the finalizer; blocking that
+	// would leave the object stuck in Terminating forever.
+	if newObj.DeletionTimestamp != nil {
+		return nil, nil
+	}
 
 	// Check immutable fields
 	if newObj.Spec.NodeName != oldObj.Spec.NodeName {

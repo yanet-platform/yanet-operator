@@ -18,8 +18,12 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -31,8 +35,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -62,6 +68,12 @@ var _ = BeforeSuite(func() {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
+		// Install the ValidatingWebhookConfiguration manifests so the
+		// apiserver actually calls our webhook on Create/Update. envtest
+		// generates the serving cert/key and patches the caBundle for us.
+		WebhookInstallOptions: envtest.WebhookInstallOptions{
+			Paths: []string{filepath.Join("..", "..", "config", "webhook")},
+		},
 	}
 
 	var err error
@@ -73,6 +85,9 @@ var _ = BeforeSuite(func() {
 	err = yanetv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
+	err = yanetv2alpha1.AddToScheme(scheme.Scheme)
+	Expect(err).NotTo(HaveOccurred())
+
 	//+kubebuilder:scaffold:scheme
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
@@ -82,26 +97,57 @@ var _ = BeforeSuite(func() {
 	// Create shared GlobalConfig instance
 	globalConfig = &yanetv1alpha1.MutexYanetConfigSpec{}
 
-	// Start manager
+	// Start manager. Webhook server has to bind to the host:port that
+	// envtest configured for the ValidatingWebhookConfiguration, and use
+	// the cert/key envtest generated; otherwise admission calls will
+	// fail with TLS or connection errors.
+	whOpts := testEnv.WebhookInstallOptions
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme.Scheme,
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Host:    whOpts.LocalServingHost,
+			Port:    whOpts.LocalServingPort,
+			CertDir: whOpts.LocalServingCertDir,
+		}),
 	})
 	Expect(err).ToNot(HaveOccurred())
 
-	// Setup YanetReconciler with shared GlobalConfig
+	// Register validating webhooks (v1alpha1 + v2alpha1).
+	Expect((&yanetv1alpha1.Yanet{}).SetupWebhookWithManager(k8sManager)).To(Succeed())
+	Expect((&yanetv1alpha1.YanetConfig{}).SetupWebhookWithManager(k8sManager)).To(Succeed())
+	Expect(yanetv2alpha1.SetupYanetWebhookWithManager(k8sManager)).To(Succeed())
+	Expect(yanetv2alpha1.SetupYanetConfigWebhookWithManager(k8sManager)).To(Succeed())
+
+	// v1alpha1 reconcilers
 	err = (&YanetReconciler{
 		Client:       k8sManager.GetClient(),
 		Scheme:       k8sManager.GetScheme(),
-		Recorder:     k8sManager.GetEventRecorderFor("yanet-controller"), //nolint:staticcheck // SA1019: old API still works
+		Recorder:     k8sManager.GetEventRecorder("yanet-controller"),
 		GlobalConfig: globalConfig,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
-	// Setup YanetConfigReconciler with SAME GlobalConfig
 	err = (&YanetConfigReconciler{
 		Client:       k8sManager.GetClient(),
 		Scheme:       k8sManager.GetScheme(),
 		GlobalConfig: globalConfig,
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	// v2alpha1 reconcilers — fully independent of v1.
+	globalConfigV2 := &yanetv2alpha1.MutexYanetConfigSpec{}
+	err = (&YanetV2Reconciler{
+		Client:         k8sManager.GetClient(),
+		Scheme:         k8sManager.GetScheme(),
+		Recorder:       k8sManager.GetEventRecorder("yanetv2-controller"),
+		GlobalConfigV2: globalConfigV2,
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = (&YanetConfigReconcilerV2{
+		Client:         k8sManager.GetClient(),
+		Scheme:         k8sManager.GetScheme(),
+		GlobalConfigV2: globalConfigV2,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -111,12 +157,28 @@ var _ = BeforeSuite(func() {
 		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
 	}()
 
-	// Initialize reconciler for direct method calls in tests
+	// Wait until the webhook server is reachable before yielding control
+	// to the specs. Otherwise the very first Create may race the TLS
+	// listener.
+	Eventually(func() error {
+		conn, dialErr := tls.Dial("tcp",
+			net.JoinHostPort(whOpts.LocalServingHost, strconv.Itoa(whOpts.LocalServingPort)),
+			&tls.Config{InsecureSkipVerify: true}, // #nosec G402 — test-only
+		)
+		if dialErr != nil {
+			return dialErr
+		}
+		_ = conn.Close()
+		return nil
+	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
+
+	// Initialize v1 reconciler for direct method calls in tests
 	reconciler = &YanetReconciler{
 		Client:       k8sManager.GetClient(),
 		Scheme:       k8sManager.GetScheme(),
 		GlobalConfig: globalConfig,
 	}
+	_ = globalConfigV2 // reserved for upcoming v2-direct-call tests
 })
 
 var _ = AfterSuite(func() {
