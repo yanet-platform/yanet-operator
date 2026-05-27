@@ -1,4 +1,4 @@
-# Package and publish Helm chart to Docker Hub OCI and GHCR
+# Package and publish Helm chart to GHCR
 # Triggered on: push to main/master, version tags, and PRs
 name: Helm Chart
 
@@ -13,7 +13,6 @@ on:
 
 env:
   GHCR_REGISTRY: ghcr.io                      # GitHub Container Registry
-  DOCKERHUB_REGISTRY: registry-1.docker.io    # Docker Hub OCI registry
   CHART_NAME: yanet-operator
 
 jobs:
@@ -58,11 +57,6 @@ jobs:
       run: |
         echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.GHCR_REGISTRY }} --username ${{ github.actor }} --password-stdin
     
-    - name: Log in to Docker Hub
-      if: github.event_name != 'pull_request'
-      run: |
-        echo "${{ secrets.DOCKERHUB_TOKEN }}" | helm registry login ${{ env.DOCKERHUB_REGISTRY }} --username ${{ secrets.DOCKERHUB_USERNAME }} --password-stdin
-    
     - name: Extract chart version
       id: chart_version
       run: |
@@ -83,11 +77,6 @@ jobs:
     - name: Push Helm chart to GitHub Container Registry
       run: |
         helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.GHCR_REGISTRY }}/${{ github.repository_owner }}
-    
-    - name: Push Helm chart to Docker Hub
-      if: github.event_name != 'pull_request'
-      run: |
-        helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.DOCKERHUB_REGISTRY }}/yanetplatform
     
     - name: Upload chart artifact
       uses: actions/upload-artifact@v4
