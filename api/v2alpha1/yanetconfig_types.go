@@ -375,7 +375,7 @@ type YanetConfigStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:resource:path=yanetconfigsv2,shortName=yntcfgv2,categories=yanet
+//+kubebuilder:resource:path=yanetconfigsv2,shortName=yntcfgv2,categories=yanetv2
 //+kubebuilder:printcolumn:name="UpdateWindow",type=integer,JSONPath=`.spec.updateWindow`
 //+kubebuilder:printcolumn:name="Stop",type=boolean,JSONPath=`.spec.stop`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

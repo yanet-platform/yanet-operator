@@ -183,7 +183,7 @@ type NodeStatus struct {
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:resource:path=yanetsv2,shortName=yntv2,categories=yanet
+//+kubebuilder:resource:path=yanetsv2,shortName=yntv2,categories=yanetv2
 //+kubebuilder:printcolumn:name="BoxType",type=string,JSONPath=`.spec.boxType`
 //+kubebuilder:printcolumn:name="AutoSync",type=boolean,JSONPath=`.spec.autoSync`
 //+kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`

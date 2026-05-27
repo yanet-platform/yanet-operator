@@ -9,7 +9,7 @@ spec:
   group: yanet.yanet-platform.io
   names:
     categories:
-    - yanet
+    - yanetv2
     kind: YanetV2
     listKind: YanetV2List
     plural: yanetsv2
