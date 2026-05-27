@@ -3,7 +3,7 @@ name: yanet-operator
 description: A Helm chart for yanet-operator - Kubernetes operator for YANET deployments
 type: application
 # Version is set manually and used for Helm chart versioning
-version: 0.1.6
+version: 0.1.7
 # appVersion is automatically synced with version during CI/CD build
 # It determines the Docker image tag: ghcr.io/yanet-platform/yanet-operator:<appVersion>
 appVersion: "0.0.0-dev"
