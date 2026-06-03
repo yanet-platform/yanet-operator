@@ -377,8 +377,11 @@ func (r *YanetV2Reconciler) handleYanetV2Deletion(
 	}
 	controllerutil.RemoveFinalizer(yanet, yanetFinalizer)
 	if err := r.Update(ctx, yanet); err != nil {
-		logger.Error(err, "failed to remove finalizer")
-		return ctrl.Result{}, err
+		// Ignore "not found" and "conflict" errors - object is already deleted or being modified
+		if !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+			logger.Error(err, "failed to remove finalizer")
+			return ctrl.Result{}, err
+		}
 	}
 	return ctrl.Result{}, nil
 }

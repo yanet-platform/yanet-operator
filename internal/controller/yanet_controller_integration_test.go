@@ -51,6 +51,9 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 		yanetLookupKey := types.NamespacedName{Name: yanetName, Namespace: yanetNamespace}
 
 		BeforeEach(func() {
+			By("Cleaning up any existing deployments in default namespace")
+			cleanupDeployments(ctx, yanetNamespace)
+
 			By("Creating a test Node")
 			node := &v1.Node{
 				ObjectMeta: metav1.ObjectMeta{
@@ -144,6 +147,9 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+
+			// Give YanetConfigReconciler time to update GlobalConfig snapshot
+			time.Sleep(1000 * time.Millisecond)
 		})
 
 		AfterEach(func() {

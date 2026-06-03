@@ -52,6 +52,7 @@ var reconciler *YanetReconciler
 var ctx context.Context
 var cancel context.CancelFunc
 var globalConfig *yanetv1alpha1.MutexYanetConfigSpec
+var globalConfigV2 *yanetv2alpha1.MutexYanetConfigSpec
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -135,7 +136,7 @@ var _ = BeforeSuite(func() {
 	Expect(err).ToNot(HaveOccurred())
 
 	// v2alpha1 reconcilers — fully independent of v1.
-	globalConfigV2 := &yanetv2alpha1.MutexYanetConfigSpec{}
+	globalConfigV2 = &yanetv2alpha1.MutexYanetConfigSpec{}
 	err = (&YanetV2Reconciler{
 		Client:         k8sManager.GetClient(),
 		Scheme:         k8sManager.GetScheme(),

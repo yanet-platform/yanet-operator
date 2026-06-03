@@ -79,8 +79,11 @@ func (r *YanetReconciler) reconcilerYanet(ctx context.Context, yanet *yanetv1alp
 			// Remove finalizer to allow deletion
 			controllerutil.RemoveFinalizer(yanet, yanetFinalizer)
 			if err := r.Update(ctx, yanet); err != nil {
-				logger.Error(err, "Failed to remove finalizer")
-				return ctrl.Result{}, err
+				// Ignore "not found" and "conflict" errors - object is already deleted or being modified
+				if !errors.IsNotFound(err) && !errors.IsConflict(err) {
+					logger.Error(err, "Failed to remove finalizer")
+					return ctrl.Result{}, err
+				}
 			}
 		}
 		return ctrl.Result{}, nil

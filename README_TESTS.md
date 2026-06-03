@@ -2,25 +2,42 @@
 
 ## 📊 Current Status
 
-- **Coverage:** ~90% overall (89.2% helpers, 92.1% manifests, ~36% controller)
-- **Unit tests:** 60+ tests, all passing
-- **Integration tests:** 4 Ginkgo scenarios
+- **Coverage:** ~80% overall (89.2% helpers, 91.3% manifests, 75.8% controller)
+- **Unit tests:** 80+ tests, all passing
+- **Integration tests:** 10+ Ginkgo scenarios (4 existing + 6 new E2E tests)
+- **E2E tests:** 4 test suites (Throttling, Webhook, AutoSync, Status) - all via Docker
+- **Test Results:** 44 passed | 4 failed (in progress)
 - **CI/CD:** GitHub Actions (tests + Docker + Helm)
 
 ## 🧪 Running Tests
 
-### Quick Start (Docker-based, recommended)
+### ⚠️ IMPORTANT: Always use `make`
+
+**All tests MUST be run through `make` + Docker** to avoid dependency on local environment.
+This guarantees:
+- Correct Go version (1.26.2 from `go.mod`)
+- All dependencies installed
+- Consistent environment across all machines
+- CI/CD compatibility without changes
+
+### Docker-based (REQUIRED)
 ```bash
-make test-unit              # Unit tests only
-make test-docker            # All tests in Docker
-make test-docker-race       # With race detector
+make test-docker-unit          # Unit tests only (helpers + manifests)
+make test-docker-integration   # Integration + E2E tests (controller package)
+make test-docker-race          # All tests with race detector
+make test-docker               # All tests with coverage
+make lint                      # Linter (also via Docker)
 ```
 
-### Local (requires Go 1.26.2+)
+### ❌ DO NOT run directly
 ```bash
-make test                   # All tests with coverage
-make test-race              # With race detector
-make lint                   # Code quality checks
+# ❌ BAD - depends on local Go installation
+go test ./...
+go build ./...
+
+# ✅ GOOD - through make + Docker
+make test-docker-unit
+make docker-build
 ```
 
 ## 📁 Test Structure
@@ -41,36 +58,152 @@ internal/
 │   ├── bird_test.go            # v1: DeploymentForBird
 │   └── helpers_test.go         # Labels, Tolerations, Volumes
 └── controller/
-    ├── yanet_reconciler_v2_test.go          # v2: reconcileYanetV2
+    ├── yanet_reconciler_v2_test.go          # v2: reconcileYanetV2 (basic)
+    ├── yanet_reconciler_v2_extended_test.go # v2: edge cases, throttling, orphans (11 tests)
+    ├── yanet_reconciler_v2_deletion_test.go # v2: deletion, ConfigMaps (9 tests)
     ├── yanet_reconciler_v2_h9_test.go       # v2: H9 edge cases
     ├── yanet_reconciler_v2_hardening_test.go # v2: hardening scenarios
     ├── yanet_reconciler_test.go             # v1: checkUpdateRequeue
     ├── yanet_conditions_test.go             # computeConditions
     ├── yanet_conditions_v2_test.go          # v2 conditions
     ├── node_deletion_test.go                # handleNodeDeletion
-    └── yanet_controller_integration_test.go # Ginkgo integration tests
+    ├── yanet_controller_integration_test.go # Ginkgo integration tests (v1)
+    ├── yanet_throttling_e2e_test.go         # E2E: throttling (v1 + v2)
+    ├── yanet_webhook_e2e_test.go            # E2E: webhook validation (v1 + v2)
+    ├── yanet_autosync_e2e_test.go           # E2E: autoSync behavior (v1 + v2)
+    ├── yanet_status_e2e_test.go             # E2E: status reporting (v1 + v2)
+    ├── e2e_helpers_test.go                  # Helper functions for E2E tests
+    └── suite_test.go                        # Test suite setup
+```
+
+### E2E Test Helpers
+
+**e2e_helpers_test.go** provides utility functions for reliable E2E testing:
+
+```go
+// waitForGlobalConfigV1 - polls GlobalConfig until non-zero UpdateWindow
+// Replaces time.Sleep for reliable synchronization
+func waitForGlobalConfigV1(timeout time.Duration) error
+
+// waitForGlobalConfigV2 - polls GlobalConfigV2 until BoxTypes populated
+func waitForGlobalConfigV2(timeout time.Duration) error
+
+// ensureNamespace - creates namespace if it doesn't exist
+func ensureNamespace(ctx context.Context, ns string)
+
+// cleanupDeployments, cleanupServices, cleanupYanetV1/V2 - cleanup helpers
+```
+
+**Usage example** (replacing `time.Sleep`):
+```go
+Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+// Instead of: time.Sleep(2000 * time.Millisecond)
+// Use:
+Expect(waitForGlobalConfigV1(5 * time.Second)).Should(Succeed())
 ```
 
 ## 🎯 Coverage Goals
 
 | Package | Current | Target | Status |
 |---------|---------|--------|--------|
-| manifests | 92.1% | 90%+ | ✅ |
+| manifests | 91.3% | 90%+ | ✅ |
 | helpers | 89.2% | 70%+ | ✅ |
-| controller | ~36% (v1 tests, v2 tests growing) | 70%+ | 🔄 |
+| controller | 75.8% | 70%+ | ✅ Achieved |
 
-## 🚀 Next Steps
+### Controller Package Details
 
-### Priority 1: Controller Coverage
-- Add more unit tests for reconciler logic
-- Increase controller package coverage to 70%+
+| Function | Coverage | Status |
+|----------|----------|--------|
+| `applyInlineConfigMapsV2` | 84.0% | ✅ |
+| `reconcileYanetV2` | 77.1% | ✅ |
+| `pruneOrphans` | 73.6% | ✅ |
+| `handleYanetV2Deletion` | 61.5% | 🔄 |
 
-### Priority 2: E2E Testing
-- Add end-to-end tests with kind cluster
-- Test webhook validation end-to-end
+## 🚀 Test Suites
+
+### Unit Tests (20 tests)
+
+**yanet_reconciler_v2_extended_test.go (11 tests):**
+- Edge cases: empty nodeSelector, config not loaded, boxType not found, global stop
+- UpdateWindow throttling: same node, different nodes, expired window
+- Orphan cleanup: multiple types, foreign labels, empty desired set, autoSync=false
+
+**yanet_reconciler_v2_deletion_test.go (9 tests):**
+- Deletion handling: no finalizer, with finalizer, cleanup errors, foreign resources
+- ConfigMap management: no inline, autoSync true/false, updates
+
+### E2E Tests (4 test suites, 15+ scenarios) - All via Docker + envtest
+
+**yanet_throttling_e2e_test.go:**
+- V1 API: UpdateWindow throttling with `enabled=false`
+- V2 API: UpdateWindow throttling with `enabled=false`
+- Verifies: replicas=0 when disabled, config changes propagate, throttling works
+
+**yanet_webhook_e2e_test.go:**
+- V1 API: YanetConfig/Yanet validation (negative updateWindow, empty nodeName, invalid type)
+- V2 API: YanetConfigV2/YanetV2 validation (duplicate patches, port overlap, unknown boxType)
+- V2 API: Immutability (boxType cannot be changed), patch reference validation
+- Verifies: admission webhooks reject invalid CRs, cross-references validated
+
+**yanet_autosync_e2e_test.go:**
+- V1 API: autoSync=false/true behavior, toggling autoSync
+- V2 API: autoSync=false/true behavior, toggling autoSync, manual edits preserved, patches applied
+- Verifies: read-only mode works, manual interventions preserved, state transitions
+
+**yanet_status_e2e_test.go:**
+- V1 API: Status.Sync populated with Synced/Disabled deployments
+- V2 API: Status.Sync, Status.NodesStatus, Status.Services tracking
+- V2 API: Multi-node tracking, status updates on autoSync toggle
+- Verifies: status fields populated correctly, per-node tracking, sync state accuracy
+
+## 🧪 Running Specific Tests
+
+**⚠️ All tests MUST run via Docker + make:**
+
+```bash
+# Unit tests only (helpers + manifests)
+make test-docker-unit
+
+# Integration + E2E tests (controller package, includes all e2e)
+make test-docker-integration
+
+# All tests with coverage
+make test-docker
+
+# With race detector
+make test-docker-race
+
+# Coverage report (after make test-docker)
+go tool cover -html=cover.out
+```
+
+**E2E tests are part of integration suite** and run automatically via:
+- `make test-docker-integration` (controller package tests)
+- `make test-docker` (all tests)
+- GitHub Actions workflow (`.github/workflows/test.yml`)
+
+## 🐛 Debugging Tests
+
+**⚠️ Use Docker for consistency:**
+
+```bash
+# Verbose output for integration tests
+make test-docker-integration
+
+# With race detector
+make test-docker-race
+
+# Check coverage for specific file (after make test-docker)
+go tool cover -func=cover.out | grep yanet_reconciler_v2.go
+
+# For local debugging (requires Go 1.26.2 + envtest):
+KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.0 -p path) \
+  go test ./internal/controller/... -run TestHandleYanetV2Deletion_WithFinalizer -v
+```
 
 ## 📚 References
 
 - [Kubebuilder Testing](https://book.kubebuilder.io/cronjob-tutorial/writing-tests.html)
 - [Ginkgo/Gomega](https://onsi.github.io/ginkgo/)
 - [Controller-runtime Testing](https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/envtest)
+- [AGENTS.md](AGENTS.md) - Development guidelines (MUST READ)
