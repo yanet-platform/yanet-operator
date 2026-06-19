@@ -147,12 +147,15 @@ spec:
                 checkpointer.ydb.tech/manual-recovery: "true"
 
     # --- controlplane ---
+    # NOTE: hostIPC and the /dev/hugepages shmem mount the controlplane uses
+    # to reach the dataplane arena are emitted by the builder itself (see
+    # internal/manifests/builder_v2.go, applyControlplaneShmem). Patches only
+    # add the reload postStart hook here.
     - name: cp-reloader-poststart
       patch:
         spec:
           template:
             spec:
-              hostIPC: true
               containers:
                 - name: controlplane
                   lifecycle:
@@ -190,16 +193,24 @@ spec:
                     limits:   {cpu: "6",  memory: 128Gi}
 
     # --- dataplane ---
-    - name: dp-privileged
+    # NOTE: the dataplane's security baseline is emitted by the BUILDER, not
+    # by a patch — see internal/manifests/builder_v2.go (applyDataplaneSecurity).
+    # The builder always sets, for the dataplane:
+    #   - privileged: true  (MANDATORY — opening /dev/vfio/vfio and
+    #     /dev/vhost-net is blocked by the device cgroup for non-privileged
+    #     containers, even root with CAP_SYS_ADMIN/CAP_SYS_RAWIO; the only
+    #     alternative is an SR-IOV device plugin, out of scope)
+    #   - hostNetwork: true, hostIPC: true
+    #   - minimal host devices: /dev/vfio, /dev/vhost-net, /dev/net
+    #   - /sys read-only, config read-only, hugepages
+    # Do NOT re-add those here. Patches only tune resources.
+    - name: dp-resources
       patch:
         spec:
           template:
             spec:
-              hostIPC: true
               containers:
                 - name: dataplane
-                  securityContext:
-                    privileged: true
                   resources:
                     limits: {memory: 32Gi}
 
@@ -267,7 +278,7 @@ spec:
         controlplane:
           patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-release]
         dataplane:
-          patches: [tolerations, telegraf, checkpointer, dp-privileged]
+          patches: [tolerations, telegraf, checkpointer, dp-resources]
         bird:
           patches: [tolerations, telegraf, checkpointer, bird-resources]
         announcer:
@@ -280,7 +291,7 @@ spec:
         controlplane:
           patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
         dataplane:
-          patches: [tolerations, telegraf, checkpointer, dp-privileged]
+          patches: [tolerations, telegraf, checkpointer, dp-resources]
         bird:
           patches: [tolerations, telegraf, checkpointer, bird-resources]
         birdAdapter:
@@ -292,7 +303,7 @@ spec:
         controlplane:
           patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
         dataplane:
-          patches: [tolerations, telegraf, checkpointer, dp-privileged, firewall-max-memory]
+          patches: [tolerations, telegraf, checkpointer, dp-resources, firewall-max-memory]
         bird:
           patches: [tolerations, telegraf, checkpointer, bird-resources]
         birdAdapter:

@@ -18,10 +18,15 @@ limitations under the License.
 //
 // The v2 builder is intentionally minimal: it produces base
 // Deployment skeletons (NUMA fan-out for controlplane, hugepages for
-// dataplane, ConfigSource volumes for everything). Anything beyond
-// that — annotations, postStart hooks, hostIPC/privileged, resource
-// requests, init containers — lives in YanetConfigV2.spec.patches[]
-// and is layered on top by ApplyPatches in patcher.go.
+// dataplane, ConfigSource volumes for everything). It also emits the
+// intrinsic security/mount baseline a component cannot run without —
+// the dataplane's privileged + hostNetwork/hostIPC + minimal host
+// devices (applyDataplaneSecurity) and the controlplane's hostIPC +
+// shmem-arena mount (applyControlplaneShmem). Everything optional
+// beyond that — annotations, postStart hooks, resource requests, init
+// containers, extra hostIPC/privileged for operators — lives in
+// YanetConfigV2.spec.patches[] and is layered on top by ApplyPatches
+// in patcher.go.
 package manifests
 
 import (
@@ -161,6 +166,22 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 	if c.Hugepages != nil {
 		applyHugepages(&container, &volumes, c.Hugepages)
 	}
+	// Per-component security/mount baseline. This is intrinsic to how
+	// each component runs (DPDK device access, shmem arena, the shared
+	// BIRD control socket), so it lives in the builder rather than in a
+	// YanetConfigV2 patch.
+	switch c.Kind {
+	case helpers.KindDataplane:
+		applyDataplaneSecurity(&container, &volumes)
+	case helpers.KindControlplane:
+		applyControlplaneShmem(&container, &volumes)
+	case helpers.KindBird:
+		// bird owns the control socket → read-write.
+		applyBirdSocket(&container, &volumes, false)
+	case helpers.KindBirdAdapter, helpers.KindAnnouncer:
+		// bird-adapter and announcer only connect as clients → read-only.
+		applyBirdSocket(&container, &volumes, true)
+	}
 
 	pod := corev1.PodSpec{
 		Containers:       []corev1.Container{container},
@@ -168,9 +189,19 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		ImagePullSecrets: ctx.PullSecrets,
 		NodeSelector:     nodeSelector(ctx),
 	}
-	// hostNetwork is on by default for dataplane (DPDK).
-	if c.Kind == helpers.KindDataplane {
+	switch c.Kind {
+	case helpers.KindDataplane:
+		// DPDK needs host NIC access and shared-memory IPC with the
+		// controlplane/CLI.
 		pod.HostNetwork = helpers.BoolValue(c.HostNetwork, true)
+		pod.HostIPC = true
+	case helpers.KindControlplane:
+		// Modules in the controlplane attach to the dataplane shmem
+		// arena (/dev/hugepages/yanet) over the host IPC namespace.
+		pod.HostIPC = true
+	case helpers.KindBird:
+		// BIRD peers BGP with external routers over the host network.
+		pod.HostNetwork = true
 	}
 
 	d := &appsv1.Deployment{
@@ -206,7 +237,9 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 
 // buildOperator renders the multi-container operator Deployment. The
 // first container is the primary (the one a Service targets). Any
-// container with HostIPC=true escalates to Pod-level hostIPC.
+// container with HostIPC=true escalates to Pod-level hostIPC and is
+// treated as a shmem peer (agent): it gets the dataplane shmem arena
+// mounted at /dev/hugepages, like the controlplane.
 func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
 	labels := baseLabels(ctx, c)
 	pod := corev1.PodSpec{
@@ -233,12 +266,18 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 				Protocol:      corev1.ProtocolTCP,
 			}}
 		}
-		pod.Containers = append(pod.Containers, container)
+		// A hostIPC container is a shmem peer (agent) → give it the arena.
 		if rc.HostIPC {
+			container.VolumeMounts = append(container.VolumeMounts, shmemMount())
 			hostIPC = true
 		}
+		pod.Containers = append(pod.Containers, container)
 	}
 	pod.HostIPC = hostIPC
+	// Add the shared shmem volume once if any container mounted it.
+	if hostIPC {
+		pod.Volumes = append(pod.Volumes, shmemVolume())
+	}
 
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
@@ -517,6 +556,113 @@ func InlineConfigMaps(ctx BuildContextV2, c *helpers.ResolvedComponent) map[stri
 		out[inlineConfigMapName(ctx, c, c.Config.Inline)] = c.Config.Inline
 	}
 	return out
+}
+
+// -- dataplane / controlplane security baseline ------------------------------
+
+// hostDevVolume builds a hostPath Volume for a /dev (or /sys) node. A nil
+// hostPathType (typeless) skips kubelet path-type validation, which is
+// required for single char-device nodes such as /dev/vhost-net.
+func hostDevVolume(name, path string, t *corev1.HostPathType) corev1.Volume {
+	return corev1.Volume{
+		Name: name,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: path, Type: t},
+		},
+	}
+}
+
+// applyDataplaneSecurity gives the DPDK dataplane its mandatory privileged
+// baseline plus the minimal set of host devices it needs.
+//
+// privileged: true is REQUIRED and cannot be replaced by a capability set:
+// opening /dev/vfio/vfio and /dev/vhost-net is blocked by the device cgroup
+// (containerd/runc) for any non-privileged container, even root with
+// CAP_SYS_ADMIN/CAP_SYS_RAWIO. The only alternative is an SR-IOV device
+// plugin (out of scope). Host exposure is otherwise minimized: only the
+// specific device nodes DPDK uses are mounted, and /sys is read-only. The
+// read-only config and hugepages mounts are added elsewhere in buildSingle.
+func applyDataplaneSecurity(c *corev1.Container, volumes *[]corev1.Volume) {
+	priv := true
+	c.SecurityContext = &corev1.SecurityContext{Privileged: &priv}
+
+	dir := corev1.HostPathDirectory
+	c.VolumeMounts = append(c.VolumeMounts,
+		corev1.VolumeMount{Name: "host-vfio", MountPath: "/dev/vfio"},
+		corev1.VolumeMount{Name: "host-vhost-net", MountPath: "/dev/vhost-net"},
+		corev1.VolumeMount{Name: "host-net", MountPath: "/dev/net"},
+		corev1.VolumeMount{Name: "host-sys", MountPath: "/sys", ReadOnly: true},
+	)
+	*volumes = append(*volumes,
+		// /dev/vfio: VFIO group + container nodes for DPDK PMD binding.
+		hostDevVolume("host-vfio", "/dev/vfio", &dir),
+		// /dev/vhost-net: single char device → typeless (no validation).
+		hostDevVolume("host-vhost-net", "/dev/vhost-net", nil),
+		// /dev/net: holds /dev/net/tun for KNI / virtio-user.
+		hostDevVolume("host-net", "/dev/net", &dir),
+		// /sys read-only: PCI/NUMA/hugepage topology that DPDK probes.
+		hostDevVolume("host-sys", "/sys", &dir),
+	)
+}
+
+// shmemVolName / shmemDir identify the hugepages-backed shmem arena that
+// the dataplane publishes (files under /dev/hugepages/yanet) and that
+// every shmem peer mmaps: the controlplane and any hostIPC operator/agent.
+const (
+	shmemVolName = "hugepages"
+	shmemDir     = "/dev/hugepages"
+)
+
+func shmemMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: shmemVolName, MountPath: shmemDir}
+}
+
+func shmemVolume() corev1.Volume {
+	return corev1.Volume{
+		Name: shmemVolName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: shmemDir},
+		},
+	}
+}
+
+// applyControlplaneShmem mounts the hugepages-backed shmem arena into the
+// controlplane. Controlplane modules mmap the dataplane arena to compile
+// config into the binary format the dataplane reads. Unlike the dataplane
+// this needs no privileged/device access — hugetlbfs files are not
+// device-cgroup gated — only the mount plus pod-level hostIPC (set in
+// buildSingle).
+func applyControlplaneShmem(c *corev1.Container, volumes *[]corev1.Volume) {
+	c.VolumeMounts = append(c.VolumeMounts, shmemMount())
+	*volumes = append(*volumes, shmemVolume())
+}
+
+// birdSocketDir is the host directory holding the BIRD control socket
+// (e.g. /run/bird/bird.sock). bird publishes it; bird-adapter and
+// announcer read it. The three components are SEPARATE Deployments (so
+// the adapter can roll without restarting bird), hence separate Pods
+// pinned to the same node — they share the socket via a hostPath rather
+// than an in-Pod emptyDir. The socket is shared only with these three.
+const birdSocketDir = "/run/bird"
+
+// applyBirdSocket mounts the shared BIRD control-socket directory. bird
+// gets it read-write (it creates the socket); bird-adapter and announcer
+// get it read-only — connecting to a unix socket on a read-only mount is
+// allowed by the kernel (the RO check exempts sockets), so clients still
+// work while losing write access to the host directory.
+func applyBirdSocket(c *corev1.Container, volumes *[]corev1.Volume, readOnly bool) {
+	const volName = "run-bird"
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+		Name:      volName,
+		MountPath: birdSocketDir,
+		ReadOnly:  readOnly,
+	})
+	*volumes = append(*volumes, corev1.Volume{
+		Name: volName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: birdSocketDir},
+		},
+	})
 }
 
 // -- hugepages ---------------------------------------------------------------
