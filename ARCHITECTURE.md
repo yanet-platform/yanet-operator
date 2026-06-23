@@ -153,8 +153,13 @@ The v2alpha1 design separates three independent axes of configuration:
 
 Per-installation customisation is intentionally narrow: only per-container
 `image.{name,tag}` (under `containers.<name>`) and `enabled` are accepted on
-the Yanet CR. Everything broader (annotations, postStart, hostIPC, privileged,
-resources) belongs in a NamedPatch.
+the Yanet CR. The intrinsic security/mount baseline each component cannot run
+without is emitted by the builder itself (the dataplane's privileged +
+hostNetwork/hostIPC + minimal host devices, and the controlplane's hostIPC +
+`/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
+`applyControlplaneShmem` in `builder_v2.go`). Everything optional beyond that
+(annotations, postStart, extra hostIPC/privileged for operators, resources)
+belongs in a NamedPatch.
 
 The container key inside `containers` must match the rendered container name
 — for the 5 hardcoded components it equals the component kind itself
@@ -193,7 +198,7 @@ spec:
     - name: release
       components:
         controlplane: { patches: [telegraf, cp-resources-release] }
-        dataplane:    { patches: [telegraf, dp-privileged] }
+        dataplane:    { patches: [telegraf, dp-resources] }
         bird:         { patches: [telegraf] }
       operators:
         antiddos:     { patches: [telegraf] }

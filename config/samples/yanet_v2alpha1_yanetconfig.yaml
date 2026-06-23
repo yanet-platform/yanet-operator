@@ -6,50 +6,80 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: yanetconfig-sample
 spec:
-  stop: false
-  updatewindow: 60
-  
-  # Global image settings for v2alpha1
+  # Global per-cluster throttling between any two node restarts (seconds).
+  updateWindow: 60
+
+  # Global image settings shared by every generated Deployment:
+  # {registry}/{prefix}/{image}:{tag}.
   images:
-    registry: dockerhub.io
+    registry: cr.yandex/yanet
     prefix: yanet2
-    tag: "2.0"
     pullPolicy: IfNotPresent
-  
-  # Global config paths
-  config:
-    hostPath: /etc/yanet
-    files:
-      controlplane: controlplane-director.yaml
-      dataplane: dataplane.yaml
-  
-  # Global controlplane configuration
-  controlplane:
-    enabled: true
-    image:
-      name: yanet-controlplane-director
-    resources:
-      requests:
-        memory: "2Gi"
-        cpu: "1"
-    hostIPC: true
-    securityContext:
-      privileged: false
-      capabilities:
-        add:
-        - NET_ADMIN
-        - IPC_LOCK
-  
-  # Global dataplane configuration
-  dataplane:
-    enabled: true
-    image:
-      name: yanet-dataplane
-    resources:
-      requests:
-        memory: "8Gi"
-        hugepages-1Gi: "8Gi"
-    hostIPC: true
-    hostNetwork: true
-    securityContext:
-      privileged: true
+
+  # ============================================================
+  # 1) COMPONENTS — palette of available components.
+  #    The dataplane's privileged + hostNetwork/hostIPC + minimal host
+  #    devices, and the controlplane's hostIPC + /dev/hugepages shmem
+  #    mount, are emitted by the BUILDER (see builder_v2.go). They are
+  #    intrinsic to how the components run and are NOT configured here.
+  # ============================================================
+  components:
+    controlplane:
+      image: {name: controlplane, tag: v2.1.0}
+      port: 8080          # round-robin Service port over all NUMA instances
+      numa: 1             # one controlplane Deployment per NUMA domain
+      config:
+        hostPath: /etc/yanet2
+        fileName: controlplane.conf
+
+    dataplane:
+      image: {name: dataplane, tag: v2.1.0}
+      port: 8090
+      hugepages:
+        size: 1Gi
+        count: 8
+      hostNetwork: true   # default for DPDK
+      config:
+        hostPath: /etc/yanet2
+        fileName: dataplane.yaml
+
+  # ============================================================
+  # 2) PATCHES — named registry of strategic-merge Deployment fragments.
+  #    Only OPTIONAL tuning lives here (resources, tolerations, ...).
+  # ============================================================
+  patches:
+    - name: tolerations
+      patch:
+        spec:
+          template:
+            spec:
+              tolerations:
+                - effect: NoSchedule
+                  key: CriticalAddonsOnly
+                - effect: NoSchedule
+                  operator: Exists
+                - effect: NoExecute
+                  operator: Exists
+
+    - name: dp-resources
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: dataplane
+                  resources:
+                    limits: {memory: 32Gi}
+
+  # ============================================================
+  # 3) BOX TYPES — presets wiring components to patch lists.
+  #    Each boxType MUST define controlplane and dataplane.
+  #    A YanetV2 CR references one boxType by name (here: "release").
+  # ============================================================
+  boxTypes:
+    - name: release
+      components:
+        controlplane:
+          patches: [tolerations]
+        dataplane:
+          patches: [tolerations, dp-resources]

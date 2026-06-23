@@ -147,6 +147,167 @@ func TestBuildDeployments_Dataplane_HostNetworkOverride(t *testing.T) {
 	}
 }
 
+// hasMount reports whether the container mounts the given path (and,
+// when wantRO, that it is read-only).
+func hasMount(mounts []corev1.VolumeMount, path string, wantRO bool) bool {
+	for _, m := range mounts {
+		if m.MountPath == path {
+			return !wantRO || m.ReadOnly
+		}
+	}
+	return false
+}
+
+func hasVolume(vols []corev1.Volume, name string) bool {
+	for _, v := range vols {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBuildDeployments_Dataplane_SecurityBaseline pins the privileged +
+// minimal-device baseline the builder must emit for the DPDK dataplane,
+// without any YanetConfigV2 patch.
+func TestBuildDeployments_Dataplane_SecurityBaseline(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image:     helpers.ResolvedImage{Name: "dp", Tag: "v2"},
+		Port:      8090,
+		Hugepages: &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 8},
+		Config:    &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2", FileName: "dataplane.yaml"},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	pod := deps[0].Spec.Template.Spec
+	cont := pod.Containers[0]
+
+	if cont.SecurityContext == nil || cont.SecurityContext.Privileged == nil || !*cont.SecurityContext.Privileged {
+		t.Errorf("dataplane must be privileged: %+v", cont.SecurityContext)
+	}
+	if !pod.HostIPC {
+		t.Errorf("dataplane must set hostIPC")
+	}
+	if !pod.HostNetwork {
+		t.Errorf("dataplane must set hostNetwork")
+	}
+	// Minimal host devices.
+	for _, p := range []string{"/dev/vfio", "/dev/vhost-net", "/dev/net"} {
+		if !hasMount(cont.VolumeMounts, p, false) {
+			t.Errorf("missing device mount %s", p)
+		}
+	}
+	if !hasMount(cont.VolumeMounts, "/sys", true) {
+		t.Errorf("/sys must be mounted read-only")
+	}
+	// Builder-provided mounts must survive alongside the devices.
+	if !hasMount(cont.VolumeMounts, "/etc/yanet2", true) {
+		t.Errorf("config mount missing or not read-only")
+	}
+	if !hasMount(cont.VolumeMounts, "/dev/hugepages", false) {
+		t.Errorf("hugepages mount missing")
+	}
+	for _, n := range []string{"host-vfio", "host-vhost-net", "host-net", "host-sys", "config", "hugepages"} {
+		if !hasVolume(pod.Volumes, n) {
+			t.Errorf("missing volume %q", n)
+		}
+	}
+	// /dev/vhost-net is a single char device → typeless hostPath.
+	for _, v := range pod.Volumes {
+		if v.Name == "host-vhost-net" && v.HostPath != nil && v.HostPath.Type != nil {
+			t.Errorf("host-vhost-net must be typeless, got %v", *v.HostPath.Type)
+		}
+	}
+}
+
+// TestBuildDeployments_Controlplane_ShmemBaseline pins the shmem-arena
+// mount + hostIPC the controlplane needs, and asserts it is NOT privileged
+// and gets no device nodes.
+func TestBuildDeployments_Controlplane_ShmemBaseline(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image:  helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Port:   8080,
+		Numa:   1,
+		Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2", FileName: "controlplane.conf"},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	pod := deps[0].Spec.Template.Spec
+	cont := pod.Containers[0]
+
+	if !pod.HostIPC {
+		t.Errorf("controlplane must set hostIPC for shmem")
+	}
+	if !hasMount(cont.VolumeMounts, "/dev/hugepages", false) {
+		t.Errorf("controlplane missing hugepages shmem mount")
+	}
+	if cont.SecurityContext != nil && cont.SecurityContext.Privileged != nil && *cont.SecurityContext.Privileged {
+		t.Errorf("controlplane must NOT be privileged")
+	}
+	for _, p := range []string{"/dev/vfio", "/dev/vhost-net", "/dev/net"} {
+		if hasMount(cont.VolumeMounts, p, false) {
+			t.Errorf("controlplane must not mount device %s", p)
+		}
+	}
+}
+
+// TestBuildDeployments_BirdSocketMounts checks that bird gets the shared
+// /run/bird socket dir read-write, while bird-adapter and announcer get it
+// read-only — all as a hostPath so the separate Pods share the socket.
+func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
+	cases := []struct {
+		kind   helpers.ComponentKind
+		name   string
+		wantRO bool
+	}{
+		{helpers.KindBird, "bird", false},
+		{helpers.KindBirdAdapter, "birdAdapter", true},
+		{helpers.KindAnnouncer, "announcer", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &helpers.ResolvedComponent{
+				Kind: tc.kind, Name: tc.name, Enabled: true,
+				Image:  helpers.ResolvedImage{Name: tc.name, Tag: "v1"},
+				Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/x"},
+			}
+			deps, err := BuildDeployments(ctxV2(), c)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			pod := deps[0].Spec.Template.Spec
+			if !hasMount(pod.Containers[0].VolumeMounts, "/run/bird", tc.wantRO) {
+				t.Errorf("%s: /run/bird mount missing or RO=%v wrong: %+v",
+					tc.name, tc.wantRO, pod.Containers[0].VolumeMounts)
+			}
+			var v *corev1.Volume
+			for i := range pod.Volumes {
+				if pod.Volumes[i].Name == "run-bird" {
+					v = &pod.Volumes[i]
+				}
+			}
+			if v == nil || v.HostPath == nil || v.HostPath.Path != "/run/bird" {
+				t.Errorf("%s: run-bird must be a hostPath /run/bird: %+v", tc.name, pod.Volumes)
+			}
+			// Config mount must survive alongside the socket mount.
+			if !hasMount(pod.Containers[0].VolumeMounts, defaultConfigMountPath(tc.kind), true) {
+				t.Errorf("%s: config mount missing", tc.name)
+			}
+			// Only bird peers BGP over the host network.
+			wantHostNet := tc.kind == helpers.KindBird
+			if pod.HostNetwork != wantHostNet {
+				t.Errorf("%s: hostNetwork = %v, want %v", tc.name, pod.HostNetwork, wantHostNet)
+			}
+		})
+	}
+}
+
 // --- replicas / disabled ----------------------------------------------------
 
 func TestBuildDeployments_DisabledHasZeroReplicas(t *testing.T) {
@@ -192,6 +353,48 @@ func TestBuildDeployments_Operator_MultiContainerHostIPC(t *testing.T) {
 	if len(pod.Containers[1].Ports) != 0 {
 		t.Errorf("non-primary should have no Service ports: %+v", pod.Containers[1])
 	}
+	// The hostIPC container (agent) is a shmem peer → gets the arena;
+	// the non-hostIPC container (operator) must not.
+	if hasMount(pod.Containers[0].VolumeMounts, "/dev/hugepages", false) {
+		t.Errorf("non-hostIPC operator must not mount shmem: %+v", pod.Containers[0].VolumeMounts)
+	}
+	if !hasMount(pod.Containers[1].VolumeMounts, "/dev/hugepages", false) {
+		t.Errorf("hostIPC agent must mount shmem: %+v", pod.Containers[1].VolumeMounts)
+	}
+	// Exactly one shared shmem volume regardless of peer count.
+	n := 0
+	for _, v := range pod.Volumes {
+		if v.Name == "hugepages" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("expected exactly 1 shmem volume, got %d: %+v", n, pod.Volumes)
+	}
+}
+
+// TestBuildDeployments_Operator_NoHostIPC_NoShmem ensures operators that
+// never request hostIPC get neither the arena mount nor the volume.
+func TestBuildDeployments_Operator_NoHostIPC_NoShmem(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "route", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "route-op", Tag: "v0.4"},
+		Port:  9001,
+		Containers: []helpers.ResolvedContainer{
+			{Name: "route", Image: helpers.ResolvedImage{Name: "route-op", Tag: "v0.4"}},
+		},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	pod := deps[0].Spec.Template.Spec
+	if pod.HostIPC {
+		t.Errorf("route operator must not set hostIPC")
+	}
+	if hasVolume(pod.Volumes, "hugepages") {
+		t.Errorf("no-hostIPC operator must not get shmem volume: %+v", pod.Volumes)
+	}
 }
 
 // --- ConfigSource branches --------------------------------------------------
@@ -205,8 +408,10 @@ func TestBuildDeployments_Config_HostPath(t *testing.T) {
 	}
 	deps, _ := BuildDeployments(ctxV2(), c)
 	pod := deps[0].Spec.Template.Spec
-	if len(pod.Volumes) != 1 || pod.Volumes[0].HostPath == nil || pod.Volumes[0].HostPath.Path != "/etc/bird" {
-		t.Errorf("hostPath volume not set: %+v", pod.Volumes)
+	// The config volume is built first; bird also gets the shared
+	// /run/bird socket volume (see TestBuildDeployments_BirdSocketMounts).
+	if pod.Volumes[0].HostPath == nil || pod.Volumes[0].HostPath.Path != "/etc/bird" {
+		t.Errorf("hostPath config volume not set: %+v", pod.Volumes)
 	}
 	if mp := pod.Containers[0].VolumeMounts[0].MountPath; mp != "/etc/bird" {
 		t.Errorf("bird mount path = %q, want /etc/bird", mp)

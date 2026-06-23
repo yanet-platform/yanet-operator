@@ -6,44 +6,34 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: yanet-sample
 spec:
-  placement:
-    nodeSelector:
-      kubernetes.io/hostname: node1.example.com
-    type: release
-  
-  images:
-    registry: dockerhub.io
-    prefix: yanet2
-    tag: "2.0"
-    pullPolicy: IfNotPresent
-  
+  # Selects a boxType from YanetConfigV2.spec.boxTypes[] (see
+  # yanet_v2alpha1_yanetconfig.yaml). Required.
+  boxType: release
+
+  # Restrict the installation to a subset of nodes. Empty matches all.
+  nodeSelector:
+    kubernetes.io/hostname: node1.example.com
+
+  # Scale-to-zero switch for the whole installation (default true).
+  enabled: true
+
+  # Automatic synchronization. When false, the reconciler only reports
+  # drift via Status without touching generated Deployments (default false).
+  autoSync: true
+
+  # The ONLY per-installation overrides are enabled + per-container image.
+  # Everything broader (resources, securityContext, hostIPC, ...) lives in
+  # the YanetConfigV2 boxType/patches, or is emitted by the builder.
   components:
     controlplane:
       enabled: true
-      image:
-        name: yanet-controlplane-director
-      resources:
-        requests:
-          memory: "2Gi"
-          cpu: "1"
-    
+      containers:
+        controlplane:
+          name: yanet-controlplane-director
+          tag: v2.1.0
     dataplane:
       enabled: true
-      image:
-        name: yanet-dataplane
-      resources:
-        requests:
-          memory: "8Gi"
-          hugepages-1Gi: "8Gi"
-      securityContext:
-        privileged: true
-      hostNetwork: true
-      hostIPC: true
-  
-  config:
-    hostPath: /etc/yanet
-    files:
-      controlplane: controlplane-director.yaml
-      dataplane: dataplane.yaml
-  
-  autosync: true
+      containers:
+        dataplane:
+          name: yanet-dataplane
+          tag: v2.1.0
