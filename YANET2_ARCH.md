@@ -97,7 +97,7 @@ Created by yanet-operator:
 ## 4. Dependencies
 
 - **Node Feature Discovery (NFD)** — optional helm-chart dependency.
-  - `helm install -n node-feature-discovery --create-namespace nfd oci://registry.k8s.io/nfd/charts/node-feature-discovery --version 0.18.3`
+  - `helm install -n node-feature-discovery --create-namespace nfd oci://registry.k8s.io/nfd/charts/node-feature-discovery --version 0.19.0`
   - The label `feature.node.kubernetes.io/cpu-numa_nodes_count` is used to determine how many controlplane Deployments to generate per node.
 - Host requirements: hugepages, `hostNetwork`, `hostIPC` capability.
 

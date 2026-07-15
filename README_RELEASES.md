@@ -25,12 +25,12 @@ Releases are fully automated via GitHub Actions. When you push a version tag, th
 ### 2. Create Release Tag
 
 ```bash
-# Set version (without 'v' prefix in variables)
-VERSION="0.1.7"
+# Set application version (without the 'v' prefix)
+APP_VERSION="2.0.4"
 
 # Create and push tag
-git tag -a "v${VERSION}" -m "Release v${VERSION}"
-git push origin "v${VERSION}"
+git tag -a "v${APP_VERSION}" -m "Release v${APP_VERSION}"
+git push origin "v${APP_VERSION}"
 ```
 
 ### 3. Monitor Release Pipeline
@@ -40,7 +40,7 @@ GitHub Actions will automatically:
 1. **Build Docker images** — [`docker` job](.github/workflows/release.yml)
    - Platforms: `linux/amd64`, `linux/arm64`
    - Registries: GHCR
-   - Tags: `v0.1.7`, `0.1.7`, `0.1`, `0`, `latest`
+   - Tags: `v2.0.4`, `2.0.4`, `2.0`, `2`, `latest`
 
 2. **Package Helm chart** — [`helm` job](.github/workflows/release.yml)
    - Syncs `appVersion` with git tag
@@ -58,16 +58,16 @@ GitHub Actions will automatically:
 
 ```bash
 # Check Docker images
-docker pull ghcr.io/yanet-platform/yanet-operator:0.1.7
+docker pull ghcr.io/yanet-platform/yanet-operator:2.0.4
 
 # Verify multi-platform support
-docker manifest inspect ghcr.io/yanet-platform/yanet-operator:0.1.7
+docker manifest inspect ghcr.io/yanet-platform/yanet-operator:2.0.4
 
 # Check Helm chart
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.7
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.8
 
 # Test installation
-kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v0.1.7/install.yaml
+kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v2.0.4/install.yaml
 ```
 
 ## 📦 Release Artifacts
@@ -77,9 +77,9 @@ Each release includes:
 ### Docker Images
 
 **GitHub Container Registry:**
-- `ghcr.io/yanet-platform/yanet-operator:0.1.7`
-- `ghcr.io/yanet-platform/yanet-operator:0.1`
-- `ghcr.io/yanet-platform/yanet-operator:0`
+- `ghcr.io/yanet-platform/yanet-operator:2.0.4`
+- `ghcr.io/yanet-platform/yanet-operator:2.0`
+- `ghcr.io/yanet-platform/yanet-operator:2`
 - `ghcr.io/yanet-platform/yanet-operator:latest`
 
 **Platforms:** `linux/amd64`, `linux/arm64`
@@ -90,7 +90,7 @@ Each release includes:
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.1.7 \
+  --version 0.1.8 \
   --namespace yanet-system \
   --create-namespace
 ```
@@ -99,7 +99,7 @@ helm install yanet-operator \
 
 **install.yaml** — Complete installation manifest:
 ```bash
-kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v0.1.7/install.yaml
+kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v2.0.4/install.yaml
 ```
 
 Contains:
@@ -120,10 +120,14 @@ We follow [Semantic Versioning](https://semver.org/):
 
 ### Version Synchronization
 
-- **Git tag:** `v0.1.7` (with 'v' prefix)
-- **Chart version:** `0.1.7` (in [`Chart.yaml`](deploy/charts/yanet-operator/Chart.yaml))
-- **Chart appVersion:** `0.1.7` (auto-synced from git tag)
-- **Docker image tag:** `0.1.7` (extracted from git tag)
+- **Git tag:** `v2.0.4` (with `v` prefix)
+- **Chart version:** `0.1.8` (in [`Chart.yaml`](deploy/charts/yanet-operator/Chart.yaml))
+- **Chart appVersion:** `2.0.4` (auto-synced from git tag)
+- **Docker image tag:** `2.0.4` (extracted from git tag)
+
+The application and Helm chart use independent version sequences. Every release
+must use a new value for both the git tag and the chart version because OCI chart
+versions are immutable.
 
 ## 🛠️ Manual Release (Emergency)
 
@@ -132,13 +136,13 @@ If automated release fails, you can release manually:
 ### 1. Build and Push Docker Images
 
 ```bash
-VERSION="0.1.7"
+APP_VERSION="2.0.4"
 
 # Build multi-platform image
 docker buildx create --use
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --tag ghcr.io/yanet-platform/yanet-operator:${VERSION} \
+  --tag ghcr.io/yanet-platform/yanet-operator:${APP_VERSION} \
   --tag ghcr.io/yanet-platform/yanet-operator:latest \
   --push \
   .
@@ -147,32 +151,40 @@ docker buildx build \
 ### 2. Package and Push Helm Chart
 
 ```bash
+APP_VERSION="2.0.4"
+CHART_VERSION="0.1.8"
+
 # Update appVersion in Chart.yaml
-sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
+sed -i "s/^appVersion:.*/appVersion: \"${APP_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
 
 # Package chart
 helm package deploy/charts/yanet-operator
 
 # Push to GHCR
 helm registry login ghcr.io
-helm push yanet-operator-${VERSION}.tgz oci://ghcr.io/yanet-platform
+helm push yanet-operator-${CHART_VERSION}.tgz oci://ghcr.io/yanet-platform
 ```
 
 ### 3. Generate install.yaml
 
 ```bash
+APP_VERSION="2.0.4"
+
 make manifests
-make build-installer IMG=ghcr.io/yanet-platform/yanet-operator:${VERSION}
+make build-installer IMG=ghcr.io/yanet-platform/yanet-operator:${APP_VERSION}
 ```
 
 ### 4. Create GitHub Release
 
 ```bash
-gh release create v${VERSION} \
-  --title "Release v${VERSION}" \
-  --notes "Manual release v${VERSION}" \
+APP_VERSION="2.0.4"
+CHART_VERSION="0.1.8"
+
+gh release create v${APP_VERSION} \
+  --title "Release v${APP_VERSION}" \
+  --notes "Manual release v${APP_VERSION}" \
   dist/install.yaml \
-  yanet-operator-${VERSION}.tgz
+  yanet-operator-${CHART_VERSION}.tgz
 ```
 
 ## 🔍 Troubleshooting
@@ -210,11 +222,11 @@ vim deploy/charts/yanet-operator/Chart.yaml
 
 # Commit and re-tag
 git add deploy/charts/yanet-operator/Chart.yaml
-git commit -m "Update chart version to 0.1.7"
-git tag -d v0.1.7
-git push origin :refs/tags/v0.1.7
-git tag -a v0.1.7 -m "Release v0.1.7"
-git push origin v0.1.7
+git commit -m "chore(release): bump chart version to 0.1.8"
+git tag -d v2.0.4
+git push origin :refs/tags/v2.0.4
+git tag -a v2.0.4 -m "Release v2.0.4"
+git push origin v2.0.4
 ```
 
 ### Rollback Release
@@ -222,14 +234,14 @@ git push origin v0.1.7
 To delete a release:
 
 ```bash
-VERSION="0.1.7"
+APP_VERSION="2.0.4"
 
 # Delete GitHub release
-gh release delete v${VERSION} --yes
+gh release delete v${APP_VERSION} --yes
 
 # Delete git tag
-git tag -d v${VERSION}
-git push origin :refs/tags/v${VERSION}
+git tag -d v${APP_VERSION}
+git push origin :refs/tags/v${APP_VERSION}
 
 # Delete Docker images (manual via GHCR UI)
 # Delete Helm charts (manual via registry UI)
@@ -283,13 +295,13 @@ GitHub repository secrets:
 
 5. **Verify multi-platform images**
    ```bash
-   docker manifest inspect ghcr.io/yanet-platform/yanet-operator:0.1.7
+   docker manifest inspect ghcr.io/yanet-platform/yanet-operator:2.0.4
    ```
 
 6. **Test Helm chart installation**
    ```bash
    helm install test oci://ghcr.io/yanet-platform/yanet-operator \
-     --version 0.1.7 \
+     --version 0.1.8 \
      --namespace test \
      --create-namespace \
      --dry-run
@@ -303,24 +315,24 @@ For experienced maintainers:
 # 1. Update version
 vim deploy/charts/yanet-operator/Chart.yaml
 git add deploy/charts/yanet-operator/Chart.yaml
-git commit -m "Bump version to 0.1.7"
+git commit -m "chore(release): bump chart version to 0.1.8"
 
 # 2. Test
 make test-docker && make lint-docker
 
 # 3. Tag and push
-git tag -a v0.1.7 -m "Release v0.1.7"
-git push origin main v0.1.7
+git tag -a v2.0.4 -m "Release v2.0.4"
+git push origin main v2.0.4
 
 # 4. Monitor
 gh run watch
 
 # 5. Verify
-docker pull ghcr.io/yanet-platform/yanet-operator:0.1.7
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.7
+docker pull ghcr.io/yanet-platform/yanet-operator:2.0.4
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.8
 ```
 
 ---
 
-**Last Updated:** 2026-04-30  
+**Last Updated:** 2026-07-15
 **Workflow:** [`.github/workflows/release.yml`](.github/workflows/release.yml)
