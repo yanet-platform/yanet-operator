@@ -32,9 +32,9 @@ package v2alpha1
 //     `?node=<nodeName>` appended automatically) into an emptyDir volume
 //     shared with the main container.
 //
-// FileName, when set, is passed as a command-line argument to the component
-// binary (--config=<mountDir>/<fileName> or equivalent). It does NOT change
-// the volume mount path — the directory is always mounted whole.
+// Args, when set, are passed to the component binary verbatim. For HostPath
+// sources the whole directory is mounted, so args can reference any file in
+// that directory. Inline content is available as <mountDir>/config.
 //
 // Validation that exactly one of Inline/HostPath/URL is filled is enforced
 // by the webhook.
@@ -59,12 +59,12 @@ type ConfigSource struct {
 	// +optional
 	URL string `json:"url,omitempty"`
 
-	// FileName is the config file name relative to the mount directory.
-	// When set it is passed as a command-line argument to the component
-	// binary so the process knows which file inside the mounted directory
-	// to read. It does NOT change the volume mount path.
+	// Args defines command-line arguments passed to the component verbatim.
+	// Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+	// "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+	// "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
 	// +optional
-	FileName string `json:"fileName,omitempty"`
+	Args []string `json:"args,omitempty"`
 }
 
 // IsZero reports whether the ConfigSource is empty (no variant chosen).

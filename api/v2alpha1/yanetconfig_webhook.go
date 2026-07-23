@@ -94,8 +94,69 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validatePortRanges(&spec.Components); err != nil {
 		return err
 	}
+	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
+		return err
+	}
+	if err := validateConfigSources(&spec.Components); err != nil {
+		return err
+	}
 	if err := dryRunPatches(spec.Patches); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateConfigSources(components *ComponentsSpec) error {
+	validate := func(path string, source *ConfigSource) error {
+		if source == nil {
+			return nil
+		}
+		if variants := source.VariantsSet(); variants != 1 {
+			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", path, variants)
+		}
+		return nil
+	}
+
+	if err := validate("spec.components.controlplane.config", components.Controlplane.Config); err != nil {
+		return err
+	}
+	if err := validate("spec.components.dataplane.config", components.Dataplane.Config); err != nil {
+		return err
+	}
+	if components.Bird != nil {
+		if err := validate("spec.components.bird.config", components.Bird.Config); err != nil {
+			return err
+		}
+	}
+	if components.BirdAdapter != nil {
+		if err := validate("spec.components.birdAdapter.config", components.BirdAdapter.Config); err != nil {
+			return err
+		}
+	}
+	if components.Announcer != nil {
+		if err := validate("spec.components.announcer.config", components.Announcer.Config); err != nil {
+			return err
+		}
+	}
+	for i := range components.Operators {
+		operator := &components.Operators[i]
+		for j := range operator.Containers {
+			container := &operator.Containers[j]
+			path := fmt.Sprintf("spec.components.operators[%d:%s].containers[%d:%s].config", i, operator.Name, j, container.Name)
+			if err := validate(path, container.Config); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateHugepages(hugepages *Hugepages) error {
+	if hugepages == nil {
+		return nil
+	}
+	if _, err := hugepages.TotalQuantity(); err != nil {
+		return fmt.Errorf("spec.components.dataplane.hugepages.%w", err)
 	}
 	return nil
 }

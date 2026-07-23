@@ -306,18 +306,13 @@ All five hardcoded components and every operator container can supply a
 
 The webhook enforces that exactly one variant is set.
 
-### `FileName` — optional config file selector
+### Literal process arguments
 
-When `ConfigSource.fileName` is non-empty, the builder:
-
-1. Passes `--config=<mountDir>/<fileName>` as a command-line argument to the
-   container so the binary knows which file to read.
-2. For `inline` configs: remaps the `"config"` key in the `ConfigMapVolumeSource`
-   via `Items[{key:"config", path:<fileName>}]` so the file appears at
-   `<mountDir>/<fileName>` inside the Pod (the mounted directory still
-   contains only that one file).
-3. For `hostPath` and `url` configs: the directory is mounted as-is;
-   `--config=...` tells the process which file to open.
+`ConfigSource.args` is copied to the container verbatim. The builder does not
+impose a generic config flag because YANET binaries use different conventions:
+dataplane accepts a positional path, controlplane uses `-c`, and bird-adapter
+uses `server -c`. For `hostPath`, args can reference any file in the mounted
+directory. Inline content is mounted under the stable `config` key.
 
 Example:
 
@@ -325,7 +320,7 @@ Example:
 controlplane:
   config:
     hostPath: /etc/yanet2
-    fileName: controlplane.conf   # → --config=/etc/yanet2/controlplane.conf
+    args: [-c, /etc/yanet2/controlplane.yaml]
 ```
 
 ### Default `pullPolicy`

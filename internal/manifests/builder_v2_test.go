@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
@@ -134,6 +135,48 @@ func TestBuildDeployments_Dataplane_Hugepages_HostNetwork(t *testing.T) {
 	}
 }
 
+func TestApplyHugepages_MultipliesPageSizeByCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		size  string
+		count int32
+		want  string
+	}{
+		{name: "one GiB pages", size: "1Gi", count: 8, want: "8Gi"},
+		{name: "two MiB pages", size: "2Mi", count: 1024, want: "2Gi"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			container := corev1.Container{}
+			var volumes []corev1.Volume
+			applyHugepages(&container, &volumes, &yanetv2alpha1.Hugepages{
+				Size:  tt.size,
+				Count: tt.count,
+			})
+
+			resourceName := corev1.ResourceName("hugepages-" + tt.size)
+			if got := container.Resources.Requests[resourceName]; got.String() != tt.want {
+				t.Errorf("request = %s, want %s", got.String(), tt.want)
+			}
+			if got := container.Resources.Limits[resourceName]; got.String() != tt.want {
+				t.Errorf("limit = %s, want %s", got.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDeployments_Dataplane_InvalidHugepagesReturnsError(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image:     helpers.ResolvedImage{Name: "dp", Tag: "v2"},
+		Hugepages: &yanetv2alpha1.Hugepages{Size: "invalid", Count: 1},
+	}
+	if _, err := BuildDeployments(ctxV2(), c); err == nil {
+		t.Fatal("invalid hugepage size must return an error")
+	}
+}
+
 func TestBuildDeployments_Dataplane_HostNetworkOverride(t *testing.T) {
 	false_ := false
 	c := &helpers.ResolvedComponent{
@@ -175,8 +218,11 @@ func TestBuildDeployments_Dataplane_SecurityBaseline(t *testing.T) {
 		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
 		Image:     helpers.ResolvedImage{Name: "dp", Tag: "v2"},
 		Port:      8090,
-		Hugepages: &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 8},
-		Config:    &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2", FileName: "dataplane.yaml"},
+		Hugepages: &yanetv2alpha1.Hugepages{Size: "2Mi", Count: 4096},
+		Config: &yanetv2alpha1.ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"/etc/yanet2/dataplane.yaml"},
+		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
 	if err != nil {
@@ -229,10 +275,13 @@ func TestBuildDeployments_Dataplane_SecurityBaseline(t *testing.T) {
 func TestBuildDeployments_Controlplane_ShmemBaseline(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
-		Image:  helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:   8080,
-		Numa:   1,
-		Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2", FileName: "controlplane.conf"},
+		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Port:  8080,
+		Numa:  1,
+		Config: &yanetv2alpha1.ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
 	if err != nil {
@@ -494,33 +543,6 @@ func TestBuildDeployments_NoNodeName_NoNodeSelector(t *testing.T) {
 	}
 }
 
-// --- trimUnitPrefix ---------------------------------------------------------
-
-func TestTrimUnitPrefix(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"1Gi", "Gi"},
-		{"10Gi", "Gi"},
-		{"100Mi", "Mi"},
-		{"2Mi", "Mi"},
-		{"1Ti", "Ti"},
-		{"1.5Gi", "Gi"},
-		{"+2Mi", "Mi"},
-		{"-1Gi", "Gi"},
-		{"Gi", "Gi"},
-		{"", ""},
-		{"1234", ""}, // no suffix at all
-	}
-	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			if got := trimUnitPrefix(tc.in); got != tc.want {
-				t.Errorf("trimUnitPrefix(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestToLowerKebab(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -585,9 +607,9 @@ func TestBuildDeployments_BirdAdapter_ContainerNameIsRFC1123(t *testing.T) {
 	}
 }
 
-// TestBuildDeployments_FileName_HostPath verifies that when ConfigSource.FileName
-// is set, the container receives --config=<mountPath>/<fileName> as Args.
-func TestBuildDeployments_FileName_HostPath(t *testing.T) {
+// TestBuildDeployments_HostPathArgs verifies that source args are passed
+// verbatim without imposing a generic config flag convention.
+func TestBuildDeployments_HostPathArgs(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind:    helpers.KindDataplane,
 		Name:    "dataplane",
@@ -595,7 +617,7 @@ func TestBuildDeployments_FileName_HostPath(t *testing.T) {
 		Image:   helpers.ResolvedImage{Name: "dataplane", Tag: "latest"},
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
-			FileName: "dataplane.yaml",
+			Args:     []string{"/etc/yanet2/dataplane.yaml"},
 		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
@@ -606,25 +628,88 @@ func TestBuildDeployments_FileName_HostPath(t *testing.T) {
 		t.Fatalf("expected 1 deployment, got %d", len(deps))
 	}
 	args := deps[0].Spec.Template.Spec.Containers[0].Args
-	want := "--config=/etc/yanet2/dataplane.yaml"
+	want := "/etc/yanet2/dataplane.yaml"
 	if len(args) != 1 || args[0] != want {
 		t.Errorf("container Args = %v, want [%q]", args, want)
 	}
 }
 
-// TestBuildDeployments_FileName_Inline verifies that FileName with inline config:
-//  1. Adds --config=<mountPath>/<fileName> to container Args.
-//  2. Remaps the ConfigMap "config" key to FileName via Items so the file
-//     appears at the correct path inside the Pod.
-func TestBuildDeployments_FileName_Inline(t *testing.T) {
+func TestBuildDeployments_ConfigSourceArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		kind helpers.ComponentKind
+		args []string
+	}{
+		{
+			name: "dataplane positional path", kind: helpers.KindDataplane,
+			args: []string{"/etc/yanet2/dataplane.yaml"},
+		},
+		{
+			name: "controlplane short option", kind: helpers.KindControlplane,
+			args: []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		},
+		{
+			name: "bird adapter subcommand", kind: helpers.KindBirdAdapter,
+			args: []string{"server", "-c", "/etc/yanet2/bird-adapter.yaml"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &helpers.ResolvedComponent{
+				Kind: tt.kind, Name: string(tt.kind), Enabled: true,
+				Image: helpers.ResolvedImage{Name: "component", Tag: "latest"},
+				Config: &yanetv2alpha1.ConfigSource{
+					HostPath: "/etc/yanet2",
+					Args:     tt.args,
+				},
+			}
+			deployments, err := BuildDeployments(ctxV2(), component)
+			if err != nil {
+				t.Fatalf("BuildDeployments: %v", err)
+			}
+			got := deployments[0].Spec.Template.Spec.Containers[0].Args
+			if diff := cmp.Diff(tt.args, got); diff != "" {
+				t.Errorf("args mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBuildDeployments_OperatorConfigSourceArgs(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "acl", Enabled: true,
+		Containers: []helpers.ResolvedContainer{{
+			Name:  "acl",
+			Image: helpers.ResolvedImage{Name: "acl-operator", Tag: "latest"},
+			Config: &yanetv2alpha1.ConfigSource{
+				HostPath: "/etc/yanet2",
+				Args:     []string{"run", "-c", "/etc/yanet2/yanet-acl-operator.yaml"},
+			},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), component)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	want := []string{"run", "-c", "/etc/yanet2/yanet-acl-operator.yaml"}
+	got := deployments[0].Spec.Template.Spec.Containers[0].Args
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("args mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestBuildDeployments_InlineArgs verifies that inline content remains under
+// the stable "config" key and explicit args can reference that path.
+func TestBuildDeployments_InlineArgs(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind:    helpers.KindControlplane,
 		Name:    "controlplane",
 		Enabled: true,
 		Image:   helpers.ResolvedImage{Name: "controlplane", Tag: "latest"},
 		Config: &yanetv2alpha1.ConfigSource{
-			Inline:   "some: config",
-			FileName: "controlplane.conf",
+			Inline: "some: config",
+			Args:   []string{"-c", "/etc/yanet2/config"},
 		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
@@ -632,13 +717,11 @@ func TestBuildDeployments_FileName_Inline(t *testing.T) {
 		t.Fatalf("BuildDeployments: %v", err)
 	}
 	d := deps[0]
-	// Check --config arg.
 	args := d.Spec.Template.Spec.Containers[0].Args
-	wantArg := "--config=/etc/yanet2/controlplane.conf"
-	if len(args) != 1 || args[0] != wantArg {
-		t.Errorf("container Args = %v, want [%q]", args, wantArg)
+	wantArgs := []string{"-c", "/etc/yanet2/config"}
+	if diff := cmp.Diff(wantArgs, args); diff != "" {
+		t.Errorf("args mismatch (-want +got):\n%s", diff)
 	}
-	// Check ConfigMap Items remapping.
 	if len(d.Spec.Template.Spec.Volumes) == 0 {
 		t.Fatal("expected at least one volume")
 	}
@@ -646,19 +729,14 @@ func TestBuildDeployments_FileName_Inline(t *testing.T) {
 	if vol.ConfigMap == nil {
 		t.Fatal("expected ConfigMap volume source")
 	}
-	if len(vol.ConfigMap.Items) != 1 {
-		t.Fatalf("expected 1 Items entry, got %d", len(vol.ConfigMap.Items))
-	}
-	item := vol.ConfigMap.Items[0]
-	if item.Key != "config" || item.Path != "controlplane.conf" {
-		t.Errorf("Items[0] = {Key:%q Path:%q}, want {Key:%q Path:%q}",
-			item.Key, item.Path, "config", "controlplane.conf")
+	if len(vol.ConfigMap.Items) != 0 {
+		t.Fatalf("inline config must retain the default config key, got Items=%v", vol.ConfigMap.Items)
 	}
 }
 
-// TestBuildDeployments_NoFileName_NoArgs verifies that when FileName is empty,
-// container Args is not set.
-func TestBuildDeployments_NoFileName_NoArgs(t *testing.T) {
+// TestBuildDeployments_NoArgs verifies that mounting a config source does not
+// inject any implicit process arguments.
+func TestBuildDeployments_NoArgs(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind:    helpers.KindDataplane,
 		Name:    "dataplane",
@@ -674,7 +752,7 @@ func TestBuildDeployments_NoFileName_NoArgs(t *testing.T) {
 	}
 	args := deps[0].Spec.Template.Spec.Containers[0].Args
 	if len(args) != 0 {
-		t.Errorf("expected no Args when FileName is empty, got %v", args)
+		t.Errorf("expected no implicit args, got %v", args)
 	}
 }
 

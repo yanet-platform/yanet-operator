@@ -30,7 +30,7 @@ spec:
       numa: 1             # one controlplane Deployment per NUMA domain
       config:
         hostPath: /etc/yanet2
-        fileName: controlplane.conf
+        args: [-c, /etc/yanet2/controlplane.yaml]
 
     dataplane:
       image: {name: dataplane, tag: v2.1.0}
@@ -41,7 +41,7 @@ spec:
       hostNetwork: true   # default for DPDK
       config:
         hostPath: /etc/yanet2
-        fileName: dataplane.yaml
+        args: [/etc/yanet2/dataplane.yaml]
 
   # ============================================================
   # 2) PATCHES — named registry of strategic-merge Deployment fragments.

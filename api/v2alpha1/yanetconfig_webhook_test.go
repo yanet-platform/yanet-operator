@@ -60,6 +60,68 @@ func TestYanetConfigWebhook_Valid(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_Hugepages(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    string
+		count   int32
+		wantErr string
+	}{
+		{name: "two MiB pages", size: "2Mi", count: 28672},
+		{name: "one GiB pages", size: "1Gi", count: 8},
+		{name: "invalid size", size: "not-a-quantity", count: 8, wantErr: "not a valid Kubernetes quantity"},
+		{name: "zero size", size: "0", count: 8, wantErr: "must be greater than zero"},
+		{name: "zero count", size: "2Mi", count: 0, wantErr: "count must be greater than zero"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Dataplane.Hugepages = &Hugepages{Size: tt.size, Count: tt.count}
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid hugepages rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  *ConfigSource
+		wantErr string
+	}{
+		{name: "host path", source: &ConfigSource{HostPath: "/etc/yanet2"}},
+		{name: "typed args", source: &ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		}},
+		{name: "multiple variants", source: &ConfigSource{
+			HostPath: "/etc/yanet2",
+			Inline:   "logging: {}",
+		}, wantErr: "exactly one"},
+		{name: "no variant", source: &ConfigSource{Args: []string{"-c", "/etc/yanet2/config.yaml"}}, wantErr: "exactly one"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Controlplane.Config = tt.source
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid config source rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestYanetConfigWebhook_DuplicatePatchName(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Patches = append(cfg.Spec.Patches, makePatch("telegraf", `{}`))
