@@ -31,13 +31,13 @@ package manifests
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -77,6 +77,11 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 	if c == nil {
 		return nil, fmt.Errorf("buildDeployments: nil ResolvedComponent")
 	}
+	if c.Hugepages != nil {
+		if _, err := c.Hugepages.TotalQuantity(); err != nil {
+			return nil, fmt.Errorf("buildDeployments: invalid hugepages for component %q: %w", c.Name, err)
+		}
+	}
 
 	switch c.Kind {
 	case helpers.KindControlplane:
@@ -89,11 +94,21 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 }
 
 // buildControlplaneFanout renders one Deployment per NUMA domain.
-// Each instance listens on Port + numa_index.
+// Each instance listens on Port + numa_index and reads its own
+// per-NUMA config file.
+//
+// NUMA indices listed in DisabledNuma are skipped entirely: no
+// Deployment, no Service (see BuildServices). The usual reason is a
+// NUMA domain without a NIC, where the dataplane runs no instance and
+// a controlplane would have no peer to attach to.
 func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*appsv1.Deployment, error) {
 	numa := effectiveNuma(ctx, c)
+	disabled := disabledNumaSet(c)
 	out := make([]*appsv1.Deployment, 0, numa)
 	for i := int32(0); i < numa; i++ {
+		if _, skip := disabled[i]; skip {
+			continue
+		}
 		d := buildSingle(ctx, c)
 		// Decorate Deployment name & labels with the NUMA index.
 		d.Name = numaDeploymentName(ctx, c, i)
@@ -102,18 +117,62 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		d.Spec.Template.Labels[labelNuma] = fmt.Sprintf("%d", i)
 		// Per-instance listen port (Port + i). The base Service
 		// load-balances across all instances by Port (round-robin).
+		cont := &d.Spec.Template.Spec.Containers[0]
 		if c.Port > 0 {
 			port := c.Port + i
-			cont := &d.Spec.Template.Spec.Containers[0]
 			cont.Ports = []corev1.ContainerPort{{
 				Name:          "grpc",
 				ContainerPort: port,
 				Protocol:      corev1.ProtocolTCP,
 			}}
 		}
+		// Each instance gets its own config file: the controlplane
+		// reads gateway.instance_id and all endpoints from the file
+		// and accepts only `-c <path>`, so a shared file would make
+		// every instance serve dataplane instance 0.
+		cont.Args = numaConfigArgs(cont.Args, i)
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// disabledNumaSet indexes ResolvedComponent.DisabledNuma for O(1)
+// lookups. Negative and duplicate entries are harmless: they simply
+// never match a fan-out index.
+func disabledNumaSet(c *helpers.ResolvedComponent) map[int32]struct{} {
+	if len(c.DisabledNuma) == 0 {
+		return nil
+	}
+	out := make(map[int32]struct{}, len(c.DisabledNuma))
+	for _, n := range c.DisabledNuma {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
+// numaConfigArgs rewrites the config path inside the component args so
+// that each per-NUMA instance reads its own file. The NUMA index is
+// appended to the file base name, keeping the directory and extension:
+//
+//	/etc/yanet2/controlplane.yaml → /etc/yanet2/controlplane-0.yaml
+//
+// Only arguments that look like a config file path (a *.yaml / *.yml
+// element) are touched, so flags such as `-c` and subcommands are
+// preserved verbatim. Args without any such element are returned
+// unchanged — the caller stays responsible for a sane args list.
+func numaConfigArgs(args []string, numa int32) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := append([]string(nil), args...)
+	for i, a := range out {
+		ext := filepath.Ext(a)
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+		out[i] = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(a, ext), numa, ext)
+	}
+	return out
 }
 
 // effectiveNuma resolves the per-component NUMA count. The component
@@ -144,7 +203,7 @@ func numaDeploymentName(ctx BuildContextV2, c *helpers.ResolvedComponent, numa i
 // after this).
 func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
 	labels := baseLabels(ctx, c)
-	volumes, volumeMounts, configMapName, configArg := buildConfigVolumes(ctx, c)
+	volumes, volumeMounts, configMapName, configArgs := buildConfigVolumes(ctx, c)
 
 	container := corev1.Container{
 		Name:            toLowerKebab(string(c.Kind)),
@@ -152,9 +211,7 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		ImagePullPolicy: ctx.PullPolicy,
 		VolumeMounts:    volumeMounts,
 	}
-	if configArg != "" {
-		container.Args = []string{configArg}
-	}
+	container.Args = configArgs
 	if c.Port > 0 {
 		container.Ports = []corev1.ContainerPort{{
 			Name:          defaultPortName(c.Kind),
@@ -248,7 +305,7 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 	}
 	hostIPC := false
 	for i, rc := range c.Containers {
-		volumes, mounts, _, configArg := buildConfigVolumesForContainer(ctx, c, &rc, i)
+		volumes, mounts, _, configArgs := buildConfigVolumesForContainer(ctx, c, &rc, i)
 		pod.Volumes = append(pod.Volumes, volumes...)
 		container := corev1.Container{
 			Name:            rc.Name,
@@ -256,9 +313,7 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 			ImagePullPolicy: ctx.PullPolicy,
 			VolumeMounts:    mounts,
 		}
-		if configArg != "" {
-			container.Args = []string{configArg}
-		}
+		container.Args = configArgs
 		if i == 0 && c.Port > 0 {
 			container.Ports = []corev1.ContainerPort{{
 				Name:          "grpc",
@@ -378,16 +433,16 @@ func replicasFor(c *helpers.ResolvedComponent) *int32 {
 // VolumeMounts for the (singular) ConfigSource of the resolved
 // component. The returned configMapName is non-empty only for inline
 // configs — the reconciler must (re)create that ConfigMap.
-// configArg is non-empty when ConfigSource.FileName is set; it carries
-// the --config=<mountPath>/<fileName> argument to pass to the container.
+// configArgs are copied verbatim from ConfigSource.Args.
 func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 	volumes []corev1.Volume,
 	mounts []corev1.VolumeMount,
-	configMapName, configArg string,
+	configMapName string,
+	configArgs []string,
 ) {
 	cs := c.Config
 	if cs.IsZero() {
-		return nil, nil, "", ""
+		return nil, nil, "", nil
 	}
 	mountPath := defaultConfigMountPath(c.Kind)
 	switch {
@@ -403,12 +458,6 @@ func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		configMapName = inlineConfigMapName(ctx, c, cs.Inline)
 		cmVol := corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
-		}
-		// When FileName is set, remap the "config" key inside the
-		// ConfigMap to the requested file name so the component
-		// binary finds it at <mountPath>/<FileName>.
-		if cs.FileName != "" {
-			cmVol.Items = []corev1.KeyToPath{{Key: "config", Path: cs.FileName}}
 		}
 		volumes = []corev1.Volume{{
 			Name:         "config",
@@ -426,25 +475,21 @@ func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		}}
 		mounts = []corev1.VolumeMount{{Name: "config", MountPath: mountPath}}
 	}
-	if cs.FileName != "" {
-		configArg = fmt.Sprintf("--config=%s/%s", mountPath, cs.FileName)
-	}
-	return volumes, mounts, configMapName, configArg
+	return volumes, mounts, configMapName, append([]string(nil), cs.Args...)
 }
 
 // buildConfigVolumesForContainer is the per-operator-container
 // equivalent. It mounts the container-level Config when set; the
 // volume name is derived from the container index to avoid clashes.
-// configArg is non-empty when ConfigSource.FileName is set; it carries
-// the --config=<mountPath>/<fileName> argument for the container.
+// configArgs are copied verbatim from ConfigSource.Args.
 func buildConfigVolumesForContainer(
 	ctx BuildContextV2,
 	c *helpers.ResolvedComponent,
 	rc *helpers.ResolvedContainer,
 	idx int,
-) (volumes []corev1.Volume, mounts []corev1.VolumeMount, configMapName, configArg string) {
+) (volumes []corev1.Volume, mounts []corev1.VolumeMount, configMapName string, configArgs []string) {
 	if rc.Config.IsZero() {
-		return nil, nil, "", ""
+		return nil, nil, "", nil
 	}
 	volName := fmt.Sprintf("config-%d", idx)
 	mountPath := defaultConfigMountPath(c.Kind)
@@ -462,9 +507,6 @@ func buildConfigVolumesForContainer(
 		cmVol := corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
 		}
-		if rc.Config.FileName != "" {
-			cmVol.Items = []corev1.KeyToPath{{Key: "config", Path: rc.Config.FileName}}
-		}
 		volumes = []corev1.Volume{{
 			Name:         volName,
 			VolumeSource: corev1.VolumeSource{ConfigMap: &cmVol},
@@ -477,10 +519,7 @@ func buildConfigVolumesForContainer(
 		}}
 		mounts = []corev1.VolumeMount{{Name: volName, MountPath: mountPath}}
 	}
-	if rc.Config.FileName != "" {
-		configArg = fmt.Sprintf("--config=%s/%s", mountPath, rc.Config.FileName)
-	}
-	return volumes, mounts, configMapName, configArg
+	return volumes, mounts, configMapName, append([]string(nil), rc.Config.Args...)
 }
 
 // defaultConfigMountPath gives a sensible per-component mount
@@ -683,7 +722,12 @@ func applyHugepages(c *corev1.Container, volumes *[]corev1.Volume, hp *yanetv2al
 		MountPath: "/dev/hugepages",
 	})
 	resourceName := corev1.ResourceName(fmt.Sprintf("hugepages-%s", hp.Size))
-	totalQty := resource.MustParse(fmt.Sprintf("%d%s", hp.Count, trimUnitPrefix(hp.Size)))
+	// hp is validated by TotalQuantity in BuildDeployments before we get
+	// here, so this call cannot fail; guard defensively rather than ignore it.
+	totalQty, err := hp.TotalQuantity()
+	if err != nil {
+		return
+	}
 	if c.Resources.Requests == nil {
 		c.Resources.Requests = corev1.ResourceList{}
 	}
@@ -692,28 +736,6 @@ func applyHugepages(c *corev1.Container, volumes *[]corev1.Volume, hp *yanetv2al
 	}
 	c.Resources.Requests[resourceName] = totalQty
 	c.Resources.Limits[resourceName] = totalQty
-}
-
-// trimUnitPrefix returns the unit-suffix tail of a Kubernetes Quantity
-// literal so a new integer count can be re-attached:
-//
-//	"1Gi"   -> "Gi"
-//	"10Gi"  -> "Gi"
-//	"1.5Gi" -> "Gi"
-//	"+2Mi"  -> "Mi"
-//	"Gi"    -> "Gi"
-//	""      -> ""
-//
-// Anything in [0-9.+-] counts as part of the numeric prefix; the
-// suffix starts at the first character that doesn't.
-func trimUnitPrefix(s string) string {
-	cut := strings.IndexFunc(s, func(r rune) bool {
-		return !(r >= '0' && r <= '9' || r == '.' || r == '+' || r == '-')
-	})
-	if cut < 0 {
-		return ""
-	}
-	return s[cut:]
 }
 
 // -- misc helpers ------------------------------------------------------------

@@ -204,20 +204,22 @@ spec:
                               `?node=<nodeName>` appended automatically) into an emptyDir volume
                               shared with the main container.
 
-                          FileName, when set, is passed as a command-line argument to the component
-                          binary (--config=<mountDir>/<fileName> or equivalent). It does NOT change
-                          the volume mount path — the directory is always mounted whole.
+                          Args, when set, are passed to the component binary verbatim. For HostPath
+                          sources the whole directory is mounted, so args can reference any file in
+                          that directory. Inline content is available as <mountDir>/config.
 
                           Validation that exactly one of Inline/HostPath/URL is filled is enforced
                           by the webhook.
                         properties:
-                          fileName:
+                          args:
                             description: |-
-                              FileName is the config file name relative to the mount directory.
-                              When set it is passed as a command-line argument to the component
-                              binary so the process knows which file inside the mounted directory
-                              to read. It does NOT change the volume mount path.
-                            type: string
+                              Args defines command-line arguments passed to the component verbatim.
+                              Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                              "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                              "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                            items:
+                              type: string
+                            type: array
                           hostPath:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
@@ -278,20 +280,22 @@ spec:
                               `?node=<nodeName>` appended automatically) into an emptyDir volume
                               shared with the main container.
 
-                          FileName, when set, is passed as a command-line argument to the component
-                          binary (--config=<mountDir>/<fileName> or equivalent). It does NOT change
-                          the volume mount path — the directory is always mounted whole.
+                          Args, when set, are passed to the component binary verbatim. For HostPath
+                          sources the whole directory is mounted, so args can reference any file in
+                          that directory. Inline content is available as <mountDir>/config.
 
                           Validation that exactly one of Inline/HostPath/URL is filled is enforced
                           by the webhook.
                         properties:
-                          fileName:
+                          args:
                             description: |-
-                              FileName is the config file name relative to the mount directory.
-                              When set it is passed as a command-line argument to the component
-                              binary so the process knows which file inside the mounted directory
-                              to read. It does NOT change the volume mount path.
-                            type: string
+                              Args defines command-line arguments passed to the component verbatim.
+                              Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                              "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                              "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                            items:
+                              type: string
+                            type: array
                           hostPath:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
@@ -356,20 +360,22 @@ spec:
                               `?node=<nodeName>` appended automatically) into an emptyDir volume
                               shared with the main container.
 
-                          FileName, when set, is passed as a command-line argument to the component
-                          binary (--config=<mountDir>/<fileName> or equivalent). It does NOT change
-                          the volume mount path — the directory is always mounted whole.
+                          Args, when set, are passed to the component binary verbatim. For HostPath
+                          sources the whole directory is mounted, so args can reference any file in
+                          that directory. Inline content is available as <mountDir>/config.
 
                           Validation that exactly one of Inline/HostPath/URL is filled is enforced
                           by the webhook.
                         properties:
-                          fileName:
+                          args:
                             description: |-
-                              FileName is the config file name relative to the mount directory.
-                              When set it is passed as a command-line argument to the component
-                              binary so the process knows which file inside the mounted directory
-                              to read. It does NOT change the volume mount path.
-                            type: string
+                              Args defines command-line arguments passed to the component verbatim.
+                              Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                              "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                              "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                            items:
+                              type: string
+                            type: array
                           hostPath:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
@@ -421,13 +427,15 @@ spec:
                         description: Config is the configuration source (inline |
                           hostPath | url).
                         properties:
-                          fileName:
+                          args:
                             description: |-
-                              FileName is the config file name relative to the mount directory.
-                              When set it is passed as a command-line argument to the component
-                              binary so the process knows which file inside the mounted directory
-                              to read. It does NOT change the volume mount path.
-                            type: string
+                              Args defines command-line arguments passed to the component verbatim.
+                              Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                              "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                              "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                            items:
+                              type: string
+                            type: array
                           hostPath:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
@@ -449,6 +457,26 @@ spec:
                               `?node=<nodeName>` is appended automatically.
                             type: string
                         type: object
+                      disabledNuma:
+                        description: |-
+                          DisabledNuma lists NUMA indices that must NOT get a
+                          controlplane instance, even though NUMA detection reports
+                          them. The usual reason is a NUMA domain without any NIC: the
+                          dataplane runs no instance there, so a controlplane for it
+                          would have no dataplane peer to attach to.
+
+                          Indices are zero-based and refer to the same numbering as the
+                          NUMA fan-out (`numa` / the NFD label). Out-of-range indices
+                          are ignored, duplicates are collapsed. Disabling every index
+                          is rejected by the webhook.
+
+                          This is the cluster-wide default; a single installation can
+                          override it via
+                          YanetV2.spec.components.controlplane.disabledNuma.
+                        items:
+                          format: int32
+                          type: integer
+                        type: array
                       image:
                         description: |-
                           ImageRef identifies an image. Registry and prefix come from
@@ -506,20 +534,22 @@ spec:
                               `?node=<nodeName>` appended automatically) into an emptyDir volume
                               shared with the main container.
 
-                          FileName, when set, is passed as a command-line argument to the component
-                          binary (--config=<mountDir>/<fileName> or equivalent). It does NOT change
-                          the volume mount path — the directory is always mounted whole.
+                          Args, when set, are passed to the component binary verbatim. For HostPath
+                          sources the whole directory is mounted, so args can reference any file in
+                          that directory. Inline content is available as <mountDir>/config.
 
                           Validation that exactly one of Inline/HostPath/URL is filled is enforced
                           by the webhook.
                         properties:
-                          fileName:
+                          args:
                             description: |-
-                              FileName is the config file name relative to the mount directory.
-                              When set it is passed as a command-line argument to the component
-                              binary so the process knows which file inside the mounted directory
-                              to read. It does NOT change the volume mount path.
-                            type: string
+                              Args defines command-line arguments passed to the component verbatim.
+                              Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                              "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                              "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                            items:
+                              type: string
+                            type: array
                           hostPath:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
@@ -598,13 +628,15 @@ spec:
                                 description: Config is the configuration source for
                                   this container.
                                 properties:
-                                  fileName:
+                                  args:
                                     description: |-
-                                      FileName is the config file name relative to the mount directory.
-                                      When set it is passed as a command-line argument to the component
-                                      binary so the process knows which file inside the mounted directory
-                                      to read. It does NOT change the volume mount path.
-                                    type: string
+                                      Args defines command-line arguments passed to the component verbatim.
+                                      Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                                      "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                                      "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                                    items:
+                                      type: string
+                                    type: array
                                   hostPath:
                                     description: |-
                                       HostPath is the HOST directory to mount into the container via a

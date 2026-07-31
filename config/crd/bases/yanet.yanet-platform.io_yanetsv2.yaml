@@ -192,8 +192,9 @@ spec:
                     type: object
                   controlplane:
                     description: |-
-                      YanetComponentOverride is the only per-installation customisation
-                      surface for a component. Anything broader belongs to a patch.
+                      YanetControlplaneOverride is the controlplane flavour of
+                      YanetComponentOverride. On top of the common enabled/image knobs it
+                      carries the per-installation NUMA opt-out.
                     properties:
                       containers:
                         additionalProperties:
@@ -217,6 +218,26 @@ spec:
                           YanetConfigV2.spec.components.operators[].containers[].name.
                           Registry/prefix come from YanetConfigV2.spec.images.
                         type: object
+                      disabledNuma:
+                        description: |-
+                          DisabledNuma replaces (does NOT merge with)
+                          YanetConfigV2.spec.components.controlplane.disabledNuma for
+                          this installation. Use it for hosts whose NUMA layout differs
+                          from the cluster-wide default — typically a NUMA domain with
+                          no NIC, where the dataplane runs no instance and a
+                          controlplane would have no peer to attach to.
+
+                          The scope is the whole YanetV2 CR, so it applies to every node
+                          matched by spec.nodeSelector. For a host with a unique layout
+                          create a dedicated YanetV2 CR selecting just that node.
+
+                          An empty (but non-nil) list explicitly clears the cluster-wide
+                          default, re-enabling every NUMA index. Leave the field unset
+                          to inherit the default.
+                        items:
+                          format: int32
+                          type: integer
+                        type: array
                       enabled:
                         description: |-
                           Enabled toggles this component for this installation only.

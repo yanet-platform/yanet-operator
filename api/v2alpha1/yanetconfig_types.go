@@ -17,9 +17,12 @@ limitations under the License.
 package v2alpha1
 
 import (
+	"fmt"
+	"math"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -154,6 +157,23 @@ type ControlplaneSpec struct {
 	// from the Node and falls back to 1.
 	// +optional
 	Numa *int32 `json:"numa,omitempty"`
+
+	// DisabledNuma lists NUMA indices that must NOT get a
+	// controlplane instance, even though NUMA detection reports
+	// them. The usual reason is a NUMA domain without any NIC: the
+	// dataplane runs no instance there, so a controlplane for it
+	// would have no dataplane peer to attach to.
+	//
+	// Indices are zero-based and refer to the same numbering as the
+	// NUMA fan-out (`numa` / the NFD label). Out-of-range indices
+	// are ignored, duplicates are collapsed. Disabling every index
+	// is rejected by the webhook.
+	//
+	// This is the cluster-wide default; a single installation can
+	// override it via
+	// YanetV2.spec.components.controlplane.disabledNuma.
+	// +optional
+	DisabledNuma []int32 `json:"disabledNuma,omitempty"`
 }
 
 // DataplaneSpec describes the dataplane component (DPDK + hugepages).
@@ -218,6 +238,28 @@ type Hugepages struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	Count int32 `json:"count"`
+}
+
+// TotalQuantity validates the Hugepages spec and returns the total memory
+// reservation (single page size multiplied by Count). It is the single
+// source of truth for both the admission webhook and the manifest builder,
+// so validation rules cannot drift between them.
+func (h *Hugepages) TotalQuantity() (resource.Quantity, error) {
+	pageQty, err := resource.ParseQuantity(h.Size)
+	if err != nil {
+		return resource.Quantity{}, fmt.Errorf("size %q is not a valid Kubernetes quantity: %w", h.Size, err)
+	}
+	if pageQty.Sign() <= 0 {
+		return resource.Quantity{}, fmt.Errorf("size must be greater than zero, got %q", h.Size)
+	}
+	if h.Count <= 0 {
+		return resource.Quantity{}, fmt.Errorf("count must be greater than zero, got %d", h.Count)
+	}
+	pageBytes := pageQty.Value()
+	if pageBytes > math.MaxInt64/int64(h.Count) {
+		return resource.Quantity{}, fmt.Errorf("size %q multiplied by count %d overflows int64", h.Size, h.Count)
+	}
+	return *resource.NewQuantity(pageBytes*int64(h.Count), pageQty.Format), nil
 }
 
 // OperatorSpec describes one dynamic operator. The whole Pod is

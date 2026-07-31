@@ -161,12 +161,43 @@ func TestYanetWebhook_HardcodedContainerOverride_OK(t *testing.T) {
 	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
 	y := makeYanet("y", "yanet", "release")
 	y.Spec.Components = &YanetComponentsOverride{
-		Controlplane: &YanetComponentOverride{
-			Containers: map[string]ImageRef{"controlplane": {Tag: "v2"}},
+		Controlplane: &YanetControlplaneOverride{
+			YanetComponentOverride: YanetComponentOverride{
+				Containers: map[string]ImageRef{"controlplane": {Tag: "v2"}},
+			},
 		},
 	}
 	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
 		t.Errorf("hardcoded controlplane override should pass: %v", err)
+	}
+}
+
+func TestYanetWebhook_ControlplaneDisabledNuma_OK(t *testing.T) {
+	cfg := clusterConfig("c", "yanet", "release")
+	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
+	y := makeYanet("y", "yanet", "release")
+	y.Spec.Components = &YanetComponentsOverride{
+		Controlplane: &YanetControlplaneOverride{
+			DisabledNuma: []int32{1},
+		},
+	}
+	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
+		t.Errorf("per-installation disabledNuma should pass: %v", err)
+	}
+}
+
+func TestYanetWebhook_ControlplaneDisabledNuma_Negative(t *testing.T) {
+	cfg := clusterConfig("c", "yanet", "release")
+	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
+	y := makeYanet("y", "yanet", "release")
+	y.Spec.Components = &YanetComponentsOverride{
+		Controlplane: &YanetControlplaneOverride{
+			DisabledNuma: []int32{-2},
+		},
+	}
+	_, err := v.ValidateCreate(context.Background(), y)
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("expected non-negative index error, got %v", err)
 	}
 }
 
@@ -175,8 +206,10 @@ func TestYanetWebhook_HardcodedContainerOverride_WrongKey(t *testing.T) {
 	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
 	y := makeYanet("y", "yanet", "release")
 	y.Spec.Components = &YanetComponentsOverride{
-		Controlplane: &YanetComponentOverride{
-			Containers: map[string]ImageRef{"main": {Tag: "v2"}}, // wrong: must be "controlplane"
+		Controlplane: &YanetControlplaneOverride{
+			YanetComponentOverride: YanetComponentOverride{
+				Containers: map[string]ImageRef{"main": {Tag: "v2"}}, // wrong: must be "controlplane"
+			},
 		},
 	}
 	_, err := v.ValidateCreate(context.Background(), y)

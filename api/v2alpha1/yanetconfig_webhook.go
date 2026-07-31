@@ -94,8 +94,111 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validatePortRanges(&spec.Components); err != nil {
 		return err
 	}
+	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
+		return err
+	}
+	if err := validateConfigSources(&spec.Components); err != nil {
+		return err
+	}
+	if err := validateDisabledNuma(&spec.Components.Controlplane); err != nil {
+		return err
+	}
 	if err := dryRunPatches(spec.Patches); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateConfigSources(components *ComponentsSpec) error {
+	validate := func(path string, source *ConfigSource) error {
+		if source == nil {
+			return nil
+		}
+		if variants := source.VariantsSet(); variants != 1 {
+			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", path, variants)
+		}
+		return nil
+	}
+
+	if err := validate("spec.components.controlplane.config", components.Controlplane.Config); err != nil {
+		return err
+	}
+	if err := validate("spec.components.dataplane.config", components.Dataplane.Config); err != nil {
+		return err
+	}
+	if components.Bird != nil {
+		if err := validate("spec.components.bird.config", components.Bird.Config); err != nil {
+			return err
+		}
+	}
+	if components.BirdAdapter != nil {
+		if err := validate("spec.components.birdAdapter.config", components.BirdAdapter.Config); err != nil {
+			return err
+		}
+	}
+	if components.Announcer != nil {
+		if err := validate("spec.components.announcer.config", components.Announcer.Config); err != nil {
+			return err
+		}
+	}
+	for i := range components.Operators {
+		operator := &components.Operators[i]
+		for j := range operator.Containers {
+			container := &operator.Containers[j]
+			path := fmt.Sprintf("spec.components.operators[%d:%s].containers[%d:%s].config", i, operator.Name, j, container.Name)
+			if err := validate(path, container.Config); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateDisabledNuma checks the cluster-wide controlplane NUMA
+// opt-out list: indices must be non-negative, and the list must not
+// disable every NUMA domain the fan-out would produce (that would
+// leave the installation without any controlplane at all — use the
+// boxType or `enabled: false` to drop the component instead).
+//
+// The check against the fan-out count is only possible when `numa` is
+// pinned explicitly. With NFD auto-detection the count is a per-node
+// runtime property, so the equivalent guard lives in the reconciler.
+func validateDisabledNuma(cp *ControlplaneSpec) error {
+	if len(cp.DisabledNuma) == 0 {
+		return nil
+	}
+	seen := make(map[int32]struct{}, len(cp.DisabledNuma))
+	for _, n := range cp.DisabledNuma {
+		if n < 0 {
+			return fmt.Errorf(
+				"spec.components.controlplane.disabledNuma must contain non-negative indices, got %d", n)
+		}
+		seen[n] = struct{}{}
+	}
+	if cp.Numa == nil {
+		return nil
+	}
+	count := *cp.Numa
+	disabled := int32(0)
+	for i := int32(0); i < count; i++ {
+		if _, ok := seen[i]; ok {
+			disabled++
+		}
+	}
+	if disabled >= count {
+		return fmt.Errorf(
+			"spec.components.controlplane.disabledNuma disables every one of the %d NUMA domains; "+
+				"drop the controlplane from the boxType instead", count)
+	}
+	return nil
+}
+
+func validateHugepages(hugepages *Hugepages) error {
+	if hugepages == nil {
+		return nil
+	}
+	if _, err := hugepages.TotalQuantity(); err != nil {
+		return fmt.Errorf("spec.components.dataplane.hugepages.%w", err)
 	}
 	return nil
 }

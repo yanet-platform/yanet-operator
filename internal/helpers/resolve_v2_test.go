@@ -19,6 +19,7 @@ package helpers
 import (
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
 
@@ -285,10 +286,12 @@ func TestResolveBoxComponent_Overrides(t *testing.T) {
 	yanet := &yanetv2alpha1.YanetSpec{
 		BoxType: "release",
 		Components: &yanetv2alpha1.YanetComponentsOverride{
-			Controlplane: &yanetv2alpha1.YanetComponentOverride{
-				Enabled: PtrFalse(),
-				Containers: map[string]yanetv2alpha1.ImageRef{
-					"controlplane": {Tag: "v2.1.5-hotfix"},
+			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+				YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
+					Enabled: PtrFalse(),
+					Containers: map[string]yanetv2alpha1.ImageRef{
+						"controlplane": {Tag: "v2.1.5-hotfix"},
+					},
 				},
 			},
 			Dataplane: &yanetv2alpha1.YanetComponentOverride{
@@ -316,6 +319,90 @@ func TestResolveBoxComponent_Overrides(t *testing.T) {
 	dp, _ := ResolveBoxComponent(cfg, yanet, KindDataplane, "")
 	if dp.Image.Name != "dataplane-fork" || dp.Image.Tag != "v2.1" {
 		t.Errorf("dp name override failed: %+v", dp.Image)
+	}
+}
+
+// --- disabled NUMA resolution -----------------------------------------------
+
+// TestResolveControlplane_DisabledNuma_ClusterWideDefault verifies that the
+// cluster-wide opt-out list from YanetConfigV2 is carried into the resolved
+// component when the installation says nothing.
+func TestResolveControlplane_DisabledNuma_ClusterWideDefault(t *testing.T) {
+	cfg := fixtureConfig()
+	cfg.Components.Controlplane.DisabledNuma = []int32{1}
+	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
+
+	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	if diff := cmp.Diff([]int32{1}, cp.DisabledNuma); diff != "" {
+		t.Errorf("disabledNuma mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestResolveControlplane_DisabledNuma_InstallationReplaces verifies that the
+// per-installation list REPLACES the cluster-wide default instead of merging
+// with it.
+func TestResolveControlplane_DisabledNuma_InstallationReplaces(t *testing.T) {
+	cfg := fixtureConfig()
+	cfg.Components.Controlplane.DisabledNuma = []int32{1}
+	yanet := &yanetv2alpha1.YanetSpec{
+		BoxType: "release",
+		Components: &yanetv2alpha1.YanetComponentsOverride{
+			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+				DisabledNuma: []int32{0},
+			},
+		},
+	}
+
+	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	if diff := cmp.Diff([]int32{0}, cp.DisabledNuma); diff != "" {
+		t.Errorf("installation override must replace the default (-want +got):\n%s", diff)
+	}
+}
+
+// TestResolveControlplane_DisabledNuma_EmptyListClearsDefault verifies that an
+// empty but non-nil list is an explicit "enable every NUMA", distinct from an
+// unset field that inherits the default.
+func TestResolveControlplane_DisabledNuma_EmptyListClearsDefault(t *testing.T) {
+	cfg := fixtureConfig()
+	cfg.Components.Controlplane.DisabledNuma = []int32{1}
+	yanet := &yanetv2alpha1.YanetSpec{
+		BoxType: "release",
+		Components: &yanetv2alpha1.YanetComponentsOverride{
+			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+				DisabledNuma: []int32{},
+			},
+		},
+	}
+
+	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	if len(cp.DisabledNuma) != 0 {
+		t.Errorf("empty list must clear the cluster-wide default, got %v", cp.DisabledNuma)
+	}
+}
+
+// TestResolveControlplane_DisabledNuma_NoAliasing guards against the resolved
+// slice aliasing the CR: mutating the result must not corrupt the config.
+func TestResolveControlplane_DisabledNuma_NoAliasing(t *testing.T) {
+	cfg := fixtureConfig()
+	cfg.Components.Controlplane.DisabledNuma = []int32{1}
+	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
+
+	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	cp.DisabledNuma[0] = 42
+	if cfg.Components.Controlplane.DisabledNuma[0] != 1 {
+		t.Errorf("resolved slice aliases the config: %v", cfg.Components.Controlplane.DisabledNuma)
 	}
 }
 

@@ -39,10 +39,18 @@ spec:
       portRange: 4          # when numa>1, each CP instance listens on port+i (8080..8083)
       config:
         # hostPath is the HOST directory mounted into the container at /etc/yanet2.
-        # fileName tells the binary which file to open: --config=/etc/yanet2/controlplane.conf.
+        # Args are passed to the binary verbatim, except for the config path:
+        # the operator appends the NUMA index to its base name, so each per-NUMA
+        # instance reads its own file — /etc/yanet2/controlplane-0.yaml on NUMA 0,
+        # controlplane-1.yaml on NUMA 1, ... Those files must exist on the host
+        # and carry matching gateway.instance_id / endpoints.
         hostPath: /etc/yanet2
-        fileName: controlplane.conf
+        args: [-c, /etc/yanet2/controlplane.yaml]
       numa: 1               # default; for multi-NUMA — 2/4
+      # NUMA domains that must NOT get a controlplane instance, e.g. a domain
+      # with no NIC, where the dataplane runs no instance to attach to.
+      # Per-installation override: YanetV2.spec.components.controlplane.disabledNuma.
+      # disabledNuma: [1]
 
     dataplane:
       image: {name: dataplane, tag: v2.1.0}
@@ -53,7 +61,7 @@ spec:
       hostNetwork: true     # default for DPDK
       config:
         hostPath: /etc/yanet2
-        fileName: dataplane.yaml
+        args: [/etc/yanet2/dataplane.yaml]
 
     bird:
       image: {name: bird, tag: "2.15"}
@@ -93,7 +101,7 @@ spec:
       port: 9090
       config:
         hostPath: /etc/yanet2
-        fileName: announcer.yaml
+        args: [-c, /etc/yanet2/yanet-announcer.yaml]
 
     # --- Dynamic operators (array, no hardcoded names) ---
     operators:

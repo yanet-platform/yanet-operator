@@ -108,6 +108,13 @@ type ResolvedComponent struct {
 	// Zero means "use the NFD label / fall back to 1".
 	Numa int32
 
+	// DisabledNuma is the resolved set of NUMA indices that must not
+	// get a controlplane instance. Only populated for
+	// KindControlplane. The per-installation override in
+	// YanetV2 replaces the cluster-wide YanetConfigV2 list rather
+	// than merging with it, so what lands here is already final.
+	DisabledNuma []int32
+
 	// Containers is the resolved per-container view of an operator
 	// Pod. The first element is the primary container and backs the
 	// optional per-operator Service.
@@ -269,16 +276,32 @@ func resolveControlplane(
 	cp := config.Components.Controlplane
 	override := componentOverride(yanet, KindControlplane, "")
 	return &ResolvedComponent{
-		Kind:      KindControlplane,
-		Name:      string(KindControlplane),
-		Enabled:   resolveEnabled(override),
-		Image:     mergeImage(config.Images, cp.Image, containerOverride(override, string(KindControlplane))),
-		Port:      cp.Port,
-		PortRange: cp.PortRange,
-		Config:    cp.Config,
-		Numa:      Int32Value(cp.Numa, 0),
-		Patches:   slot.Patches,
+		Kind:         KindControlplane,
+		Name:         string(KindControlplane),
+		Enabled:      resolveEnabled(override),
+		Image:        mergeImage(config.Images, cp.Image, containerOverride(override, string(KindControlplane))),
+		Port:         cp.Port,
+		PortRange:    cp.PortRange,
+		Config:       cp.Config,
+		Numa:         Int32Value(cp.Numa, 0),
+		DisabledNuma: resolveDisabledNuma(cp.DisabledNuma, yanet),
+		Patches:      slot.Patches,
 	}, nil
+}
+
+// resolveDisabledNuma picks the effective disabled-NUMA list for the
+// controlplane. The per-installation list in
+// YanetV2.spec.components.controlplane.disabledNuma REPLACES the
+// cluster-wide default from YanetConfigV2 when it is non-nil — an empty
+// but non-nil list therefore clears the default and re-enables every
+// NUMA index. A nil list inherits the cluster-wide value.
+func resolveDisabledNuma(clusterWide []int32, yanet *yanetv2alpha1.YanetSpec) []int32 {
+	if yanet.Components != nil &&
+		yanet.Components.Controlplane != nil &&
+		yanet.Components.Controlplane.DisabledNuma != nil {
+		return append([]int32(nil), yanet.Components.Controlplane.DisabledNuma...)
+	}
+	return append([]int32(nil), clusterWide...)
 }
 
 func resolveDataplane(
@@ -435,7 +458,10 @@ func componentOverride(
 	}
 	switch kind {
 	case KindControlplane:
-		return yanet.Components.Controlplane
+		if yanet.Components.Controlplane == nil {
+			return nil
+		}
+		return &yanet.Components.Controlplane.YanetComponentOverride
 	case KindDataplane:
 		return yanet.Components.Dataplane
 	case KindBird:

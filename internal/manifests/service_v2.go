@@ -78,15 +78,23 @@ func BuildServices(ctx BuildContextV2, c *helpers.ResolvedComponent) []ServicePl
 //
 // All listen on Port + numa_index (per instance), but the cluster-wide
 // Services route to the unified Port for ease of client config.
+//
+// NUMA indices disabled for this installation are skipped, so a
+// disabled domain leaves behind neither a Deployment nor a Service that
+// could never get an endpoint.
 func buildControlplaneServices(ctx BuildContextV2, c *helpers.ResolvedComponent) []ServicePlan {
 	if c.Port == 0 {
 		return nil
 	}
 	numa := effectiveNuma(ctx, c)
+	disabled := disabledNumaSet(c)
 	plans := make([]ServicePlan, 0, int(numa)*2+1)
 
 	// per-node Local + cluster-wide RR for each NUMA
 	for i := int32(0); i < numa; i++ {
+		if _, skip := disabled[i]; skip {
+			continue
+		}
 		port := c.Port + i
 		base := map[string]string{
 			labelComponent: c.Name,

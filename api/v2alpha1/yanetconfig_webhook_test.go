@@ -60,6 +60,68 @@ func TestYanetConfigWebhook_Valid(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_Hugepages(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    string
+		count   int32
+		wantErr string
+	}{
+		{name: "two MiB pages", size: "2Mi", count: 28672},
+		{name: "one GiB pages", size: "1Gi", count: 8},
+		{name: "invalid size", size: "not-a-quantity", count: 8, wantErr: "not a valid Kubernetes quantity"},
+		{name: "zero size", size: "0", count: 8, wantErr: "must be greater than zero"},
+		{name: "zero count", size: "2Mi", count: 0, wantErr: "count must be greater than zero"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Dataplane.Hugepages = &Hugepages{Size: tt.size, Count: tt.count}
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid hugepages rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  *ConfigSource
+		wantErr string
+	}{
+		{name: "host path", source: &ConfigSource{HostPath: "/etc/yanet2"}},
+		{name: "typed args", source: &ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		}},
+		{name: "multiple variants", source: &ConfigSource{
+			HostPath: "/etc/yanet2",
+			Inline:   "logging: {}",
+		}, wantErr: "exactly one"},
+		{name: "no variant", source: &ConfigSource{Args: []string{"-c", "/etc/yanet2/config.yaml"}}, wantErr: "exactly one"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Controlplane.Config = tt.source
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid config source rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestYanetConfigWebhook_DuplicatePatchName(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Patches = append(cfg.Spec.Patches, makePatch("telegraf", `{}`))
@@ -237,6 +299,55 @@ func TestYanetConfigWebhook_PositiveUpdateWindow_OK(t *testing.T) {
 		t.Errorf("positive updateWindow must be accepted: %v", err)
 	}
 }
+
+// --- disabledNuma -----------------------------------------------------------
+
+func TestYanetConfigWebhook_DisabledNuma_Accepted(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.Numa = ptrInt32(2)
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{1}
+	v := &YanetConfigCustomValidator{}
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("disabling a single NUMA must be accepted: %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_DisabledNuma_NegativeRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{-1}
+	v := &YanetConfigCustomValidator{}
+	_, err := v.ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("expected non-negative index error, got %v", err)
+	}
+}
+
+// A list that disables every NUMA domain leaves the installation without any
+// controlplane; the boxType is the right place to drop the component instead.
+func TestYanetConfigWebhook_DisabledNuma_AllDisabledRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.Numa = ptrInt32(2)
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{0, 1}
+	v := &YanetConfigCustomValidator{}
+	_, err := v.ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "every one of the 2 NUMA domains") {
+		t.Errorf("expected all-disabled error, got %v", err)
+	}
+}
+
+// With NFD auto-detection the fan-out count is a per-node runtime property, so
+// the webhook cannot decide whether the list drains every domain.
+func TestYanetConfigWebhook_DisabledNuma_AutoDetectionNotRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.Numa = nil
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{0, 1}
+	v := &YanetConfigCustomValidator{}
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("without a pinned numa count the list must be accepted: %v", err)
+	}
+}
+
+func ptrInt32(v int32) *int32 { return &v }
 
 func TestYanetConfigWebhook_PortOverlap_CPRangeAndDataplane(t *testing.T) {
 	cfg := validConfig()
