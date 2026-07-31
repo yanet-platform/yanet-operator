@@ -31,6 +31,8 @@ package manifests
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
@@ -92,11 +94,21 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 }
 
 // buildControlplaneFanout renders one Deployment per NUMA domain.
-// Each instance listens on Port + numa_index.
+// Each instance listens on Port + numa_index and reads its own
+// per-NUMA config file.
+//
+// NUMA indices listed in DisabledNuma are skipped entirely: no
+// Deployment, no Service (see BuildServices). The usual reason is a
+// NUMA domain without a NIC, where the dataplane runs no instance and
+// a controlplane would have no peer to attach to.
 func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*appsv1.Deployment, error) {
 	numa := effectiveNuma(ctx, c)
+	disabled := disabledNumaSet(c)
 	out := make([]*appsv1.Deployment, 0, numa)
 	for i := int32(0); i < numa; i++ {
+		if _, skip := disabled[i]; skip {
+			continue
+		}
 		d := buildSingle(ctx, c)
 		// Decorate Deployment name & labels with the NUMA index.
 		d.Name = numaDeploymentName(ctx, c, i)
@@ -105,18 +117,62 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		d.Spec.Template.Labels[labelNuma] = fmt.Sprintf("%d", i)
 		// Per-instance listen port (Port + i). The base Service
 		// load-balances across all instances by Port (round-robin).
+		cont := &d.Spec.Template.Spec.Containers[0]
 		if c.Port > 0 {
 			port := c.Port + i
-			cont := &d.Spec.Template.Spec.Containers[0]
 			cont.Ports = []corev1.ContainerPort{{
 				Name:          "grpc",
 				ContainerPort: port,
 				Protocol:      corev1.ProtocolTCP,
 			}}
 		}
+		// Each instance gets its own config file: the controlplane
+		// reads gateway.instance_id and all endpoints from the file
+		// and accepts only `-c <path>`, so a shared file would make
+		// every instance serve dataplane instance 0.
+		cont.Args = numaConfigArgs(cont.Args, i)
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// disabledNumaSet indexes ResolvedComponent.DisabledNuma for O(1)
+// lookups. Negative and duplicate entries are harmless: they simply
+// never match a fan-out index.
+func disabledNumaSet(c *helpers.ResolvedComponent) map[int32]struct{} {
+	if len(c.DisabledNuma) == 0 {
+		return nil
+	}
+	out := make(map[int32]struct{}, len(c.DisabledNuma))
+	for _, n := range c.DisabledNuma {
+		out[n] = struct{}{}
+	}
+	return out
+}
+
+// numaConfigArgs rewrites the config path inside the component args so
+// that each per-NUMA instance reads its own file. The NUMA index is
+// appended to the file base name, keeping the directory and extension:
+//
+//	/etc/yanet2/controlplane.yaml → /etc/yanet2/controlplane-0.yaml
+//
+// Only arguments that look like a config file path (a *.yaml / *.yml
+// element) are touched, so flags such as `-c` and subcommands are
+// preserved verbatim. Args without any such element are returned
+// unchanged — the caller stays responsible for a sane args list.
+func numaConfigArgs(args []string, numa int32) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := append([]string(nil), args...)
+	for i, a := range out {
+		ext := filepath.Ext(a)
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+		out[i] = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(a, ext), numa, ext)
+	}
+	return out
 }
 
 // effectiveNuma resolves the per-component NUMA count. The component

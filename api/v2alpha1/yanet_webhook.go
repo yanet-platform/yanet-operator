@@ -145,8 +145,14 @@ func validateOperatorOverrides(overrides *YanetComponentsOverride, declared []Op
 	if overrides == nil {
 		return nil
 	}
-	if err := validateHardcodedContainerKeys("controlplane", overrides.Controlplane); err != nil {
-		return err
+	if overrides.Controlplane != nil {
+		if err := validateHardcodedContainerKeys(
+			"controlplane", &overrides.Controlplane.YanetComponentOverride); err != nil {
+			return err
+		}
+		if err := validateOverrideDisabledNuma(overrides.Controlplane.DisabledNuma); err != nil {
+			return err
+		}
 	}
 	if err := validateHardcodedContainerKeys("dataplane", overrides.Dataplane); err != nil {
 		return err
@@ -181,6 +187,21 @@ func validateOperatorOverrides(overrides *YanetComponentsOverride, declared []Op
 			if _, ok := containerNames[cname]; !ok {
 				return fmt.Errorf("spec.components.operators[%q].containers[%q] is not declared in YanetConfigV2.spec.components.operators[%q].containers", opName, cname, opName)
 			}
+		}
+	}
+	return nil
+}
+
+// validateOverrideDisabledNuma checks the per-installation controlplane
+// NUMA opt-out list. Only the index domain is validated here: whether
+// the list drains every NUMA domain depends on the per-node fan-out
+// count (NFD label), which is a runtime property unavailable at admit
+// time.
+func validateOverrideDisabledNuma(disabled []int32) error {
+	for _, n := range disabled {
+		if n < 0 {
+			return fmt.Errorf(
+				"spec.components.controlplane.disabledNuma must contain non-negative indices, got %d", n)
 		}
 	}
 	return nil

@@ -28,8 +28,11 @@ spec:
       image: {name: controlplane, tag: v2.1.0}
       port: 8080          # round-robin Service port over all NUMA instances
       numa: 1             # one controlplane Deployment per NUMA domain
+      # disabledNuma: [1] # skip NUMA domains without a NIC
       config:
         hostPath: /etc/yanet2
+        # The NUMA index is appended to the config file base name, so each
+        # instance reads its own /etc/yanet2/controlplane-<numa>.yaml.
         args: [-c, /etc/yanet2/controlplane.yaml]
 
     dataplane:

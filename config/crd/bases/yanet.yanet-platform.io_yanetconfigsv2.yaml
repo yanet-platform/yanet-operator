@@ -457,6 +457,26 @@ spec:
                               `?node=<nodeName>` is appended automatically.
                             type: string
                         type: object
+                      disabledNuma:
+                        description: |-
+                          DisabledNuma lists NUMA indices that must NOT get a
+                          controlplane instance, even though NUMA detection reports
+                          them. The usual reason is a NUMA domain without any NIC: the
+                          dataplane runs no instance there, so a controlplane for it
+                          would have no dataplane peer to attach to.
+
+                          Indices are zero-based and refer to the same numbering as the
+                          NUMA fan-out (`numa` / the NFD label). Out-of-range indices
+                          are ignored, duplicates are collapsed. Disabling every index
+                          is rejected by the webhook.
+
+                          This is the cluster-wide default; a single installation can
+                          override it via
+                          YanetV2.spec.components.controlplane.disabledNuma.
+                        items:
+                          format: int32
+                          type: integer
+                        type: array
                       image:
                         description: |-
                           ImageRef identifies an image. Registry and prefix come from

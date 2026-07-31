@@ -280,6 +280,48 @@ Per-node Local services are how an in-node caller (e.g. a pod scheduled to the
 same NUMA domain) reaches the local controlplane instance. Cluster-wide RR
 services are entry points for unaware clients.
 
+### Per-NUMA config files
+
+Each fan-out instance is pointed at its **own** config file. The operator takes
+the config path from `config.args` and appends the NUMA index to its base name:
+
+```
+args: [-c, /etc/yanet2/controlplane.yaml]
+  ⇒ NUMA 0:  -c /etc/yanet2/controlplane-0.yaml
+  ⇒ NUMA 1:  -c /etc/yanet2/controlplane-1.yaml
+```
+
+Only `*.yaml` / `*.yml` argument elements are rewritten; flags and subcommands
+are passed through verbatim. This is required rather than cosmetic: the
+controlplane reads `gateway.instance_id`, the gateway endpoint and every module
+endpoint **from the file**, and the binary accepts only `-c <path>`. A shared
+file would make every instance serve dataplane instance `0` and contend for the
+same endpoints. The host (or its config generator) must therefore provide one
+file per NUMA domain, each with a matching `instance_id` and port.
+
+### Disabling individual NUMA domains
+
+A NUMA domain without a NIC runs no dataplane instance, so a controlplane there
+would have no peer to attach to. Such domains are listed in
+`controlplane.disabledNuma` and get **neither a Deployment nor a Service**:
+
+```yaml
+components:
+  controlplane:
+    numa: 2
+    disabledNuma: [1]        # only NUMA 0 gets an instance
+```
+
+Disabling does **not** renumber the survivors: with `disabledNuma: [0]` the
+remaining instance stays `numa1`, keeps port `port+1` and reads
+`controlplane-1.yaml`. Out-of-range and duplicate indices are ignored.
+
+A single installation can override the cluster-wide list via
+`YanetV2.spec.components.controlplane.disabledNuma`, which **replaces** (never
+merges with) the default; an empty list explicitly re-enables every domain. The
+override applies to every node matched by `spec.nodeSelector`, so a host with a
+unique NUMA layout wants its own `YanetV2` CR selecting just that node.
+
 ### Operator services
 
 When `OperatorSpec.Port > 0`, **one** cluster-wide ClusterIP Service is

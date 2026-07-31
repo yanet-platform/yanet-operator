@@ -80,7 +80,7 @@ type YanetSpec struct {
 // the 5 hardcoded components and dynamic operators (by name).
 type YanetComponentsOverride struct {
 	// +optional
-	Controlplane *YanetComponentOverride `json:"controlplane,omitempty"`
+	Controlplane *YanetControlplaneOverride `json:"controlplane,omitempty"`
 	// +optional
 	Dataplane *YanetComponentOverride `json:"dataplane,omitempty"`
 	// +optional
@@ -112,6 +112,30 @@ type YanetComponentOverride struct {
 	// Registry/prefix come from YanetConfigV2.spec.images.
 	// +optional
 	Containers map[string]ImageRef `json:"containers,omitempty"`
+}
+
+// YanetControlplaneOverride is the controlplane flavour of
+// YanetComponentOverride. On top of the common enabled/image knobs it
+// carries the per-installation NUMA opt-out.
+type YanetControlplaneOverride struct {
+	YanetComponentOverride `json:",inline"`
+
+	// DisabledNuma replaces (does NOT merge with)
+	// YanetConfigV2.spec.components.controlplane.disabledNuma for
+	// this installation. Use it for hosts whose NUMA layout differs
+	// from the cluster-wide default — typically a NUMA domain with
+	// no NIC, where the dataplane runs no instance and a
+	// controlplane would have no peer to attach to.
+	//
+	// The scope is the whole YanetV2 CR, so it applies to every node
+	// matched by spec.nodeSelector. For a host with a unique layout
+	// create a dedicated YanetV2 CR selecting just that node.
+	//
+	// An empty (but non-nil) list explicitly clears the cluster-wide
+	// default, re-enabling every NUMA index. Leave the field unset
+	// to inherit the default.
+	// +optional
+	DisabledNuma []int32 `json:"disabledNuma,omitempty"`
 }
 
 // ImageRef identifies an image. Registry and prefix come from

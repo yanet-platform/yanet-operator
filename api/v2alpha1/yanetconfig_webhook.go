@@ -100,6 +100,9 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validateConfigSources(&spec.Components); err != nil {
 		return err
 	}
+	if err := validateDisabledNuma(&spec.Components.Controlplane); err != nil {
+		return err
+	}
 	if err := dryRunPatches(spec.Patches); err != nil {
 		return err
 	}
@@ -147,6 +150,45 @@ func validateConfigSources(components *ComponentsSpec) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// validateDisabledNuma checks the cluster-wide controlplane NUMA
+// opt-out list: indices must be non-negative, and the list must not
+// disable every NUMA domain the fan-out would produce (that would
+// leave the installation without any controlplane at all — use the
+// boxType or `enabled: false` to drop the component instead).
+//
+// The check against the fan-out count is only possible when `numa` is
+// pinned explicitly. With NFD auto-detection the count is a per-node
+// runtime property, so the equivalent guard lives in the reconciler.
+func validateDisabledNuma(cp *ControlplaneSpec) error {
+	if len(cp.DisabledNuma) == 0 {
+		return nil
+	}
+	seen := make(map[int32]struct{}, len(cp.DisabledNuma))
+	for _, n := range cp.DisabledNuma {
+		if n < 0 {
+			return fmt.Errorf(
+				"spec.components.controlplane.disabledNuma must contain non-negative indices, got %d", n)
+		}
+		seen[n] = struct{}{}
+	}
+	if cp.Numa == nil {
+		return nil
+	}
+	count := *cp.Numa
+	disabled := int32(0)
+	for i := int32(0); i < count; i++ {
+		if _, ok := seen[i]; ok {
+			disabled++
+		}
+	}
+	if disabled >= count {
+		return fmt.Errorf(
+			"spec.components.controlplane.disabledNuma disables every one of the %d NUMA domains; "+
+				"drop the controlplane from the boxType instead", count)
 	}
 	return nil
 }

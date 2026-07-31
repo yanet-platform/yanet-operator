@@ -17,6 +17,7 @@ limitations under the License.
 package manifests
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -639,18 +640,25 @@ func TestBuildDeployments_ConfigSourceArgs(t *testing.T) {
 		name string
 		kind helpers.ComponentKind
 		args []string
+		want []string
 	}{
 		{
 			name: "dataplane positional path", kind: helpers.KindDataplane,
 			args: []string{"/etc/yanet2/dataplane.yaml"},
+			want: []string{"/etc/yanet2/dataplane.yaml"},
 		},
 		{
+			// The controlplane fans out per NUMA, so its config
+			// path always carries the NUMA index — even on a
+			// single-NUMA host, where only index 0 exists.
 			name: "controlplane short option", kind: helpers.KindControlplane,
 			args: []string{"-c", "/etc/yanet2/controlplane.yaml"},
+			want: []string{"-c", "/etc/yanet2/controlplane-0.yaml"},
 		},
 		{
 			name: "bird adapter subcommand", kind: helpers.KindBirdAdapter,
 			args: []string{"server", "-c", "/etc/yanet2/bird-adapter.yaml"},
+			want: []string{"server", "-c", "/etc/yanet2/bird-adapter.yaml"},
 		},
 	}
 
@@ -669,10 +677,189 @@ func TestBuildDeployments_ConfigSourceArgs(t *testing.T) {
 				t.Fatalf("BuildDeployments: %v", err)
 			}
 			got := deployments[0].Spec.Template.Spec.Containers[0].Args
-			if diff := cmp.Diff(tt.args, got); diff != "" {
+			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("args mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// --- per-NUMA config paths --------------------------------------------------
+
+// TestBuildDeployments_Controlplane_PerNumaConfigArgs verifies that every
+// per-NUMA controlplane instance is pointed at its own config file. The
+// controlplane reads gateway.instance_id and all endpoints from that file and
+// accepts only `-c <path>`, so sharing one file would make every instance
+// serve dataplane instance 0.
+func TestBuildDeployments_Controlplane_PerNumaConfigArgs(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Port:  8080,
+		Numa:  3,
+		Config: &yanetv2alpha1.ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if len(deps) != 3 {
+		t.Fatalf("want 3 deployments, got %d", len(deps))
+	}
+	for i, d := range deps {
+		want := []string{"-c", fmt.Sprintf("/etc/yanet2/controlplane-%d.yaml", i)}
+		got := d.Spec.Template.Spec.Containers[0].Args
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("d[%d] args mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+}
+
+// TestNumaConfigArgs verifies the path rewriting in isolation: only YAML path
+// elements are touched, flags and subcommands survive untouched.
+func TestNumaConfigArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		numa int32
+		want []string
+	}{
+		{
+			name: "short option", args: []string{"-c", "/etc/yanet2/controlplane.yaml"}, numa: 1,
+			want: []string{"-c", "/etc/yanet2/controlplane-1.yaml"},
+		},
+		{
+			name: "yml extension", args: []string{"-c", "/etc/yanet2/cp.yml"}, numa: 2,
+			want: []string{"-c", "/etc/yanet2/cp-2.yml"},
+		},
+		{
+			name: "subcommand preserved", args: []string{"run", "--config", "/etc/yanet2/cp.yaml"}, numa: 0,
+			want: []string{"run", "--config", "/etc/yanet2/cp-0.yaml"},
+		},
+		{
+			name: "no yaml element untouched", args: []string{"-c", "/etc/yanet2/config"}, numa: 1,
+			want: []string{"-c", "/etc/yanet2/config"},
+		},
+		{
+			name: "empty args", args: nil, numa: 1, want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := numaConfigArgs(tt.args, tt.numa)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("numaConfigArgs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestNumaConfigArgs_DoesNotMutateInput guards against aliasing: the resolved
+// ConfigSource is shared by every NUMA instance, so rewriting must not edit it
+// in place.
+func TestNumaConfigArgs_DoesNotMutateInput(t *testing.T) {
+	in := []string{"-c", "/etc/yanet2/controlplane.yaml"}
+	_ = numaConfigArgs(in, 1)
+	if in[1] != "/etc/yanet2/controlplane.yaml" {
+		t.Errorf("input mutated: %v", in)
+	}
+}
+
+// --- disabled NUMA ----------------------------------------------------------
+
+// TestBuildDeployments_Controlplane_DisabledNuma verifies that a NUMA domain
+// listed in DisabledNuma gets no Deployment at all. The typical case is a NUMA
+// without a NIC, where the dataplane runs no instance.
+func TestBuildDeployments_Controlplane_DisabledNuma(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image:        helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Port:         8080,
+		Numa:         2,
+		DisabledNuma: []int32{1},
+		Config: &yanetv2alpha1.ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("want 1 deployment for the single enabled NUMA, got %d", len(deps))
+	}
+	d := deps[0]
+	if got := d.Spec.Template.Labels[labelNuma]; got != "0" {
+		t.Errorf("surviving instance numa label = %q, want %q", got, "0")
+	}
+	// The kept instance must retain its own index, not be renumbered.
+	want := []string{"-c", "/etc/yanet2/controlplane-0.yaml"}
+	if diff := cmp.Diff(want, d.Spec.Template.Spec.Containers[0].Args); diff != "" {
+		t.Errorf("args mismatch (-want +got):\n%s", diff)
+	}
+	if port := d.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort; port != 8080 {
+		t.Errorf("container port = %d, want 8080", port)
+	}
+}
+
+// TestBuildDeployments_Controlplane_DisabledNumaKeepsIndices verifies that
+// disabling a LOW index does not shift the remaining instances: NUMA 1 keeps
+// index 1, its own config file and port 8080+1.
+func TestBuildDeployments_Controlplane_DisabledNumaKeepsIndices(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image:        helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Port:         8080,
+		Numa:         2,
+		DisabledNuma: []int32{0},
+		Config: &yanetv2alpha1.ConfigSource{
+			HostPath: "/etc/yanet2",
+			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+		},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("want 1 deployment, got %d", len(deps))
+	}
+	d := deps[0]
+	if got := d.Spec.Template.Labels[labelNuma]; got != "1" {
+		t.Errorf("numa label = %q, want %q", got, "1")
+	}
+	if !strings.Contains(d.Name, "numa1") {
+		t.Errorf("deployment name %q must keep the numa1 suffix", d.Name)
+	}
+	want := []string{"-c", "/etc/yanet2/controlplane-1.yaml"}
+	if diff := cmp.Diff(want, d.Spec.Template.Spec.Containers[0].Args); diff != "" {
+		t.Errorf("args mismatch (-want +got):\n%s", diff)
+	}
+	if port := d.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort; port != 8081 {
+		t.Errorf("container port = %d, want 8081", port)
+	}
+}
+
+// TestBuildDeployments_Controlplane_DisabledNumaOutOfRange verifies that
+// indices beyond the fan-out count (and duplicates) are harmless.
+func TestBuildDeployments_Controlplane_DisabledNumaOutOfRange(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image:        helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Port:         8080,
+		Numa:         2,
+		DisabledNuma: []int32{7, 7, -1},
+	}
+	deps, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if len(deps) != 2 {
+		t.Errorf("out-of-range disabled indices must not drop instances, got %d", len(deps))
 	}
 }
 

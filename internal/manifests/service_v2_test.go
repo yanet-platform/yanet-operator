@@ -80,6 +80,34 @@ func TestBuildServices_Controlplane_PortFanout(t *testing.T) {
 	}
 }
 
+// TestBuildServices_Controlplane_DisabledNuma verifies that a disabled NUMA
+// domain gets neither a per-node nor a cluster-wide Service, so no Service is
+// left behind that could never receive an endpoint. The shared "-all" entry
+// point survives.
+func TestBuildServices_Controlplane_DisabledNuma(t *testing.T) {
+	ctx := ctxV2()
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane",
+		Port: 8080, Numa: 2, DisabledNuma: []int32{1},
+	}
+	plans := BuildServices(ctx, c)
+	// only NUMA 0 survives: 1 nodeLocal + 1 cluster + 1 -all = 3 plans.
+	if len(plans) != 3 {
+		t.Fatalf("plans = %d: %+v", len(plans), plans)
+	}
+	for _, p := range plans {
+		if strings.HasSuffix(p.Name, "-all") {
+			continue
+		}
+		if p.Selector[labelNuma] == "1" {
+			t.Errorf("plan %q targets the disabled NUMA 1", p.Name)
+		}
+		if p.Port == 8081 {
+			t.Errorf("plan %q still exposes the disabled NUMA port 8081", p.Name)
+		}
+	}
+}
+
 func TestBuildServices_Controlplane_NoPort_NoPlans(t *testing.T) {
 	c := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane"}
 	if plans := BuildServices(ctxV2(), c); len(plans) != 0 {

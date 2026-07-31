@@ -300,6 +300,55 @@ func TestYanetConfigWebhook_PositiveUpdateWindow_OK(t *testing.T) {
 	}
 }
 
+// --- disabledNuma -----------------------------------------------------------
+
+func TestYanetConfigWebhook_DisabledNuma_Accepted(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.Numa = ptrInt32(2)
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{1}
+	v := &YanetConfigCustomValidator{}
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("disabling a single NUMA must be accepted: %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_DisabledNuma_NegativeRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{-1}
+	v := &YanetConfigCustomValidator{}
+	_, err := v.ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Errorf("expected non-negative index error, got %v", err)
+	}
+}
+
+// A list that disables every NUMA domain leaves the installation without any
+// controlplane; the boxType is the right place to drop the component instead.
+func TestYanetConfigWebhook_DisabledNuma_AllDisabledRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.Numa = ptrInt32(2)
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{0, 1}
+	v := &YanetConfigCustomValidator{}
+	_, err := v.ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "every one of the 2 NUMA domains") {
+		t.Errorf("expected all-disabled error, got %v", err)
+	}
+}
+
+// With NFD auto-detection the fan-out count is a per-node runtime property, so
+// the webhook cannot decide whether the list drains every domain.
+func TestYanetConfigWebhook_DisabledNuma_AutoDetectionNotRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.Numa = nil
+	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{0, 1}
+	v := &YanetConfigCustomValidator{}
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("without a pinned numa count the list must be accepted: %v", err)
+	}
+}
+
+func ptrInt32(v int32) *int32 { return &v }
+
 func TestYanetConfigWebhook_PortOverlap_CPRangeAndDataplane(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Components.Controlplane.Port = 8080
