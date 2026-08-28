@@ -52,10 +52,20 @@ component spec embedded directly in the `Yanet` CR.
 
 ### v2alpha1 — `yanetsv2` / `yanetconfigsv2` ✨
 Component palette + named strategic-merge patches + named `boxTypes`
-live in `YanetConfigV2`. The `YanetV2` CR is minimal: pick a `boxType`,
+live in the cluster-scoped `YanetConfigV2` singleton named `config`. The
+`YanetV2` CR is minimal: pick a `boxType`,
 select nodes via `nodeSelector`, optionally override per-container
-`image.{name,tag}` and `enabled` flags. Per-NUMA controlplane fan-out is
-driven by the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`.
+`image.{name,tag}`, typed bind env, and `enabled` flags. Services are explicit
+(`service.enabled`) and use stable per-component names. A custom `serviceName`
+is used verbatim and must be unique in the YanetV2 namespace. Per-NUMA
+controlplane fan-out is driven by the NFD label
+`feature.node.kubernetes.io/cpu-numa_nodes_count`.
+
+> **Scope migration:** Kubernetes does not permit changing an installed CRD
+> from namespaced to cluster-scoped. Before upgrading a cluster that already
+> has the older namespaced `YanetConfigV2` CRD, export its spec, remove and
+> reinstall that CRD, then recreate the configuration as `metadata.name: config`
+> without a namespace.
 
 See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
 [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable
@@ -272,4 +282,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

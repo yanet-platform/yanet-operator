@@ -130,6 +130,7 @@ func (r *YanetV2Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 //     change — e.g. hugepages update — triggers re-reconcile)
 //   - corev1.Node (mapped to YanetV2 via nodeSelector)
 //   - appsv1.Deployment (Owns)
+//   - corev1.Service (Owns)
 //   - corev1.Pod (filtered by manifests.LabelYanet to enqueue the
 //     owning YanetV2 when a managed Pod changes phase)
 func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -149,6 +150,7 @@ func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(yanetPodPredicate),
 		).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }
 
@@ -157,6 +159,12 @@ func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // spec changes (e.g. hugepages count/size) trigger a re-reconcile of
 // all installations that depend on the config snapshot.
 func (r *YanetV2Reconciler) mapConfigToV2Yanets(ctx context.Context, _ client.Object) []ctrl.Request {
+	if _, err := refreshYanetConfigV2Snapshot(ctx, r.Client, r.GlobalConfigV2); err != nil {
+		// Never enqueue a reconcile against a known-stale snapshot. The
+		// resulting ConfigNotLoaded reconcile retries after the cache recovers.
+		clearYanetConfigV2Snapshot(r.GlobalConfigV2)
+		log.FromContext(ctx).Error(err, "failed to refresh YanetConfigV2 snapshot before enqueueing YanetV2 resources")
+	}
 	list := &yanetv2alpha1.YanetV2List{}
 	if err := r.Client.List(ctx, list); err != nil {
 		return nil

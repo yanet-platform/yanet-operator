@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -30,9 +31,11 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -63,7 +66,13 @@ func (r *YanetV2Reconciler) updateStatusV2(
 		if err := r.Client.Get(ctx, key, fresh); err != nil {
 			return err
 		}
+		previousStatus := fresh.Status.DeepCopy()
 		mutate(fresh)
+		if apiequality.Semantic.DeepEqual(previousStatus, &fresh.Status) {
+			yanet.Status = fresh.Status
+			yanet.ResourceVersion = fresh.ResourceVersion
+			return nil
+		}
 		if err := r.Status().Update(ctx, fresh); err != nil {
 			return err
 		}
@@ -87,8 +96,8 @@ func (r *YanetV2Reconciler) updateStatusV2(
 //     resolve → build deployments → apply patches → CreateOrUpdate.
 //     Inline ConfigMaps are applied first so the Pod can roll them in.
 //     The global UpdateWindow throttles cross-node Deployment updates.
-//  7. Aggregate Services (per-node Local + cluster-wide RR) and
-//     CreateOrUpdate them, deduplicated by name.
+//  7. Preflight and aggregate Services, then CreateOrUpdate them,
+//     deduplicated by name.
 //  8. Prune orphan Deployments / Services / ConfigMaps owned by this
 //     YanetV2 but no longer in the desired set.
 //  9. Aggregate Pods, compute conditions and write Status.
@@ -197,8 +206,25 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 
 	autoSync := helpers.BoolValue(yanet.Spec.AutoSync, false)
 	updateWindow := time.Duration(cfg.Spec.UpdateWindow) * time.Second
+	pullPolicy := cfg.Spec.Images.PullPolicy
+	if pullPolicy == "" {
+		pullPolicy = corev1.PullIfNotPresent
+	}
 
-	servicePlans := make(map[string]manifests.ServicePlan)
+	servicePlans, preflightErr := preflightResourcesV2(
+		&cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
+	)
+	if preflightErr != nil {
+		logger.Error(preflightErr, "resource preflight failed")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(yanet, nil, corev1.EventTypeWarning, "ResourcePreflightFailed", "Reconcile", "%v", preflightErr)
+		}
+		statusErr := r.updateStatusV2(ctx, yanet, func(fresh *yanetv2alpha1.YanetV2) {
+			setConditionsV2Degraded(fresh, "ResourcePreflightFailed", preflightErr.Error())
+		})
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(preflightErr, statusErr)
+	}
+	var reconcileErrs []error
 	nodesStatus := make(map[string]yanetv2alpha1.NodeStatus, len(nodes))
 	desired := newDesiredSet()
 	missingOperators := map[string]struct{}{}
@@ -211,10 +237,6 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		ns := yanetv2alpha1.NodeStatus{
 			NodeName:    node.Name,
 			Deployments: map[string]string{},
-		}
-		pullPolicy := cfg.Spec.Images.PullPolicy
-		if pullPolicy == "" {
-			pullPolicy = corev1.PullIfNotPresent
 		}
 		buildCtx := manifests.BuildContextV2{
 			YanetName:   yanet.Name,
@@ -231,6 +253,7 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 			rc, rerr := helpers.ResolveBoxComponent(&cfg.Spec, &yanet.Spec, ref.Kind, ref.OperatorName)
 			if rerr != nil {
 				logger.Error(rerr, "resolve failed", "kind", ref.Kind, "operator", ref.OperatorName)
+				reconcileErrs = append(reconcileErrs, rerr)
 				continue
 			}
 			if rc == nil {
@@ -245,6 +268,7 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 			cmNames, cmErr := r.applyInlineConfigMapsV2(ctx, yanet, buildCtx, rc, autoSync)
 			if cmErr != nil {
 				logger.Error(cmErr, "configmap apply failed", "component", rc.Name)
+				reconcileErrs = append(reconcileErrs, cmErr)
 				continue
 			}
 			for _, n := range cmNames {
@@ -254,25 +278,22 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 			deployments, berr := manifests.BuildDeployments(buildCtx, rc)
 			if berr != nil {
 				logger.Error(berr, "build failed", "component", rc.Name)
+				reconcileErrs = append(reconcileErrs, berr)
 				continue
 			}
 			for _, d := range deployments {
 				if perr := manifests.ApplyPatches(d, rc.Patches, registry); perr != nil {
 					logger.Error(perr, "patch failed", "component", rc.Name, "deployment", d.Name)
+					reconcileErrs = append(reconcileErrs, perr)
 					continue
 				}
-				// Global scale-to-zero gate: spec.enabled=false
-				// overrides any per-component or patch-set
-				// replicas value. Applied AFTER patches so a
-				// patch cannot accidentally re-enable a disabled
-				// installation.
-				if !installationEnabled {
-					zero := int32(0)
-					d.Spec.Replicas = &zero
-				}
-				state, requeue := r.applyDeploymentV2(ctx, d, autoSync, updateWindow, node.Name, logger)
+				normalizeDeploymentReplicas(d, rc.Enabled, installationEnabled)
+				state, requeue, applyErr := r.applyDeploymentV2(ctx, d, autoSync, updateWindow, node.Name, logger)
 				ns.Deployments[d.Name] = state
 				desired.Deployments[d.Name] = struct{}{}
+				if applyErr != nil {
+					reconcileErrs = append(reconcileErrs, applyErr)
+				}
 				if state == "sync-waiting" {
 					syncWaiting = true
 				}
@@ -287,9 +308,6 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 					}
 				}
 			}
-			for _, plan := range manifests.BuildServices(buildCtx, rc) {
-				servicePlans[plan.Name] = plan
-			}
 		}
 		nodesStatus[node.Name] = ns
 	}
@@ -300,19 +318,44 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		svc := plan.ToService(yanet.Namespace, owner)
 		ensureLabel(&svc.ObjectMeta, manifests.LabelYanet, yanet.Name)
 		ensureLabel(&svc.ObjectMeta, manifests.LabelComponent, plan.Selector[manifests.LabelComponent])
+		desired.Services[svc.Name] = struct{}{}
 		if sErr := r.applyServiceV2(ctx, svc, autoSync, logger); sErr != nil {
 			logger.Error(sErr, "service apply failed", "service", svc.Name)
+			reconcileErrs = append(reconcileErrs, sErr)
 			continue
 		}
 		serviceNames = append(serviceNames, svc.Name)
-		desired.Services[svc.Name] = struct{}{}
 	}
 	sort.Strings(serviceNames)
+	if len(reconcileErrs) > 0 {
+		reconcileErr := errors.Join(reconcileErrs...)
+		yanet.Status.NodesStatus = nodesStatus
+		yanet.Status.Services = serviceNames
+		yanet.Status.Sync = aggregateSyncStatusV2(nodesStatus)
+		yanet.Status.Pods = collectPodsV2(ctx, r.Client, yanet, logger)
+		setConditionsV2Degraded(yanet, "ReconcileFailed", reconcileErr.Error())
+		desiredStatus := yanet.Status
+		statusErr := r.updateStatusV2(ctx, yanet, func(fresh *yanetv2alpha1.YanetV2) {
+			fresh.Status = desiredStatus
+		})
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(reconcileErr, statusErr)
+	}
 
 	// 8. Orphan cleanup ----------------------------------------
 	orphanCount, err := r.pruneOrphans(ctx, yanet, desired, autoSync, logger)
 	if err != nil {
 		logger.Error(err, "prune orphans failed")
+		pruneErr := fmt.Errorf("prune orphans: %w", err)
+		yanet.Status.NodesStatus = nodesStatus
+		yanet.Status.Services = serviceNames
+		yanet.Status.Sync = aggregateSyncStatusV2(nodesStatus)
+		yanet.Status.Pods = collectPodsV2(ctx, r.Client, yanet, logger)
+		setConditionsV2Degraded(yanet, "ReconcileFailed", pruneErr.Error())
+		desiredStatus := yanet.Status
+		statusErr := r.updateStatusV2(ctx, yanet, func(fresh *yanetv2alpha1.YanetV2) {
+			fresh.Status = desiredStatus
+		})
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(pruneErr, statusErr)
 	}
 	yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Add(float64(orphanCount))
 	if orphanCount > 0 && r.Recorder != nil {
@@ -346,6 +389,156 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		return ctrl.Result{RequeueAfter: earliestRequeue}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// preflightResourcesV2 resolves and validates every effective component
+// before any resource is changed. This prevents a conflicting Service name
+// from being applied for one component while another component advertises the
+// same name with a different selector or port set.
+func preflightResourcesV2(
+	cfg *yanetv2alpha1.YanetConfigSpec,
+	yanet *yanetv2alpha1.YanetV2,
+	nodes []corev1.Node,
+	enabled []helpers.ComponentRef,
+	installationEnabled bool,
+	pullPolicy corev1.PullPolicy,
+	owner metav1.OwnerReference,
+	registry manifests.PatchRegistry,
+) (map[string]manifests.ServicePlan, error) {
+	plans := make(map[string]manifests.ServicePlan)
+	collided := make(map[string]struct{})
+	var preflightErrs []error
+
+	for i := range nodes {
+		node := &nodes[i]
+		hostPorts := make(map[hostPortKey]string)
+		buildCtx := manifests.BuildContextV2{
+			YanetName:   yanet.Name,
+			Namespace:   yanet.Namespace,
+			NodeName:    node.Name,
+			NumaCount:   readNumaFromNode(node),
+			PullPolicy:  pullPolicy,
+			PullSecrets: cfg.Images.PullSecrets,
+			OwnerRef:    owner,
+		}
+		for _, ref := range enabled {
+			rc, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
+			if err != nil {
+				preflightErrs = append(preflightErrs, fmt.Errorf("resolve %s on node %s: %w", ref.Kind, node.Name, err))
+				continue
+			}
+			if rc == nil {
+				continue
+			}
+			deployments, err := manifests.BuildDeployments(buildCtx, rc)
+			if err != nil {
+				preflightErrs = append(preflightErrs, fmt.Errorf("build %s on node %s: %w", rc.Name, node.Name, err))
+				continue
+			}
+			if ref.Kind == helpers.KindControlplane && rc.Enabled && installationEnabled && len(deployments) == 0 {
+				preflightErrs = append(preflightErrs,
+					fmt.Errorf("controlplane has no enabled NUMA domain on node %s", node.Name))
+				continue
+			}
+			for _, deployment := range deployments {
+				ports := deploymentContainerPorts(deployment)
+				if err := manifests.ApplyPatches(deployment, rc.Patches, registry); err != nil {
+					preflightErrs = append(preflightErrs,
+						fmt.Errorf("patch %s on node %s: %w", deployment.Name, node.Name, err))
+					continue
+				}
+				normalizeDeploymentReplicas(deployment, rc.Enabled, installationEnabled)
+				ports = append(ports, deploymentContainerPorts(deployment)...)
+				if err := reserveHostPorts(hostPorts, deployment, ports); err != nil {
+					preflightErrs = append(preflightErrs, fmt.Errorf("node %s: %w", node.Name, err))
+				}
+			}
+			for _, plan := range manifests.BuildServices(buildCtx, rc) {
+				if err := plan.Validate(); err != nil {
+					preflightErrs = append(preflightErrs, fmt.Errorf("validate Service for %s on node %s: %w", rc.Name, node.Name, err))
+					continue
+				}
+				if _, conflict := collided[plan.Name]; conflict {
+					continue
+				}
+				if existing, duplicate := plans[plan.Name]; duplicate &&
+					!apiequality.Semantic.DeepEqual(existing, plan) {
+					delete(plans, plan.Name)
+					collided[plan.Name] = struct{}{}
+					preflightErrs = append(preflightErrs,
+						fmt.Errorf("components generate conflicting Service plans named %q", plan.Name))
+					continue
+				}
+				plans[plan.Name] = plan
+			}
+		}
+	}
+	if len(preflightErrs) > 0 {
+		return nil, errors.Join(preflightErrs...)
+	}
+	return plans, nil
+}
+
+func normalizeDeploymentReplicas(deployment *appsv1.Deployment, componentEnabled, installationEnabled bool) {
+	if componentEnabled && installationEnabled {
+		return
+	}
+	zero := int32(0)
+	deployment.Spec.Replicas = &zero
+}
+
+type hostPortKey struct {
+	port     int32
+	protocol corev1.Protocol
+}
+
+func deploymentContainerPorts(deployment *appsv1.Deployment) []corev1.ContainerPort {
+	var ports []corev1.ContainerPort
+	for i := range deployment.Spec.Template.Spec.Containers {
+		ports = append(ports, deployment.Spec.Template.Spec.Containers[i].Ports...)
+	}
+	return ports
+}
+
+func reserveHostPorts(
+	reserved map[hostPortKey]string,
+	deployment *appsv1.Deployment,
+	ports []corev1.ContainerPort,
+) error {
+	if !deployment.Spec.Template.Spec.HostNetwork ||
+		(deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0) {
+		return nil
+	}
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 {
+		return fmt.Errorf(
+			"Deployment %s uses hostNetwork with %d replicas pinned to one node",
+			deployment.Name, *deployment.Spec.Replicas,
+		)
+	}
+	unique := make(map[hostPortKey]struct{}, len(ports))
+	for i := range ports {
+		port := &ports[i]
+		if port.ContainerPort <= 0 {
+			continue
+		}
+		protocol := port.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		key := hostPortKey{port: port.ContainerPort, protocol: protocol}
+		if _, duplicate := unique[key]; duplicate {
+			continue
+		}
+		unique[key] = struct{}{}
+		if previous, conflict := reserved[key]; conflict {
+			return fmt.Errorf(
+				"Deployments %s and %s use hostNetwork with the same %s port %d",
+				previous, deployment.Name, protocol, port.ContainerPort,
+			)
+		}
+		reserved[key] = deployment.Name
+	}
+	return nil
 }
 
 // handleYanetV2Deletion runs cleanup on a v2 YanetV2 whose
@@ -513,11 +706,9 @@ func (r *YanetV2Reconciler) applyInlineConfigMapsV2(
 // applyDeploymentV2 creates/updates a Deployment when AutoSync is on.
 // When AutoSync is off, only reports the diff state for Status.
 //
-// Returns:
-//   - state string: one of "synced", "sync-waiting", "out-of-sync
-//     (missing)", or "error".
-//   - requeue duration: when >0 the caller must re-queue the YanetV2
-//     to re-attempt the throttled update.
+// Returns the sync state, an optional throttle duration, and any Kubernetes API
+// error. Unchanged Deployments are not written and do not consume the global
+// UpdateWindow.
 func (r *YanetV2Reconciler) applyDeploymentV2(
 	ctx context.Context,
 	desired *appsv1.Deployment,
@@ -525,60 +716,84 @@ func (r *YanetV2Reconciler) applyDeploymentV2(
 	updateWindow time.Duration,
 	nodeName string,
 	logger logr.Logger,
-) (string, time.Duration) {
+) (string, time.Duration, error) {
 	existing := &appsv1.Deployment{}
 	key := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
 	getErr := r.Client.Get(ctx, key, existing)
 
 	if apierrors.IsNotFound(getErr) {
 		if !autoSync {
-			return "out-of-sync (missing)", 0
+			return "out-of-sync (missing)", 0, nil
 		}
 		if err := r.Client.Create(ctx, desired); err != nil {
 			logger.Error(err, "Create failed", "deployment", desired.Name)
-			return "error", 0
+			return "error", 0, fmt.Errorf("create Deployment %s/%s: %w", desired.Namespace, desired.Name, err)
 		}
 		yanetDeploymentsCreatedTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
-		return "synced", 0
+		return "synced", 0, nil
 	}
 	if getErr != nil {
 		logger.Error(getErr, "Get failed", "deployment", desired.Name)
-		return "error", 0
+		return "error", 0, fmt.Errorf("get Deployment %s/%s: %w", desired.Namespace, desired.Name, getErr)
 	}
 
+	if _, changed := r.desiredDeploymentUpdate(existing, desired); !changed {
+		return "synced", 0, nil
+	}
 	if !autoSync {
-		return "sync-waiting", 0
+		return "out-of-sync", 0, nil
 	}
 
 	// UpdateWindow throttle (shared between v1 and v2 paths via
 	// r.lastUpdateTS / r.lastUpdateHost).
 	if rt := r.checkUpdateRequeue(logger, updateWindow, nodeName); rt > 0 {
 		yanetUpdateThrottledTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
-		return "sync-waiting", rt
+		return "sync-waiting", rt, nil
 	}
 
 	// R10: handle 409 Conflict by re-fetching and re-applying the
 	// desired spec. Without this, two operator replicas (now that
 	// leader-election is on by default replicaCount may still be
 	// >1) would race each other to the loser's exit code.
+	updated := false
 	updErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.Deployment{}
 		if gerr := r.Client.Get(ctx, key, fresh); gerr != nil {
 			return gerr
 		}
-		fresh.Spec = desired.Spec
-		// Merge labels/annotations: keep foreign keys (sidecar
-		// injectors, webhooks), drop operator-owned keys that
-		// disappeared from desired.
-		mergeManagedMeta(&fresh.ObjectMeta, &desired.ObjectMeta)
-		return r.Client.Update(ctx, fresh)
+		candidate, changed := r.desiredDeploymentUpdate(fresh, desired)
+		if !changed {
+			return nil
+		}
+		updated = true
+		return r.Client.Update(ctx, candidate)
 	})
 	if updErr != nil {
 		logger.Error(updErr, "Update failed", "deployment", desired.Name)
-		return "error", 0
+		return "error", 0, fmt.Errorf("update Deployment %s/%s: %w", desired.Namespace, desired.Name, updErr)
 	}
-	yanetDeploymentsUpdatedTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
-	return "synced", 0
+	if updated {
+		yanetDeploymentsUpdatedTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
+	}
+	return "synced", 0, nil
+}
+
+func (r *YanetV2Reconciler) desiredDeploymentUpdate(
+	existing, desired *appsv1.Deployment,
+) (*appsv1.Deployment, bool) {
+	existingNormalized := existing.DeepCopy()
+	desiredNormalized := desired.DeepCopy()
+	clientgoscheme.Scheme.Default(existingNormalized)
+	clientgoscheme.Scheme.Default(desiredNormalized)
+	candidate := existing.DeepCopy()
+	candidate.Spec = desiredNormalized.Spec
+	// Keep foreign metadata while removing keys previously managed by the
+	// operator that disappeared from the desired object.
+	mergeManagedMeta(&candidate.ObjectMeta, &desiredNormalized.ObjectMeta)
+	changed := !apiequality.Semantic.DeepEqual(existingNormalized.Spec, candidate.Spec) ||
+		!apiequality.Semantic.DeepEqual(existing.Labels, candidate.Labels) ||
+		!apiequality.Semantic.DeepEqual(existing.Annotations, candidate.Annotations)
+	return candidate, changed
 }
 
 // applyServiceV2 mirrors applyDeploymentV2 for Services.
@@ -603,7 +818,7 @@ func (r *YanetV2Reconciler) applyServiceV2(
 				"refusing to apply Service %s/%s: Spec.Ports is empty",
 				desired.Namespace, desired.Name)
 		}
-		return nil
+		return fmt.Errorf("refusing to apply Service %s/%s: Spec.Ports is empty", desired.Namespace, desired.Name)
 	}
 	if len(desired.Spec.Selector) == 0 {
 		logger.Info("applyServiceV2: refusing to apply Service with empty Selector",
@@ -613,7 +828,7 @@ func (r *YanetV2Reconciler) applyServiceV2(
 				"refusing to apply Service %s/%s: Spec.Selector is empty",
 				desired.Namespace, desired.Name)
 		}
-		return nil
+		return fmt.Errorf("refusing to apply Service %s/%s: Spec.Selector is empty", desired.Namespace, desired.Name)
 	}
 
 	existing := &corev1.Service{}
@@ -629,30 +844,75 @@ func (r *YanetV2Reconciler) applyServiceV2(
 	if getErr != nil {
 		return getErr
 	}
+	if err := validateServiceOwnership(existing, desired); err != nil {
+		return err
+	}
 	if !autoSync {
 		return nil
 	}
-	// R10: handle 409 Conflict by re-fetching and re-applying the
-	// desired spec. ClusterIP/ClusterIPs are immutable so always
-	// carry the existing values forward.
+	// Handle 409 Conflict by re-fetching and re-applying the desired spec.
+	// Server-allocated fields are carried forward and unchanged Services are not
+	// written, preventing the owned-Service watch from causing a reconcile loop.
 	updErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &corev1.Service{}
 		if gerr := r.Client.Get(ctx, key, fresh); gerr != nil {
 			return gerr
 		}
-		desiredCopy := desired.DeepCopy()
-		desiredCopy.Spec.ClusterIP = fresh.Spec.ClusterIP
-		desiredCopy.Spec.ClusterIPs = fresh.Spec.ClusterIPs
-		desiredCopy.ResourceVersion = fresh.ResourceVersion
-		// Preserve immutable fields that the API server would
-		// reject changes for.
-		fresh.Spec = desiredCopy.Spec
-		mergeManagedMeta(&fresh.ObjectMeta, &desiredCopy.ObjectMeta)
-		return r.Client.Update(ctx, fresh)
+		if err := validateServiceOwnership(fresh, desired); err != nil {
+			return err
+		}
+		candidate, changed := r.desiredServiceUpdate(fresh, desired)
+		if !changed {
+			return nil
+		}
+		return r.Client.Update(ctx, candidate)
 	})
 	if updErr != nil {
 		logger.Error(updErr, "Service update failed", "service", desired.Name)
 		return updErr
+	}
+	return nil
+}
+
+func (r *YanetV2Reconciler) desiredServiceUpdate(
+	existing, desired *corev1.Service,
+) (*corev1.Service, bool) {
+	existingNormalized := existing.DeepCopy()
+	desiredNormalized := desired.DeepCopy()
+	clientgoscheme.Scheme.Default(existingNormalized)
+	clientgoscheme.Scheme.Default(desiredNormalized)
+	// Preserve fields allocated by the API server and immutable after creation.
+	desiredNormalized.Spec.ClusterIP = existingNormalized.Spec.ClusterIP
+	desiredNormalized.Spec.ClusterIPs = append([]string(nil), existingNormalized.Spec.ClusterIPs...)
+	desiredNormalized.Spec.IPFamilies = append([]corev1.IPFamily(nil), existingNormalized.Spec.IPFamilies...)
+	if existingNormalized.Spec.IPFamilyPolicy != nil {
+		policy := *existingNormalized.Spec.IPFamilyPolicy
+		desiredNormalized.Spec.IPFamilyPolicy = &policy
+	}
+	candidate := existing.DeepCopy()
+	candidate.Spec = desiredNormalized.Spec
+	mergeManagedMeta(&candidate.ObjectMeta, &desiredNormalized.ObjectMeta)
+	changed := !apiequality.Semantic.DeepEqual(existingNormalized.Spec, candidate.Spec) ||
+		!apiequality.Semantic.DeepEqual(existing.Labels, candidate.Labels) ||
+		!apiequality.Semantic.DeepEqual(existing.Annotations, candidate.Annotations)
+	return candidate, changed
+}
+
+func validateServiceOwnership(existing, desired *corev1.Service) error {
+	desiredOwner := metav1.GetControllerOf(desired)
+	if desiredOwner == nil {
+		return fmt.Errorf("desired Service %s/%s has no controller owner", desired.Namespace, desired.Name)
+	}
+	existingOwner := metav1.GetControllerOf(existing)
+	if existingOwner == nil {
+		return fmt.Errorf("Service %s/%s already exists and is not controlled by this YanetV2", existing.Namespace, existing.Name)
+	}
+	if desiredOwner.UID != "" && existingOwner.UID != desiredOwner.UID {
+		return fmt.Errorf("Service %s/%s is controlled by another YanetV2", existing.Namespace, existing.Name)
+	}
+	if existingOwner.APIVersion != desiredOwner.APIVersion ||
+		existingOwner.Kind != desiredOwner.Kind || existingOwner.Name != desiredOwner.Name {
+		return fmt.Errorf("Service %s/%s is controlled by another resource", existing.Namespace, existing.Name)
 	}
 	return nil
 }

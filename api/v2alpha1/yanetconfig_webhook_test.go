@@ -33,7 +33,7 @@ func makePatch(name, raw string) NamedPatch {
 // validConfig returns a minimal but valid YanetConfigV2 for mutation tests.
 func validConfig() *YanetConfigV2 {
 	return &YanetConfigV2{
-		ObjectMeta: metav1.ObjectMeta{Name: "cfg", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{Name: YanetConfigName},
 		Spec: YanetConfigSpec{
 			Components: ComponentsSpec{
 				Controlplane: ControlplaneSpec{Image: ImageRef{Name: "cp", Tag: "v1"}, Port: 8080},
@@ -57,6 +57,15 @@ func TestYanetConfigWebhook_Valid(t *testing.T) {
 	v := &YanetConfigCustomValidator{}
 	if _, err := v.ValidateCreate(context.Background(), validConfig()); err != nil {
 		t.Errorf("valid config rejected: %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_RejectsNonCanonicalName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Name = "other"
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), `metadata.name must be "config"`) {
+		t.Fatalf("non-canonical singleton name must be rejected, got %v", err)
 	}
 }
 
@@ -114,6 +123,162 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("valid config source rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_BindAndService(t *testing.T) {
+	literal := func(value string) *string { return &value }
+	validServiceBind := func() *BindSpec {
+		return &BindSpec{Env: []BindEnv{
+			{Key: "YANET_GATEWAY_ENDPOINT", Value: literal("[::]:8080")},
+			{Key: "YANET_GATEWAY_ADVERTISE_ENDPOINT", Service: &ServiceRef{Port: 8080}},
+		}}
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*YanetConfigV2)
+		wantErr string
+	}{
+		{
+			name: "literal including empty value",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Controlplane.Bind = &BindSpec{Env: []BindEnv{{
+					Key: "YANET_OPTIONAL_VALUE", Value: literal(""),
+				}}}
+			},
+		},
+		{
+			name: "service reference",
+			mutate: func(cfg *YanetConfigV2) {
+				cp := &cfg.Spec.Components.Controlplane
+				cp.GRPCPort = 8080
+				cp.HTTPPort = 8081
+				cp.Bind = validServiceBind()
+				cp.Service = &ServiceSpec{Enabled: true}
+			},
+		},
+		{
+			name: "empty key",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Controlplane.Bind = &BindSpec{Env: []BindEnv{{
+					Key: " ", Value: literal("x"),
+				}}}
+			},
+			wantErr: "key is empty",
+		},
+		{
+			name: "invalid environment variable key",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Controlplane.Bind = &BindSpec{Env: []BindEnv{{
+					Key: "YANET=ENDPOINT", Value: literal("x"),
+				}}}
+			},
+			wantErr: "key \"YANET=ENDPOINT\" is invalid",
+		},
+		{
+			name: "value and service",
+			mutate: func(cfg *YanetConfigV2) {
+				cp := &cfg.Spec.Components.Controlplane
+				cp.GRPCPort = 8080
+				cp.HTTPPort = 8081
+				cp.Service = &ServiceSpec{Enabled: true}
+				cp.Bind = &BindSpec{Env: []BindEnv{{
+					Key: "YANET_ENDPOINT", Value: literal("x"), Service: &ServiceRef{Port: 8080},
+				}}}
+			},
+			wantErr: "exactly one",
+		},
+		{
+			name: "neither value nor service",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Controlplane.Bind = &BindSpec{Env: []BindEnv{{Key: "YANET_ENDPOINT"}}}
+			},
+			wantErr: "exactly one",
+		},
+		{
+			name: "duplicate key",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Controlplane.Bind = &BindSpec{Env: []BindEnv{
+					{Key: "YANET_ENDPOINT", Value: literal("x")},
+					{Key: "YANET_ENDPOINT", Value: literal("y")},
+				}}
+			},
+			wantErr: "duplicated",
+		},
+		{
+			name: "service reference without enabled service",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Controlplane.Bind = &BindSpec{Env: []BindEnv{{
+					Key: "YANET_ENDPOINT", Service: &ServiceRef{Port: 8080},
+				}}}
+			},
+			wantErr: "requires service.enabled",
+		},
+		{
+			name: "enabled service without bind",
+			mutate: func(cfg *YanetConfigV2) {
+				cp := &cfg.Spec.Components.Controlplane
+				cp.GRPCPort = 8080
+				cp.HTTPPort = 8081
+				cp.Service = &ServiceSpec{Enabled: true}
+			},
+			wantErr: "requires a non-empty bind override",
+		},
+		{
+			name: "invalid custom service name",
+			mutate: func(cfg *YanetConfigV2) {
+				cp := &cfg.Spec.Components.Controlplane
+				cp.GRPCPort = 8080
+				cp.HTTPPort = 8081
+				cp.Bind = validServiceBind()
+				cp.Service = &ServiceSpec{Enabled: true, ServiceName: "Invalid_Name"}
+			},
+			wantErr: "serviceName \"Invalid_Name\" is invalid",
+		},
+		{
+			name: "service reference to unexposed port",
+			mutate: func(cfg *YanetConfigV2) {
+				cp := &cfg.Spec.Components.Controlplane
+				cp.GRPCPort = 8080
+				cp.HTTPPort = 8081
+				cp.Service = &ServiceSpec{Enabled: true}
+				cp.Bind = &BindSpec{Env: []BindEnv{{
+					Key: "YANET_ENDPOINT", Service: &ServiceRef{Port: 9000},
+				}}}
+			},
+			wantErr: "is not exposed",
+		},
+		{
+			name: "operator container bind satisfies service",
+			mutate: func(cfg *YanetConfigV2) {
+				cfg.Spec.Components.Operators = []OperatorSpec{{
+					Name:    "route",
+					Port:    9000,
+					Service: &ServiceSpec{Enabled: true},
+					Containers: []OperatorContainer{{
+						Name: "route", Image: ImageRef{Name: "route"}, Bind: &BindSpec{Env: []BindEnv{{
+							Key: "YANET_SERVER_ENDPOINT", Value: literal("[::]:9000"),
+						}}},
+					}},
+				}}
+				cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"route": {}}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.mutate(cfg)
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid bind/service config rejected: %v", err)
 			}
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
@@ -349,30 +514,28 @@ func TestYanetConfigWebhook_DisabledNuma_AutoDetectionNotRejected(t *testing.T) 
 
 func ptrInt32(v int32) *int32 { return &v }
 
-func TestYanetConfigWebhook_PortOverlap_CPRangeAndDataplane(t *testing.T) {
+func TestYanetConfigWebhook_PortOverlap_CPRangeAndDataplane_OK(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Components.Controlplane.Port = 8080
 	cfg.Spec.Components.Controlplane.PortRange = 4 // 8080..8083
 	cfg.Spec.Components.Dataplane.Port = 8082      // overlaps
 	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected port overlap error, got %v", err)
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("ports in separate Pod network namespaces may overlap: %v", err)
 	}
 }
 
-func TestYanetConfigWebhook_PortOverlap_DuplicateSinglePorts(t *testing.T) {
+func TestYanetConfigWebhook_DuplicateSinglePorts_OK(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Components.Controlplane.Port = 8080
 	cfg.Spec.Components.Dataplane.Port = 8080 // exact duplicate
 	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected port overlap error, got %v", err)
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("ports in separate Pod network namespaces may overlap: %v", err)
 	}
 }
 
-func TestYanetConfigWebhook_PortOverlap_OperatorVsControlplaneRange(t *testing.T) {
+func TestYanetConfigWebhook_OperatorVsControlplaneRange_OK(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.Components.Controlplane.Port = 9000
 	cfg.Spec.Components.Controlplane.PortRange = 8 // 9000..9007
@@ -383,9 +546,30 @@ func TestYanetConfigWebhook_PortOverlap_OperatorVsControlplaneRange(t *testing.T
 	}}
 	cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"x": {}}
 	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected port overlap error, got %v", err)
+	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("operator and controlplane ports may overlap across Pods: %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_OperatorsMaySharePort(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Operators = []OperatorSpec{
+		{Name: "route", Port: 9000, Containers: []OperatorContainer{{Name: "route", Image: ImageRef{Name: "route"}}}},
+		{Name: "forward", Port: 9000, Containers: []OperatorContainer{{Name: "forward", Image: ImageRef{Name: "forward"}}}},
+	}
+	cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"route": {}, "forward": {}}
+	if _, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg); err != nil {
+		t.Errorf("operators in separate Pods must be allowed to share port 9000: %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_ControlplaneGRPCAndHTTPPortsMustDiffer(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Controlplane.GRPCPort = 8080
+	cfg.Spec.Components.Controlplane.HTTPPort = 8080
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "must be different") {
+		t.Errorf("expected distinct controlplane port error, got %v", err)
 	}
 }
 

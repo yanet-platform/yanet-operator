@@ -3,6 +3,8 @@
 #   components.<name>.enabled                       — true → replicas=1, false → replicas=0 (same as enable in v1)
 #   components.<name>.containers.<cname>.name       — override image name for container <cname>
 #   components.<name>.containers.<cname>.tag        — override image tag for container <cname>
+#   components.<name>.bind                          — replace inherited bind env
+#   components.operators.<name>.containers.<cname>.bind — replace a container bind
 #
 # For the 5 hardcoded components <cname> equals the component name
 # itself ("controlplane", "dataplane", "bird", "birdAdapter",
@@ -25,6 +27,9 @@ spec:
   components:
     # Pinpoint version pinning of cp/dp on this installation.
     controlplane:
+      bind:
+        env:
+          - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
       containers:
         controlplane: {tag: v2.1.5-hotfix}
     dataplane:

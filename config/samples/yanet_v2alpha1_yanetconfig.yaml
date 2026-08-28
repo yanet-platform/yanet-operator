@@ -4,7 +4,7 @@ metadata:
   labels:
     app.kubernetes.io/name: yanet-operator
     app.kubernetes.io/managed-by: kustomize
-  name: yanetconfig-sample
+  name: config
 spec:
   # Global per-cluster throttling between any two node restarts (seconds).
   updateWindow: 60
@@ -26,7 +26,13 @@ spec:
   components:
     controlplane:
       image: {name: controlplane, tag: v2.1.0}
-      port: 8080          # round-robin Service port over all NUMA instances
+      grpcPort: 8080      # shared by every per-NUMA Pod network namespace
+      httpPort: 8081
+      bind:
+        env:
+          - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
+      service:
+        enabled: true     # creates <yanet>-controlplane-numa<N>
       numa: 1             # one controlplane Deployment per NUMA domain
       # disabledNuma: [1] # skip NUMA domains without a NIC
       config:

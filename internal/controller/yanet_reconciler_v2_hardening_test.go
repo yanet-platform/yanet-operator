@@ -319,7 +319,7 @@ func TestApplyDeploymentV2_UpdateWindowThrottlesCrossHostUpdate(t *testing.T) {
 	r.lastUpdateHost = "node-A"
 	r.lock.Unlock()
 
-	state, requeue := r.applyDeploymentV2(
+	state, requeue, err := r.applyDeploymentV2(
 		context.Background(),
 		desired.DeepCopy(),
 		true,           // autoSync
@@ -327,6 +327,9 @@ func TestApplyDeploymentV2_UpdateWindowThrottlesCrossHostUpdate(t *testing.T) {
 		"node-B",       // different host triggers throttle
 		silentLogger(), // logger
 	)
+	if err != nil {
+		t.Fatalf("applyDeploymentV2: %v", err)
+	}
 	if state != "sync-waiting" {
 		t.Errorf("expected sync-waiting on cross-host throttle, got %q", state)
 	}
@@ -355,7 +358,7 @@ func TestApplyDeploymentV2_UpdateWindowZero_AlwaysApplies(t *testing.T) {
 	}
 	r, _ := makeReconcilerEnv(t, existing)
 
-	state, requeue := r.applyDeploymentV2(
+	state, requeue, err := r.applyDeploymentV2(
 		context.Background(),
 		desired.DeepCopy(),
 		true, // autoSync
@@ -363,6 +366,9 @@ func TestApplyDeploymentV2_UpdateWindowZero_AlwaysApplies(t *testing.T) {
 		"node-B",
 		silentLogger(),
 	)
+	if err != nil {
+		t.Fatalf("applyDeploymentV2: %v", err)
+	}
 	if state != "synced" {
 		t.Errorf("expected synced when updateWindow=0, got %q (requeue=%v)", state, requeue)
 	}
@@ -461,15 +467,21 @@ func TestComputeConditionsV2_PreservesLastTransitionTime(t *testing.T) {
 	}
 }
 
-func TestSetConditionsV2Degraded_OnlyTouchesDegraded(t *testing.T) {
+func TestSetConditionsV2Degraded_ClearsReady(t *testing.T) {
 	y := &yanetv2alpha1.YanetV2{}
 	setConditionsV2Degraded(y, "ConfigNotLoaded", "snap empty")
-	if len(y.Status.Conditions) != 1 {
-		t.Fatalf("expected 1 condition, got %d", len(y.Status.Conditions))
+	if len(y.Status.Conditions) != 2 {
+		t.Fatalf("expected Degraded and Ready conditions, got %d", len(y.Status.Conditions))
 	}
-	c := y.Status.Conditions[0]
-	if c.Type != "Degraded" || c.Status != metav1.ConditionTrue || c.Reason != "ConfigNotLoaded" {
-		t.Errorf("unexpected condition: %+v", c)
+	conditions := make(map[string]metav1.Condition, len(y.Status.Conditions))
+	for _, condition := range y.Status.Conditions {
+		conditions[condition.Type] = condition
+	}
+	if condition := conditions["Degraded"]; condition.Status != metav1.ConditionTrue || condition.Reason != "ConfigNotLoaded" {
+		t.Errorf("unexpected Degraded condition: %+v", condition)
+	}
+	if condition := conditions["Ready"]; condition.Status != metav1.ConditionFalse {
+		t.Errorf("Ready must be false on an early reconcile error: %+v", condition)
 	}
 }
 

@@ -168,8 +168,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "autosync-config-v2",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -297,8 +296,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "autosync-patch-config",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{

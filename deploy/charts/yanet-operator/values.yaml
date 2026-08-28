@@ -117,7 +117,12 @@ yanetconfigV2: {}
 #    components:
 #      controlplane:
 #        image: {name: controlplane, tag: v2.1}
-#        port: 8080
+#        grpcPort: 8080
+#        httpPort: 8081
+#        bind:
+#          env:
+#            - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
+#        service: {enabled: true}
 #      dataplane:
 #        image: {name: dataplane, tag: v2.1}
 #        port: 8090

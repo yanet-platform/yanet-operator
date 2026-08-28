@@ -39,6 +39,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // BuildContextV2 carries everything the v2 builder needs to render a
@@ -77,6 +78,9 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 	if c == nil {
 		return nil, fmt.Errorf("buildDeployments: nil ResolvedComponent")
 	}
+	if err := validateResolvedComponent(ctx, c); err != nil {
+		return nil, fmt.Errorf("buildDeployments: component %q: %w", c.Name, err)
+	}
 	if c.Hugepages != nil {
 		if _, err := c.Hugepages.TotalQuantity(); err != nil {
 			return nil, fmt.Errorf("buildDeployments: invalid hugepages for component %q: %w", c.Name, err)
@@ -93,9 +97,70 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 	}
 }
 
-// buildControlplaneFanout renders one Deployment per NUMA domain.
-// Each instance listens on Port + numa_index and reads its own
-// per-NUMA config file.
+func validateResolvedComponent(ctx BuildContextV2, c *helpers.ResolvedComponent) error {
+	servicePorts := map[int32]struct{}{c.Port: {}}
+	if c.Kind == helpers.KindControlplane {
+		servicePorts = map[int32]struct{}{c.GRPCPort: {}, c.HTTPPort: {}}
+	}
+
+	binds := []*yanetv2alpha1.BindSpec{c.Bind}
+	if c.Kind == helpers.KindOperator {
+		for i := range c.Containers {
+			binds = append(binds, c.Containers[i].Bind)
+		}
+	}
+	bindConfigured := false
+	for _, bind := range binds {
+		if bind == nil {
+			continue
+		}
+		if len(bind.Env) > 0 {
+			bindConfigured = true
+		}
+		seen := make(map[string]struct{}, len(bind.Env))
+		for i := range bind.Env {
+			env := &bind.Env[i]
+			if errs := k8svalidation.IsEnvVarName(env.Key); len(errs) > 0 {
+				return fmt.Errorf("bind.env[%d].key %q is invalid: %s", i, env.Key, strings.Join(errs, "; "))
+			}
+			if _, duplicate := seen[env.Key]; duplicate {
+				return fmt.Errorf("bind.env[%d].key %q is duplicated", i, env.Key)
+			}
+			seen[env.Key] = struct{}{}
+			if (env.Value != nil) == (env.Service != nil) {
+				return fmt.Errorf("bind.env[%d] must define exactly one of value or service", i)
+			}
+			if env.Service == nil {
+				continue
+			}
+			if !c.ServiceEnabled {
+				return fmt.Errorf("bind.env[%d].service requires service.enabled", i)
+			}
+			if _, exposed := servicePorts[env.Service.Port]; !exposed || env.Service.Port <= 0 {
+				return fmt.Errorf("bind.env[%d].service.port %d is not exposed by the component Service", i, env.Service.Port)
+			}
+		}
+	}
+	if c.ServiceEnabled && !bindConfigured {
+		return fmt.Errorf("service.enabled requires a non-empty bind override")
+	}
+	if c.ServiceEnabled {
+		plans := BuildServices(ctx, c)
+		if len(plans) == 0 {
+			return fmt.Errorf("service.enabled has no valid service ports")
+		}
+		for i := range plans {
+			if err := plans[i].Validate(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// buildControlplaneFanout renders one Deployment per NUMA domain. Explicit
+// grpcPort/httpPort values are shared by every Pod; the legacy Port path keeps
+// its historical per-NUMA arithmetic until that field is removed.
 //
 // NUMA indices listed in DisabledNuma are skipped entirely: no
 // Deployment, no Service (see BuildServices). The usual reason is a
@@ -115,10 +180,12 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		d.Labels[labelNuma] = fmt.Sprintf("%d", i)
 		d.Spec.Selector.MatchLabels[labelNuma] = fmt.Sprintf("%d", i)
 		d.Spec.Template.Labels[labelNuma] = fmt.Sprintf("%d", i)
-		// Per-instance listen port (Port + i). The base Service
-		// load-balances across all instances by Port (round-robin).
+		// Explicit Service ports are identical in each Pod netns. The legacy
+		// single-Port path retains its historical Port+i behavior.
 		cont := &d.Spec.Template.Spec.Containers[0]
-		if c.Port > 0 {
+		if c.GRPCPort > 0 || c.HTTPPort > 0 {
+			cont.Ports = controlplaneContainerPorts(c)
+		} else if c.Port > 0 {
 			port := c.Port + i
 			cont.Ports = []corev1.ContainerPort{{
 				Name:          "grpc",
@@ -126,6 +193,7 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 				Protocol:      corev1.ProtocolTCP,
 			}}
 		}
+		cont.Env = renderBindEnv(ctx, c, c.Bind, &i)
 		// Each instance gets its own config file: the controlplane
 		// reads gateway.instance_id and all endpoints from the file
 		// and accepts only `-c <path>`, so a shared file would make
@@ -212,12 +280,17 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		VolumeMounts:    volumeMounts,
 	}
 	container.Args = configArgs
-	if c.Port > 0 {
+	if c.Kind == helpers.KindControlplane && (c.GRPCPort > 0 || c.HTTPPort > 0) {
+		container.Ports = controlplaneContainerPorts(c)
+	} else if c.Port > 0 {
 		container.Ports = []corev1.ContainerPort{{
 			Name:          defaultPortName(c.Kind),
 			ContainerPort: c.Port,
 			Protocol:      corev1.ProtocolTCP,
 		}}
+	}
+	if c.Kind != helpers.KindControlplane {
+		container.Env = renderBindEnv(ctx, c, c.Bind, nil)
 	}
 	// Hugepages on dataplane.
 	if c.Hugepages != nil {
@@ -312,6 +385,7 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 			Image:           rc.Image.FullPath(),
 			ImagePullPolicy: ctx.PullPolicy,
 			VolumeMounts:    mounts,
+			Env:             renderBindEnv(ctx, c, rc.Bind, nil),
 		}
 		container.Args = configArgs
 		if i == 0 && c.Port > 0 {
@@ -377,6 +451,47 @@ func defaultPortName(kind helpers.ComponentKind) string {
 	default:
 		return "main"
 	}
+}
+
+func controlplaneContainerPorts(c *helpers.ResolvedComponent) []corev1.ContainerPort {
+	ports := make([]corev1.ContainerPort, 0, 2)
+	if c.GRPCPort > 0 {
+		ports = append(ports, corev1.ContainerPort{
+			Name: "grpc", ContainerPort: c.GRPCPort, Protocol: corev1.ProtocolTCP,
+		})
+	}
+	if c.HTTPPort > 0 {
+		ports = append(ports, corev1.ContainerPort{
+			Name: "http", ContainerPort: c.HTTPPort, Protocol: corev1.ProtocolTCP,
+		})
+	}
+	return ports
+}
+
+func renderBindEnv(
+	ctx BuildContextV2,
+	c *helpers.ResolvedComponent,
+	bind *yanetv2alpha1.BindSpec,
+	numa *int32,
+) []corev1.EnvVar {
+	if bind == nil || len(bind.Env) == 0 {
+		return nil
+	}
+	env := make([]corev1.EnvVar, 0, len(bind.Env))
+	for i := range bind.Env {
+		entry := &bind.Env[i]
+		value := ""
+		switch {
+		case entry.Value != nil:
+			value = *entry.Value
+		case entry.Service != nil:
+			value = serviceEndpoint(ctx, c, numa, entry.Service.Port)
+		default:
+			continue
+		}
+		env = append(env, corev1.EnvVar{Name: entry.Key, Value: value})
+	}
+	return env
 }
 
 // -- labels -------------------------------------------------------------------

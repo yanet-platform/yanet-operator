@@ -85,14 +85,18 @@ The Pod-level `hostIPC` is set if **any** container in the list requests it.
 
 Created by yanet-operator:
 
+Services are opt-in through `service.enabled`:
+
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
-| `controlplane-numa{N}` | `app=controlplane,numa=N,node=<host>` | ClusterIP, `internalTrafficPolicy: Local`, headless if needed | Pod-local operators and dataplane on the same node reach their controlplane |
-| `controlplane-numa{N}-cluster` | `app=controlplane,numa=N` | ClusterIP, round-robin across all nodes | External clients (CLI, web, metrics-collector) reach the gateway of a specific NUMA domain across the cluster |
-| `controlplane-all-cluster` | `app=controlplane` | ClusterIP, round-robin | Universal entry point for metrics-collector / CLI when NUMA affinity is irrelevant |
-| `<operator>-svc` | `app=<operator>,node=<host>` | ClusterIP | Backconnect from gateway → operator (using its registered address) |
-| `bird-svc` / `bird-adapter-svc` | `app=bird*` | ClusterIP | For debug / tooling |
-| `announcer-svc` | `app=announcer` | ClusterIP | Internal |
+| `<yanet>-controlplane-numa{N}` | `yanet=<yanet>,app=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA domain; exposes gRPC and HTTP ports |
+| `<yanet>-<operator>` | `yanet=<yanet>,app=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks |
+| `<yanet>-announcer` | `yanet=<yanet>,app=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point |
+
+`serviceName` can override the default base name verbatim and must be unique in
+the YanetV2 namespace. There are no node-hash, `-cluster`, or `-all` Services.
+Controlplane Pods use separate network namespaces, so every NUMA instance can
+expose the same gRPC/HTTP port pair.
 
 ## 4. Dependencies
 
@@ -121,12 +125,10 @@ flowchart TB
     classDef svc fill:#fff,stroke:#444,stroke-dasharray:3 2,color:#000
     classDef plan fill:#fff,stroke:#999,stroke-dasharray:5 4,color:#666
 
-    subgraph TOP[" External & cluster-wide Services "]
+    subgraph TOP[" Stable Service entry points "]
         direction LR
         EXT["External clients<br/>cli / web / metrics-collector<br/>(not deployed by operator)"]:::plan
-        SVCALL["Service: controlplane-all<br/>(cluster-wide RR)"]:::svc
-        SVCNUMA["Service: controlplane-numa{N}-cluster<br/>(per-NUMA cluster-wide RR)"]:::svc
-        EXT -->|gRPC/HTTP| SVCALL
+        SVCNUMA["Service: &lt;yanet&gt;-controlplane-numa{N}<br/>internalTrafficPolicy: Local"]:::svc
         EXT -->|gRPC/HTTP| SVCNUMA
     end
 
@@ -153,7 +155,7 @@ flowchart TB
             end
         end
 
-        SVCCP["Service: controlplane-numa{N}<br/>(per-node, internalTrafficPolicy: Local)"]:::svc
+        SVCCP["Service: &lt;yanet&gt;-controlplane-numa{N}<br/>gRPC + HTTP"]:::svc
         SVCCP --- GW
 
         OP_PIPE["yanet-pipeline-operator<br/>Deployment + Service"]:::op
@@ -190,16 +192,15 @@ flowchart TB
     BADAPT -->|gRPC| OP_ROUTE
 
     %% announcer -> gateway
-    ANN -->|gRPC| SVCALL
+    ANN -->|gRPC| SVCNUMA
 
-    %% Cluster-wide RR Services point to per-NUMA controlplane(s)
-    SVCALL  -.-> GW
+    %% Stable per-NUMA Service points to the local gateway
     SVCNUMA -.-> GW
 ```
 
 > The diagram shows **one** NUMA domain. For an N-NUMA host the operator
 > generates N copies of the `controlplane Deployment` and matching
-> `controlplane-numa{N}` / `controlplane-numa{N}-cluster` Services
+> `<yanet>-controlplane-numa{N}` Services
 > (see §3 above).
 
 ## 6. yanet-operator Requirements (Phase 4 input)
@@ -211,14 +212,13 @@ The architecture above translates into the following items in the implementation
    `feature.node.kubernetes.io/cpu-numa_nodes_count` to determine how many controlplane Deployments to generate per node.
 2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: true`, hugepages,
    `securityContext`, and a hostPath config.
-3. **N controlplane Deployments per node** plus Services:
-   `controlplane-numa{N}` (per-node, `internalTrafficPolicy: Local`),
-   `controlplane-numa{N}-cluster` (cluster-wide round-robin),
-   `controlplane-all` (universal RR).
+3. **N controlplane Deployments per node** plus one explicit
+   `<yanet>-controlplane-numa{N}` Service per enabled NUMA. Each Service has
+   `internalTrafficPolicy: Local` and exposes the shared gRPC/HTTP port pair.
 4. **bird + bird-adapter** — a single CRD entity producing two independent Deployments,
    shared volume `/run/bird`, hostPath bird config.
 5. **Operators / agents — array in CRD** with fields:
-   - `name`, `replicas` / `nodeSelector`, `service`,
+   - `name`, `service`, and typed `bind.env` overrides,
    - `config: { inline | hostPath | url }` (see §7),
    - `containers[]` — one or more containers in the same Pod, each with
      its own `image`, `args`, `env`, `resources`, `hostIPC`,
@@ -226,7 +226,8 @@ The architecture above translates into the following items in the implementation
      if any container sets it. This supports both classical operators
      (single-container) and operator+agent pairs (e.g. `antiddos`) in
      a single Deployment.
-   For each item a separate Deployment and Service are generated.
+   For each item a separate Deployment is generated; a Service is generated
+   only when `service.enabled` is true.
 6. **Announcer Deployment** — separate CRD section, with `/run/bird` mount
    and access to the gateway service.
 

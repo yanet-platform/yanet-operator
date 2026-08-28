@@ -23,7 +23,7 @@ so the API server never converts between them and never prunes fields.
 | `v1alpha1` | `yanets.yanet-platform.io`           | `Yanet`         | Legacy single-node CR (backward-compatible, untouched).   |
 | `v1alpha1` | `yanetconfigs.yanet-platform.io`     | `YanetConfig`   | Legacy global config + AutoDiscovery.                     |
 | `v2alpha1` | `yanetsv2.yanet-platform.io`        | `YanetV2`       | Component-based CR (boxType + nodeSelector + overrides).  |
-| `v2alpha1` | `yanetconfigsv2.yanet-platform.io`   | `YanetConfigV2` | Component palette + named patches + `boxTypes` registry.  |
+| `v2alpha1` | `yanetconfigsv2.yanet-platform.io`   | `YanetConfigV2` | Cluster-scoped singleton named `config`: component palette + patches + `boxTypes`. |
 
 The operator does not migrate v1 CRs to v2; the two surfaces are handled by
 two independent controllers (see below) and reconcile fully independently.
@@ -151,9 +151,9 @@ The v2alpha1 design separates three independent axes of configuration:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Per-installation customisation is intentionally narrow: only per-container
-`image.{name,tag}` (under `containers.<name>`) and `enabled` are accepted on
-the Yanet CR. The intrinsic security/mount baseline each component cannot run
+Per-installation customisation is intentionally narrow: per-container
+`image.{name,tag}` (under `containers.<name>`), `enabled`, and typed `bind`
+replacement blocks are accepted on the Yanet CR. The intrinsic security/mount baseline each component cannot run
 without is emitted by the builder itself (the dataplane's privileged +
 hostNetwork/hostIPC + minimal host devices, and the controlplane's hostIPC +
 `/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
@@ -177,7 +177,13 @@ spec:
   updateWindow: 0
   images: { registry: ..., prefix: ..., pullPolicy: IfNotPresent }
   components:
-    controlplane: { image: {...}, port: 8080, portRange: 4, numa: 2 }
+    controlplane:
+      image: {...}
+      grpcPort: 8080
+      httpPort: 8081
+      bind: { env: [{ key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080' }] }
+      service: { enabled: true }
+      numa: 2
     dataplane:    { image: {...}, port: 8081, hugepages: { size: 1Gi, count: 8 } }
     bird:         { image: {...}, port: 179 }
     birdAdapter:  { image: {...} }
@@ -185,6 +191,8 @@ spec:
     operators:
       - name: antiddos
         port: 9001
+        bind: { env: [{ key: YANET_SERVER_ENDPOINT, value: '[::]:9001' }] }
+        service: { enabled: true }
         containers:
           - { name: operator, image: {...} }
           - { name: agent,    image: {...}, hostIPC: true }
@@ -213,6 +221,8 @@ spec:
   autoSync: true
   components:
     controlplane:
+      bind:
+        env: [{ key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080' }]
       containers:
         controlplane: { tag: v2.1.5-hotfix }
 ```
@@ -223,7 +233,7 @@ spec:
 Yanet CR change ────┐
 Node change      ───┼─►  YanetReconciler.Reconcile
 Pod change       ───┤        │
-YanetConfigV2    ───┘        │  (read-only via in-memory snapshot)
+YanetConfigV2    ───┘        │  (event refreshes the in-memory snapshot first)
 snapshot                     ▼
                     reconcileYanetV2(yanet)
                              │
@@ -264,21 +274,19 @@ controls how many controlplane Deployments are generated **per node**:
 
 ```
 Node has 2 NUMA domains  ⇒  2 Deployments:
-  yanet-<nodehash>-controlplane-numa0 listening on port + 0
-  yanet-<nodehash>-controlplane-numa1 listening on port + 1
+  yanet-<nodehash>-controlplane-numa0 listening on grpcPort/httpPort
+  yanet-<nodehash>-controlplane-numa1 listening on the same ports in its own Pod netns
 ```
 
-Three Service categories are generated:
+When `service.enabled: true`, one stable Service is generated per enabled NUMA:
 
-| Service                                     | Selector                                | InternalTrafficPolicy |
-|---------------------------------------------|-----------------------------------------|-----------------------|
-| `<yanet>-<nodehash>-numa{N}` (per-node)     | `app=cp, numa=N, node=<host>`           | `Local`               |
-| `<yanet>-controlplane-numa{N}-cluster` (RR) | `app=cp, numa=N`                        | (none)                |
-| `<yanet>-controlplane-all` (RR)             | `app=cp`                                | (none)                |
+| Service | Selector | Ports | InternalTrafficPolicy |
+|---|---|---|---|
+| `<yanet>-controlplane-numa{N}` | `yanet=<yanet>, app=controlplane, numa=N` | `grpcPort`, `httpPort` | `Local` |
 
-Per-node Local services are how an in-node caller (e.g. a pod scheduled to the
-same NUMA domain) reaches the local controlplane instance. Cluster-wide RR
-services are entry points for unaware clients.
+The selector deliberately omits the node hash. `internalTrafficPolicy: Local`
+keeps callers on their node, while the NUMA label selects the requested gateway.
+There is no `-cluster` or `-all` Service.
 
 ### Per-NUMA config files
 
@@ -313,7 +321,7 @@ components:
 ```
 
 Disabling does **not** renumber the survivors: with `disabledNuma: [0]` the
-remaining instance stays `numa1`, keeps port `port+1` and reads
+remaining instance stays `numa1`, keeps the shared gRPC/HTTP ports and reads
 `controlplane-1.yaml`. Out-of-range and duplicate indices are ignored.
 
 A single installation can override the cluster-wide list via
@@ -324,14 +332,23 @@ unique NUMA layout wants its own `YanetV2` CR selecting just that node.
 
 ### Operator services
 
-When `OperatorSpec.Port > 0`, **one** cluster-wide ClusterIP Service is
-generated, named after the operator (`route-operator`, `antiddos`, …), with
+When `OperatorSpec.Service.Enabled` is true, **one** cluster-wide ClusterIP
+Service is generated. Its default name is `<yanet>-<operator>`; `serviceName`
+can override it verbatim and must be unique in the YanetV2 namespace. The Service uses
 `internalTrafficPolicy=Local` so callers on the same node hit the local pod
 without leaving the host.
 
-Other components (`bird`, `birdAdapter`, `announcer`, `dataplane`) each get
-one simple cluster-wide ClusterIP. `bird` and `birdAdapter` are Local
-(they share a `/run/bird` hostPath socket); the others are not.
+`birdAdapter` and `announcer` can opt into the same explicit Service model.
+`bird` and `dataplane` do not generate Services.
+
+### Bind overrides
+
+`bind.env[]` injects either a literal `value` or a same-component `service`
+reference. A Service reference renders as
+`<service>.<namespace>.svc.cluster.local:<port>`. Operator-level entries are
+inherited by every container; container entries merge by key and win. A
+per-installation bind block replaces its cluster-wide counterpart, including an
+explicit empty block that clears it.
 
 ---
 

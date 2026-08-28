@@ -169,20 +169,28 @@ var _ = Describe("Validating webhooks", func() {
 	// v2alpha1 — YanetConfigV2
 	// -----------------------------------------------------------
 	Context("v2alpha1 YanetConfigV2", func() {
+		It("rejects a non-canonical singleton name", func() {
+			cfg := &yanetv2alpha1.YanetConfigV2{
+				ObjectMeta: metav1.ObjectMeta{Name: "other"},
+				Spec:       minimalV2ConfigSpec(),
+			}
+			expectWebhookRejection(k8sClient.Create(ctx, cfg), "metadata.name")
+		})
+
 		It("accepts a well-formed config", func() {
 			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-v2-valid", Namespace: whTestNS},
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       minimalV2ConfigSpec(),
 			}
 			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 		})
 
-		It("rejects overlapping controlplane and dataplane ports", func() {
+		It("rejects a component port outside the valid range", func() {
 			s := minimalV2ConfigSpec()
-			s.Components.Dataplane.Port = s.Components.Controlplane.Port
+			s.Components.Dataplane.Port = 70000
 			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-v2-portoverlap", Namespace: whTestNS},
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       s,
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "port")
@@ -194,7 +202,7 @@ var _ = Describe("Validating webhooks", func() {
 				Patches: []string{"does-not-exist"},
 			}
 			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-v2-missingpatch", Namespace: whTestNS},
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       s,
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "patch")
@@ -204,7 +212,7 @@ var _ = Describe("Validating webhooks", func() {
 			s := minimalV2ConfigSpec()
 			s.BoxTypes = append(s.BoxTypes, s.BoxTypes[0])
 			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-v2-dupbox", Namespace: whTestNS},
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       s,
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "duplicated")
@@ -222,7 +230,7 @@ var _ = Describe("Validating webhooks", func() {
 
 		BeforeEach(func() {
 			cfg = &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-for-yanet", Namespace: whTestNS},
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       minimalV2ConfigSpec(),
 			}
 			_ = k8sClient.Delete(ctx, cfg) // tolerate leftover

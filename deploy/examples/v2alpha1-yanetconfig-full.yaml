@@ -9,8 +9,7 @@
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetConfigV2
 metadata:
-  name: cluster-defaults
-  namespace: yanet
+  name: config
 spec:
   # ============================================================
   # Global kill switch + node-restart throttling (same as v1).
@@ -35,8 +34,13 @@ spec:
     # --- Hardcoded components (5 fixed names) ---
     controlplane:
       image: {name: controlplane, tag: v2.1.0}
-      port: 8080            # round-robin Service listens on this port over all CP instances
-      portRange: 4          # when numa>1, each CP instance listens on port+i (8080..8083)
+      grpcPort: 8080        # every per-NUMA Pod can use the same ports
+      httpPort: 8081
+      bind:
+        env:
+          - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
+      service:
+        enabled: true       # <yanet>-controlplane-numa<N>, Local traffic policy
       config:
         # hostPath is the HOST directory mounted into the container at /etc/yanet2.
         # Args are passed to the binary verbatim, except for the config path:
@@ -54,7 +58,7 @@ spec:
 
     dataplane:
       image: {name: dataplane, tag: v2.1.0}
-      port: 8090            # outside cp range 8080..8083
+      port: 8090
       hugepages:
         size: 1Gi
         count: 8
@@ -80,7 +84,7 @@ spec:
       port: 50052           # gRPC listen_addr port
       config:
         # Inline config rendered to a ConfigMap and mounted at /etc/yanet2/bird-adapter.yaml.
-        # gateway_endpoint targets the round-robin controlplane Service (cp.port = 8080).
+        # gateway_endpoint targets the explicitly named route operator Service.
         inline: |
           # YANET BIRD Adapter Configuration
 
@@ -93,8 +97,7 @@ spec:
           listen_addr: "0.0.0.0:50052"
 
           # gRPC endpoint of the RouteService gateway for RIB updates
-          # Resolves to the round-robin controlplane Service (cp.port = 8080).
-          gateway_endpoint: "route-operator:9001"
+          gateway_endpoint: "route-operator:9000"
 
     announcer:
       image: {name: announcer, tag: v0.2}
@@ -113,7 +116,14 @@ spec:
             image: {name: antiddos-agent, tag: v0.5}
             hostIPC: true
       - name: route
-        port: 9001
+        port: 9000
+        bind:
+          env:
+            - {key: YANET_SERVER_ENDPOINT, value: '[::]:9000'}
+            - {key: YANET_SERVER_ADVERTISE_ENDPOINT, service: {port: 9000}}
+        service:
+          enabled: true
+          serviceName: route-operator
         containers:
           - name: route
             image: {name: route-operator, tag: v0.4}

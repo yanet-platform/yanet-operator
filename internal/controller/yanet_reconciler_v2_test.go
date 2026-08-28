@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
@@ -76,11 +77,15 @@ func makeReconcilerEnv(t *testing.T, objs ...client.Object) (*YanetV2Reconciler,
 // shape: cp+dp palette, one boxType wiring both, and one NamedPatch the
 // boxType references for the controlplane.
 func minimalConfigV2() yanetv2alpha1.YanetConfigSpec {
+	endpoint := "[::]:8080"
 	return yanetv2alpha1.YanetConfigSpec{
 		Components: yanetv2alpha1.ComponentsSpec{
 			Controlplane: yanetv2alpha1.ControlplaneSpec{
-				Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
-				Port:  8080,
+				Image:    yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
+				GRPCPort: 8080,
+				HTTPPort: 8081,
+				Service:  &yanetv2alpha1.ServiceSpec{Enabled: true},
+				Bind:     &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{Key: "YANET_GATEWAY_ENDPOINT", Value: &endpoint}}},
 			},
 			Dataplane: yanetv2alpha1.DataplaneSpec{
 				Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
@@ -97,6 +102,155 @@ func minimalConfigV2() yanetv2alpha1.YanetConfigSpec {
 				Dataplane:    &yanetv2alpha1.BoxComponent{},
 			},
 		}},
+	}
+}
+
+func serviceCollisionConfigV2() yanetv2alpha1.YanetConfigSpec {
+	cfg := minimalConfigV2()
+	cpEndpoint := "[::]:8080"
+	operatorEndpoint := "[::]:9000"
+	cfg.Components.Controlplane.Service.ServiceName = "gateway"
+	cfg.Components.Controlplane.Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+		Key: "YANET_GATEWAY_ENDPOINT", Value: &cpEndpoint,
+	}}}
+	cfg.Components.Operators = []yanetv2alpha1.OperatorSpec{{
+		Name:    "route",
+		Port:    9000,
+		Service: &yanetv2alpha1.ServiceSpec{Enabled: true, ServiceName: "gateway-numa0"},
+		Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+			Key: "YANET_SERVER_ENDPOINT", Value: &operatorEndpoint,
+		}}},
+		Containers: []yanetv2alpha1.OperatorContainer{{
+			Name: "route", Image: yanetv2alpha1.ImageRef{Name: "route", Tag: "v1"},
+		}},
+	}}
+	cfg.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{"route": {}}
+	return cfg
+}
+
+func TestReconcileV2_ServicePlanCollisionFailsBeforeApplyAndClearsReady(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		TypeMeta: metav1.TypeMeta{APIVersion: yanetv2alpha1.GroupVersion.String(), Kind: "YanetV2"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+		Status: yanetv2alpha1.YanetStatus{Conditions: []metav1.Condition{{
+			Type: "Ready", Status: metav1.ConditionTrue, Reason: "AllChecksPassed",
+		}}},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = serviceCollisionConfigV2()
+
+	result, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "conflicting Service plans") {
+		t.Fatalf("expected Service plan collision, got result=%+v err=%v", result, err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("preflight collision must prevent all Deployment changes, got %d", len(deployments.Items))
+	}
+	services := &corev1.ServiceList{}
+	if err := r.Client.List(context.Background(), services, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Services: %v", err)
+	}
+	if len(services.Items) != 0 {
+		t.Fatalf("preflight collision must prevent both Service plans, got %d", len(services.Items))
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	conditions := make(map[string]metav1.Condition, len(got.Status.Conditions))
+	for _, condition := range got.Status.Conditions {
+		conditions[condition.Type] = condition
+	}
+	if condition := conditions["Degraded"]; condition.Status != metav1.ConditionTrue || condition.Reason != "ResourcePreflightFailed" {
+		t.Errorf("unexpected Degraded condition: %+v", condition)
+	}
+	if condition := conditions["Ready"]; condition.Status != metav1.ConditionFalse {
+		t.Errorf("Ready must be false after preflight failure: %+v", condition)
+	}
+}
+
+func TestReconcileV2_InvalidPatchFailsBeforeApply(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = minimalConfigV2()
+	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
+		Name: "invalid", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"replicas":"not-an-integer"}}`)},
+	}}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"invalid"}
+
+	_, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "decode merged Deployment") {
+		t.Fatalf("expected invalid patch preflight error, got %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("invalid patch preflight must prevent partial rollout, got %d Deployments", len(deployments.Items))
+	}
+}
+
+func TestReconcileV2_PatchedHostNetworkPortCollisionFailsBeforeApply(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = minimalConfigV2()
+	snapshot.Config.Components.Bird = &yanetv2alpha1.BirdComponent{
+		Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"}, Port: 9000,
+	}
+	snapshot.Config.Components.Operators = []yanetv2alpha1.OperatorSpec{{
+		Name: "route", Port: 9000,
+		Containers: []yanetv2alpha1.OperatorContainer{{
+			Name: "route", Image: yanetv2alpha1.ImageRef{Name: "route", Tag: "v1"},
+		}},
+	}}
+	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
+		Name: "host-network", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"hostNetwork":true}}}}`)},
+	}}
+	snapshot.Config.BoxTypes[0].Components.Bird = &yanetv2alpha1.BoxComponent{}
+	snapshot.Config.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{
+		"route": {Patches: []string{"host-network"}},
+	}
+
+	_, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "same TCP port 9000") {
+		t.Fatalf("expected patched host-network port collision, got %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("host-port preflight must prevent partial rollout, got %d Deployments", len(deployments.Items))
 	}
 }
 

@@ -289,13 +289,13 @@ func TestResolveBoxComponent_Overrides(t *testing.T) {
 			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
 				YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
 					Enabled: PtrFalse(),
-					Containers: map[string]yanetv2alpha1.ImageRef{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
 						"controlplane": {Tag: "v2.1.5-hotfix"},
 					},
 				},
 			},
 			Dataplane: &yanetv2alpha1.YanetComponentOverride{
-				Containers: map[string]yanetv2alpha1.ImageRef{
+				Containers: map[string]yanetv2alpha1.YanetContainerOverride{
 					"dataplane": {Name: "dataplane-fork"},
 				},
 			},
@@ -319,6 +319,150 @@ func TestResolveBoxComponent_Overrides(t *testing.T) {
 	dp, _ := ResolveBoxComponent(cfg, yanet, KindDataplane, "")
 	if dp.Image.Name != "dataplane-fork" || dp.Image.Tag != "v2.1" {
 		t.Errorf("dp name override failed: %+v", dp.Image)
+	}
+}
+
+func TestResolveControlplane_BindAndService(t *testing.T) {
+	cfg := fixtureConfig()
+	value := "[::]:8080"
+	cp := &cfg.Components.Controlplane
+	cp.GRPCPort = 8080
+	cp.HTTPPort = 8081
+	cp.Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+		Key: "YANET_GATEWAY_ENDPOINT", Value: &value,
+	}}}
+	cp.Service = &yanetv2alpha1.ServiceSpec{Enabled: true, ServiceName: "gateway"}
+
+	resolved, err := ResolveBoxComponent(
+		cfg, &yanetv2alpha1.YanetSpec{BoxType: "release"}, KindControlplane, "",
+	)
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	if resolved.GRPCPort != 8080 || resolved.HTTPPort != 8081 {
+		t.Fatalf("resolved ports = %d/%d", resolved.GRPCPort, resolved.HTTPPort)
+	}
+	if !resolved.ServiceEnabled || resolved.ServiceName != "gateway" {
+		t.Fatalf("resolved Service = enabled:%t name:%q", resolved.ServiceEnabled, resolved.ServiceName)
+	}
+	if len(resolved.Bind.Env) != 1 || *resolved.Bind.Env[0].Value != value {
+		t.Fatalf("resolved bind = %+v", resolved.Bind)
+	}
+
+	*resolved.Bind.Env[0].Value = "mutated"
+	if *cfg.Components.Controlplane.Bind.Env[0].Value != value {
+		t.Fatal("resolved bind aliases YanetConfigV2")
+	}
+}
+
+func TestResolveControlplane_BindOverrideReplaces(t *testing.T) {
+	cfg := fixtureConfig()
+	baseA, baseB, replacement := "a", "b", "replacement"
+	cfg.Components.Controlplane.Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{
+		{Key: "A", Value: &baseA},
+		{Key: "B", Value: &baseB},
+	}}
+	yanet := &yanetv2alpha1.YanetSpec{
+		BoxType: "release",
+		Components: &yanetv2alpha1.YanetComponentsOverride{
+			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+				YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
+					Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+						Key: "C", Value: &replacement,
+					}}},
+				},
+			},
+		},
+	}
+
+	resolved, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	if len(resolved.Bind.Env) != 1 || resolved.Bind.Env[0].Key != "C" {
+		t.Fatalf("override must replace the inherited bind: %+v", resolved.Bind)
+	}
+
+	yanet.Components.Controlplane.Bind = &yanetv2alpha1.BindSpec{}
+	resolved, err = ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent with empty override: %v", err)
+	}
+	if resolved.Bind == nil || len(resolved.Bind.Env) != 0 {
+		t.Fatalf("empty override must clear the inherited bind: %+v", resolved.Bind)
+	}
+}
+
+func TestResolveOperator_BindMergeByKey(t *testing.T) {
+	cfg := fixtureConfig()
+	op := &cfg.Components.Operators[0]
+	opA, opB, containerB, containerC := "op-a", "op-b", "container-b", "container-c"
+	op.Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{
+		{Key: "A", Value: &opA},
+		{Key: "B", Value: &opB},
+	}}
+	op.Containers[0].Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{
+		{Key: "B", Value: &containerB},
+		{Key: "C", Value: &containerC},
+	}}
+
+	resolved, err := ResolveBoxComponent(
+		cfg, &yanetv2alpha1.YanetSpec{BoxType: "firewall"}, KindOperator, "antiddos",
+	)
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	primary := resolved.Containers[0].Bind
+	if len(primary.Env) != 3 {
+		t.Fatalf("primary bind = %+v", primary)
+	}
+	if primary.Env[0].Key != "A" || *primary.Env[0].Value != opA ||
+		primary.Env[1].Key != "B" || *primary.Env[1].Value != containerB ||
+		primary.Env[2].Key != "C" || *primary.Env[2].Value != containerC {
+		t.Fatalf("container entries must override by key while preserving order: %+v", primary.Env)
+	}
+	secondary := resolved.Containers[1].Bind
+	if len(secondary.Env) != 2 || *secondary.Env[1].Value != opB {
+		t.Fatalf("container without its own bind must inherit operator bind: %+v", secondary)
+	}
+}
+
+func TestResolveOperator_PerInstallationBindReplacement(t *testing.T) {
+	cfg := fixtureConfig()
+	op := &cfg.Components.Operators[0]
+	baseOperator, baseContainer := "operator", "container"
+	overrideOperator, overrideContainer := "override-operator", "override-container"
+	op.Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+		Key: "BASE_OPERATOR", Value: &baseOperator,
+	}}}
+	op.Containers[0].Bind = &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+		Key: "BASE_CONTAINER", Value: &baseContainer,
+	}}}
+	yanet := &yanetv2alpha1.YanetSpec{
+		BoxType: "firewall",
+		Components: &yanetv2alpha1.YanetComponentsOverride{
+			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
+				"antiddos": {
+					Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+						Key: "OVERRIDE_OPERATOR", Value: &overrideOperator,
+					}}},
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+						"operator": {Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+							Key: "OVERRIDE_CONTAINER", Value: &overrideContainer,
+						}}}},
+					},
+				},
+			},
+		},
+	}
+
+	resolved, err := ResolveBoxComponent(cfg, yanet, KindOperator, "antiddos")
+	if err != nil {
+		t.Fatalf("ResolveBoxComponent: %v", err)
+	}
+	bind := resolved.Containers[0].Bind
+	if len(bind.Env) != 2 || bind.Env[0].Key != "OVERRIDE_OPERATOR" || bind.Env[1].Key != "OVERRIDE_CONTAINER" {
+		t.Fatalf("per-installation blocks must replace before keyed merge: %+v", bind)
 	}
 }
 
@@ -413,7 +557,7 @@ func TestResolveBoxComponent_OperatorPerContainerOverride(t *testing.T) {
 		Components: &yanetv2alpha1.YanetComponentsOverride{
 			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
 				"antiddos": {
-					Containers: map[string]yanetv2alpha1.ImageRef{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
 						"operator": {Tag: "v0.5.1"},
 						"agent":    {Tag: "v0.5.2"},
 					},
@@ -442,7 +586,7 @@ func TestResolveBoxComponent_OperatorPartialContainerOverride(t *testing.T) {
 		Components: &yanetv2alpha1.YanetComponentsOverride{
 			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
 				"antiddos": {
-					Containers: map[string]yanetv2alpha1.ImageRef{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
 						"operator": {Tag: "v0.5.1"},
 					},
 				},

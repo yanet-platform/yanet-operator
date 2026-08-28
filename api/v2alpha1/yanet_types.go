@@ -103,7 +103,13 @@ type YanetComponentOverride struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Containers overrides image.name and/or image.tag per
+	// Bind replaces the cluster-wide component bind block when set. An empty
+	// block explicitly clears the inherited block.
+	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
+
+	// Containers overrides image.name, image.tag, and (for dynamic operators)
+	// bind per
 	// container, keyed by container name. For the 5 hardcoded
 	// components (single-container) the key is the kind:
 	// "controlplane", "dataplane", "bird", "birdAdapter",
@@ -111,7 +117,21 @@ type YanetComponentOverride struct {
 	// YanetConfigV2.spec.components.operators[].containers[].name.
 	// Registry/prefix come from YanetConfigV2.spec.images.
 	// +optional
-	Containers map[string]ImageRef `json:"containers,omitempty"`
+	Containers map[string]YanetContainerOverride `json:"containers,omitempty"`
+}
+
+// YanetContainerOverride is the per-installation override for one rendered
+// container. Name and Tag preserve the existing inline image override shape;
+// Bind replaces an OperatorContainer bind block when set.
+type YanetContainerOverride struct {
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
+	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
 }
 
 // YanetControlplaneOverride is the controlplane flavour of

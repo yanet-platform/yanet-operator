@@ -76,6 +76,12 @@ yanetconfig:
     stop: false
 ```
 
+The v2 configuration is supplied through `yanetconfigV2.spec`. The chart
+creates the cluster-scoped `YanetConfigV2` singleton with the fixed name
+`config`. Existing clusters with the older namespaced CRD must export the
+configuration and recreate the CRD before upgrading because Kubernetes cannot
+change a CRD's scope in place.
+
 ## Values
 
 | Parameter | Description | Default |

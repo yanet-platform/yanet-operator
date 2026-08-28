@@ -4,8 +4,7 @@
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetConfigV2
 metadata:
-  name: config-v2
-  namespace: yanet
+  name: config
 spec:
   stop: false
   updateWindow: 60

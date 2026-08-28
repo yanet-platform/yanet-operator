@@ -104,7 +104,7 @@ yanet-operator/
 │   │   ├── dataplane.go, controlplane.go, announcer.go, bird.go (v1)
 │   │   ├── builder_v2.go          # v2 skeleton: NUMA fan-out, hugepages, ConfigSource
 │   │   ├── patcher.go             # ApplyPatches via strategic merge
-│   │   ├── service_v2.go          # 3 CP categories + operator Local
+│   │   ├── service_v2.go          # explicit per-NUMA/component Local Services
 │   │   └── *_test.go
 │   ├── events/recorder.go         # SA1019 wrapper for EventRecorder
 │   └── names/const.go
@@ -257,7 +257,8 @@ The current model splits the two API surfaces into **separate CRDs**:
 - v1: `yanets` + `yanetconfigs` (kinds `Yanet`/`YanetConfig`,
   `api/v1alpha1` Go package).
 - v2: `yanetsv2` + `yanetconfigsv2` (kinds `YanetV2`/`YanetConfigV2`,
-  `api/v2alpha1` Go package).
+  `api/v2alpha1` Go package). `YanetConfigV2` is the cluster-scoped singleton
+  named `config`.
 
 Each CRD has exactly one served+storage version, so the API server never
 converts between them and never prunes fields. There is no Reconcile
@@ -345,7 +346,7 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 `Yanet` CRs reference a `boxType` by name; per-installation overrides are
 restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-and `enabled` flags. The container key must match the rendered container
+plus `bind` replacement blocks and `enabled` flags. The container key must match the rendered container
 name — the component kind for hardcoded components, the declared
 `OperatorContainer.name` for operators. No inline patches in `Yanet`.
 
@@ -353,21 +354,19 @@ Reconcile flow:
 ```
 snapshot YanetConfig → resolve box components → build skeleton Deployments
 → ApplyPatches(deployment, patchNames, registry) → CreateOrUpdate
-→ generate Services from components.<name>.port → status
+→ generate Services only when components.<name>.service.enabled → status
 ```
 
 ### Controlplane NUMA fan-out
 Controlplane gets one Deployment per NUMA domain on the node. NUMA count is
 read from the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`
-(falls back to 1 when absent). Each instance listens on `port + numa_index`;
-three Service categories are generated:
-- `<yanet>-<nodehash>-numa{N}` — per-node Local (`internalTrafficPolicy=Local`).
-- `<yanet>-controlplane-numa{N}-cluster` — cluster-wide round-robin per NUMA.
-- `<yanet>-controlplane-all` — cluster-wide round-robin across all instances.
+(falls back to 1 when absent). Explicit `grpcPort` / `httpPort` values are shared
+by all Pod network namespaces. With `service.enabled`, each enabled NUMA gets
+one `<yanet>-controlplane-numa{N}` Service with `internalTrafficPolicy=Local`.
 
 ### Operator Services
-When `OperatorSpec.Port > 0`, **one** cluster-wide `ClusterIP` Service is
-generated, named after the operator, with `internalTrafficPolicy=Local` so
+When `OperatorSpec.Service.Enabled` is true, **one** `ClusterIP` Service is
+generated, named `<yanet>-<operator>` by default, with `internalTrafficPolicy=Local` so
 in-node callers reach the local pod.
 
 ### Webhook pattern (controller-runtime ≥ 0.23)
@@ -408,7 +407,7 @@ validator struct.
 ### Done in v2 (was open in v1 era)
 - ✅ Validation webhooks (`vyanet-v2.kb.io`, `vyanetconfig-v2.kb.io`)
 - ✅ Watches: per-version `Yanet`, `Node` (with mapper), `Pod`
-- ✅ Per-component `Service` generation (per-node Local + cluster-wide RR)
+- ✅ Explicit per-component `Service` generation with stable Local endpoints
 
 ## 📚 Resources
 

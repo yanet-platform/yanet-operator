@@ -129,24 +129,87 @@ type ComponentsSpec struct {
 	Operators []OperatorSpec `json:"operators,omitempty"`
 }
 
-// ControlplaneSpec describes the controlplane component. Multi-NUMA
-// nodes get one Deployment per NUMA domain, each listening on
-// `Port + numa_index`. The NUMA-agnostic Service uses Port and load
-// balances across all instances.
+// BindSpec describes environment variables used to override component
+// configuration. Each entry is either a literal value or a reference to the
+// Service generated for the same component.
+type BindSpec struct {
+	// +optional
+	Env []BindEnv `json:"env,omitempty"`
+}
+
+// BindEnv describes one environment variable injected into a component
+// container.
+type BindEnv struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
+
+	// Value is injected verbatim. A pointer preserves the distinction between
+	// an omitted value and an explicitly configured empty string.
+	// +optional
+	Value *string `json:"value,omitempty"`
+
+	// Service renders the stable FQDN of the Service generated for this
+	// component, followed by Port.
+	// +optional
+	Service *ServiceRef `json:"service,omitempty"`
+}
+
+// ServiceRef selects a port exposed by the Service generated for the same
+// component.
+type ServiceRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port"`
+}
+
+// ServiceSpec controls whether the operator generates a stable ClusterIP
+// Service for a component.
+type ServiceSpec struct {
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// ServiceName overrides the default <yanet>-<component> resource name. It is
+	// used verbatim and must be unique in the YanetV2 namespace. For controlplane
+	// it is used as the base of <serviceName>-numa<N>.
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+}
+
+// ControlplaneSpec describes the controlplane component. Multi-NUMA nodes get
+// one Deployment and, when enabled, one stable Service per NUMA domain.
 type ControlplaneSpec struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
 
-	// Port is the round-robin Service port over all CP instances.
-	// When numa>1 each instance also listens on Port+i.
+	// Port is the legacy single-port controlplane configuration. New configs
+	// should use GRPCPort and HTTPPort.
 	// +optional
 	Port int32 `json:"port,omitempty"`
 
-	// PortRange is the upper bound on per-NUMA listen ports
-	// (informational, the operator will validate that
-	// Port..Port+PortRange-1 does not overlap other component ports).
+	// PortRange is the legacy upper bound for Port-based NUMA fan-out.
 	// +optional
 	PortRange int32 `json:"portRange,omitempty"`
+
+	// GRPCPort is the gateway gRPC port used by every NUMA instance when an
+	// explicit Service is enabled.
+	// +optional
+	GRPCPort int32 `json:"grpcPort,omitempty"`
+
+	// HTTPPort is the gateway HTTP port used by every NUMA instance when an
+	// explicit Service is enabled.
+	// +optional
+	HTTPPort int32 `json:"httpPort,omitempty"`
+
+	// Bind defines temporary environment overrides for the component config.
+	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
+
+	// Service controls generation of per-NUMA Services.
+	// +optional
+	Service *ServiceSpec `json:"service,omitempty"`
 
 	// Config is the configuration source (inline | hostPath | url).
 	// +optional
@@ -215,6 +278,10 @@ type BirdAdapterComp struct {
 	// +optional
 	Port int32 `json:"port,omitempty"`
 	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
+	// +optional
+	Service *ServiceSpec `json:"service,omitempty"`
+	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 }
 
@@ -224,6 +291,10 @@ type AnnouncerComp struct {
 	Image ImageRef `json:"image"`
 	// +optional
 	Port int32 `json:"port,omitempty"`
+	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
+	// +optional
+	Service *ServiceSpec `json:"service,omitempty"`
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 }
@@ -266,18 +337,23 @@ func (h *Hugepages) TotalQuantity() (resource.Quantity, error) {
 // rendered as a single Deployment.
 type OperatorSpec struct {
 	// Name is unique within the Operators array. It is used as the
-	// component label, default container name, and (when Port is
-	// set) as the Service name.
+	// component label and default container name.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// Port, when non-zero, asks the operator to render a single
-	// cluster-wide ClusterIP Service `<Name>` with
-	// internalTrafficPolicy=Local (so callers on the same node hit
-	// the local pod). targetContainer = first container.
+	// Port is the primary container listener and explicit Service port.
 	// +optional
 	Port int32 `json:"port,omitempty"`
+
+	// Bind is inherited by every container. Container-level entries with the
+	// same key override these values.
+	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
+
+	// Service controls generation of the operator Service.
+	// +optional
+	Service *ServiceSpec `json:"service,omitempty"`
 
 	// Containers lists the containers of the Pod. At least one is
 	// required.
@@ -303,6 +379,11 @@ type OperatorContainer struct {
 	// Config is the configuration source for this container.
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
+
+	// Bind augments the operator-level bind block. Entries are merged by key,
+	// with this container-level value taking precedence.
+	// +optional
+	Bind *BindSpec `json:"bind,omitempty"`
 
 	// HostIPC, when true, requests host IPC namespace for the whole
 	// Pod. Pod-level hostIPC=true is set if any container in the
@@ -415,9 +496,15 @@ type YanetConfigStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// YanetConfigName is the fixed name of the cluster-wide YanetConfigV2
+// singleton. A fixed cluster-scoped object key lets the API server enforce
+// uniqueness atomically.
+const YanetConfigName = "config"
+
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:resource:path=yanetconfigsv2,shortName=yntcfgv2,categories=yanetv2
+//+kubebuilder:resource:path=yanetconfigsv2,scope=Cluster,shortName=yntcfgv2,categories=yanetv2
+//+kubebuilder:validation:XValidation:rule="self.metadata.name == 'config'",message="metadata.name must be config"
 //+kubebuilder:printcolumn:name="UpdateWindow",type=integer,JSONPath=`.spec.updateWindow`
 //+kubebuilder:printcolumn:name="Stop",type=boolean,JSONPath=`.spec.stop`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

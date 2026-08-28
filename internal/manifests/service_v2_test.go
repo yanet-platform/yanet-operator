@@ -17,7 +17,7 @@ limitations under the License.
 package manifests
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
@@ -25,194 +25,177 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestBuildServices_Controlplane_ThreeCategories(t *testing.T) {
-	ctx := ctxV2()
+func TestBuildServices_DisabledByDefault(t *testing.T) {
+	components := []*helpers.ResolvedComponent{
+		{Kind: helpers.KindControlplane, Name: "controlplane", GRPCPort: 8080, HTTPPort: 8081},
+		{Kind: helpers.KindAnnouncer, Name: "announcer", Port: 9090},
+		{Kind: helpers.KindOperator, Name: "route", Port: 9000},
+	}
+	for _, component := range components {
+		if plans := BuildServices(ctxV2(), component); len(plans) != 0 {
+			t.Errorf("%s: service.enabled=false must produce no plans: %+v", component.Name, plans)
+		}
+	}
+}
+
+func TestBuildServices_Controlplane_PerNuma(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane",
-		Port: 8080, Numa: 2,
+		GRPCPort: 8080, HTTPPort: 8081, Numa: 2, ServiceEnabled: true,
 	}
-	plans := BuildServices(ctx, c)
-	// per-NUMA: 2 nodeLocal + 2 cluster + 1 -all = 5 plans.
-	if len(plans) != 5 {
-		t.Fatalf("plans = %d: %+v", len(plans), plans)
+	plans := BuildServices(ctxV2(), c)
+	if len(plans) != 2 {
+		t.Fatalf("plans = %d, want one per NUMA: %+v", len(plans), plans)
 	}
-	var perNode, cluster, all int
-	for _, p := range plans {
-		switch {
-		case strings.HasSuffix(p.Name, "-all"):
-			all++
-			if p.Local {
-				t.Errorf("-all plan must NOT be Local")
-			}
-		case strings.HasSuffix(p.Name, "-cluster"):
-			cluster++
-			if p.Local {
-				t.Errorf("-cluster plan must NOT be Local")
-			}
-		case p.PerNode:
-			perNode++
-			if !p.Local {
-				t.Errorf("per-node plan must be Local")
-			}
-			if p.Selector[labelNode] != "node-1" {
-				t.Errorf("per-node selector missing node label: %v", p.Selector)
-			}
+	for i := range plans {
+		plan := &plans[i]
+		wantName := fmt.Sprintf("edge-controlplane-numa%d", i)
+		if plan.Name != wantName {
+			t.Errorf("plan[%d].Name = %q, want %q", i, plan.Name, wantName)
 		}
-	}
-	if perNode != 2 || cluster != 2 || all != 1 {
-		t.Errorf("category counts perNode=%d cluster=%d all=%d", perNode, cluster, all)
+		if !plan.Local {
+			t.Errorf("plan[%d] must use internalTrafficPolicy=Local", i)
+		}
+		if plan.Selector[labelYanet] != "edge" || plan.Selector[labelComponent] != "controlplane" {
+			t.Errorf("plan[%d] selector does not isolate the installation: %v", i, plan.Selector)
+		}
+		if plan.Selector[labelNuma] != fmt.Sprintf("%d", i) {
+			t.Errorf("plan[%d] NUMA selector = %q", i, plan.Selector[labelNuma])
+		}
+		if _, hasNode := plan.Selector[labelNode]; hasNode {
+			t.Errorf("stable per-NUMA Service must not include a node hash selector: %v", plan.Selector)
+		}
+		if len(plan.Ports) != 2 ||
+			plan.Ports[0].Name != "grpc" || plan.Ports[0].Port != 8080 ||
+			plan.Ports[1].Name != "http" || plan.Ports[1].Port != 8081 {
+			t.Errorf("plan[%d] ports = %+v", i, plan.Ports)
+		}
 	}
 }
 
-func TestBuildServices_Controlplane_PortFanout(t *testing.T) {
-	ctx := ctxV2()
+func TestBuildServices_Controlplane_CustomNameAndDisabledNuma(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane",
-		Port: 8080, Numa: 2,
-	}
-	plans := BuildServices(ctx, c)
-	have := map[int32]bool{}
-	for _, p := range plans {
-		have[p.Port] = true
-	}
-	if !have[8080] || !have[8081] {
-		t.Errorf("expected ports 8080 and 8081 across plans: %v", have)
-	}
-}
-
-// TestBuildServices_Controlplane_DisabledNuma verifies that a disabled NUMA
-// domain gets neither a per-node nor a cluster-wide Service, so no Service is
-// left behind that could never receive an endpoint. The shared "-all" entry
-// point survives.
-func TestBuildServices_Controlplane_DisabledNuma(t *testing.T) {
-	ctx := ctxV2()
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindControlplane, Name: "controlplane",
-		Port: 8080, Numa: 2, DisabledNuma: []int32{1},
-	}
-	plans := BuildServices(ctx, c)
-	// only NUMA 0 survives: 1 nodeLocal + 1 cluster + 1 -all = 3 plans.
-	if len(plans) != 3 {
-		t.Fatalf("plans = %d: %+v", len(plans), plans)
-	}
-	for _, p := range plans {
-		if strings.HasSuffix(p.Name, "-all") {
-			continue
-		}
-		if p.Selector[labelNuma] == "1" {
-			t.Errorf("plan %q targets the disabled NUMA 1", p.Name)
-		}
-		if p.Port == 8081 {
-			t.Errorf("plan %q still exposes the disabled NUMA port 8081", p.Name)
-		}
-	}
-}
-
-func TestBuildServices_Controlplane_NoPort_NoPlans(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane"}
-	if plans := BuildServices(ctxV2(), c); len(plans) != 0 {
-		t.Errorf("no port → no plans, got %v", plans)
-	}
-}
-
-func TestBuildServices_Simple_BirdLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindBird, Name: "bird", Port: 179}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 || !plans[0].Local {
-		t.Fatalf("bird single plan with Local=true expected: %+v", plans)
-	}
-}
-
-func TestBuildServices_Simple_BirdAdapterLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Port: 9700}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 || !plans[0].Local {
-		t.Fatalf("birdAdapter single plan with Local=true expected: %+v", plans)
-	}
-}
-
-func TestBuildServices_Simple_AnnouncerNotLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindAnnouncer, Name: "announcer", Port: 9090}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 {
-		t.Fatalf("plans = %d", len(plans))
-	}
-	if plans[0].Local {
-		t.Errorf("announcer must NOT be Local")
-	}
-}
-
-func TestBuildServices_Dataplane_NotLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane", Port: 8081}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 || plans[0].Local {
-		t.Errorf("dataplane: 1 plan, not Local: %+v", plans)
-	}
-}
-
-func TestBuildServices_Operator_LocalAndNamedAfterOperator(t *testing.T) {
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindOperator, Name: "antiddos", Port: 9001,
+		GRPCPort: 8080, HTTPPort: 8081, Numa: 2, DisabledNuma: []int32{1},
+		ServiceEnabled: true, ServiceName: "gateway",
 	}
 	plans := BuildServices(ctxV2(), c)
 	if len(plans) != 1 {
-		t.Fatalf("operator plans = %d", len(plans))
+		t.Fatalf("plans = %d, want only NUMA 0: %+v", len(plans), plans)
 	}
-	p := plans[0]
-	if !p.Local {
-		t.Errorf("operator Service must be Local")
-	}
-	if p.Name != "antiddos" {
-		t.Errorf("operator Service name should equal operator name: %q", p.Name)
+	if plans[0].Name != "gateway-numa0" || plans[0].Selector[labelNuma] != "0" {
+		t.Fatalf("unexpected surviving plan: %+v", plans[0])
 	}
 }
 
-func TestBuildServices_Operator_NoPort_NoService(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "x"}
+func TestBuildServices_Controlplane_MissingPortNoPlans(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane",
+		GRPCPort: 8080, ServiceEnabled: true,
+	}
 	if plans := BuildServices(ctxV2(), c); len(plans) != 0 {
-		t.Errorf("no port → no operator service, got %v", plans)
+		t.Errorf("incomplete controlplane ports must produce no plans: %+v", plans)
+	}
+}
+
+func TestBuildServices_Operator_DefaultAndCustomName(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "route", Port: 9000, ServiceEnabled: true,
+	}
+	plans := BuildServices(ctxV2(), c)
+	if len(plans) != 1 || plans[0].Name != "edge-route" || !plans[0].Local {
+		t.Fatalf("default operator Service plan: %+v", plans)
+	}
+	if plans[0].Selector[labelYanet] != "edge" {
+		t.Errorf("operator selector must include Yanet identity: %v", plans[0].Selector)
+	}
+
+	c.ServiceName = "route-api"
+	plans = BuildServices(ctxV2(), c)
+	if len(plans) != 1 || plans[0].Name != "route-api" {
+		t.Fatalf("custom operator Service name ignored: %+v", plans)
+	}
+}
+
+func TestBuildServices_AnnouncerIsLocal(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindAnnouncer, Name: "announcer", Port: 9090, ServiceEnabled: true,
+	}
+	plans := BuildServices(ctxV2(), c)
+	if len(plans) != 1 || plans[0].Name != "edge-announcer" || !plans[0].Local {
+		t.Fatalf("announcer Service plan: %+v", plans)
 	}
 }
 
 func TestBuildServices_NilComponent(t *testing.T) {
 	if got := BuildServices(ctxV2(), nil); got != nil {
-		t.Errorf("nil → nil, got %v", got)
+		t.Errorf("nil component must return nil, got %v", got)
 	}
 }
 
-// --- ToService -------------------------------------------------------------
-
-func TestServicePlan_ToService_LocalSetsTrafficPolicy(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80, Local: true}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.InternalTrafficPolicy == nil || *svc.Spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal {
-		t.Errorf("Local=true: internalTrafficPolicy must be Local: %+v", svc.Spec.InternalTrafficPolicy)
+func TestServicePlan_ToService_MultipleNamedPorts(t *testing.T) {
+	plan := ServicePlan{
+		Name:     "gateway-numa0",
+		Selector: map[string]string{"a": "b"},
+		Ports: []ServicePortPlan{
+			{Name: "grpc", Port: 8080, TargetPortName: "grpc"},
+			{Name: "http", Port: 8081, TargetPortName: "http"},
+		},
+		Local: true,
 	}
+	svc := plan.ToService("yanet", metav1.OwnerReference{Name: "edge"})
 	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
 		t.Errorf("Type = %q, want ClusterIP", svc.Spec.Type)
 	}
-}
-
-func TestServicePlan_ToService_NotLocalNoPolicy(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.InternalTrafficPolicy != nil {
-		t.Errorf("non-Local plan must omit policy: %+v", svc.Spec.InternalTrafficPolicy)
+	if svc.Spec.InternalTrafficPolicy == nil ||
+		*svc.Spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal {
+		t.Errorf("Local plan must set internalTrafficPolicy=Local: %+v", svc.Spec.InternalTrafficPolicy)
+	}
+	if len(svc.Spec.Ports) != 2 ||
+		svc.Spec.Ports[0].TargetPort.StrVal != "grpc" ||
+		svc.Spec.Ports[1].TargetPort.StrVal != "http" {
+		t.Errorf("rendered ports = %+v", svc.Spec.Ports)
 	}
 }
 
 func TestServicePlan_ToService_TargetPortDefaultsToPort(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
+	plan := ServicePlan{
+		Name: "x", Ports: []ServicePortPlan{{Name: "grpc", Port: 80}},
+	}
+	svc := plan.ToService("yanet", metav1.OwnerReference{Name: "edge"})
 	if svc.Spec.Ports[0].TargetPort.IntVal != 80 {
-		t.Errorf("TargetPort default to Port: %+v", svc.Spec.Ports[0].TargetPort)
+		t.Errorf("TargetPort = %+v, want 80", svc.Spec.Ports[0].TargetPort)
+	}
+	if svc.Spec.InternalTrafficPolicy != nil {
+		t.Errorf("non-Local plan must omit internalTrafficPolicy")
 	}
 }
 
-func TestServicePlan_ToService_TargetPortName(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80, TargetPortName: "grpc"}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.Ports[0].TargetPort.StrVal != "grpc" {
-		t.Errorf("TargetPort by name: %+v", svc.Spec.Ports[0].TargetPort)
+func TestServicePlan_Validate(t *testing.T) {
+	tests := []struct {
+		name string
+		plan ServicePlan
+	}{
+		{
+			name: "invalid name",
+			plan: ServicePlan{
+				Name: "edge.prod", Selector: map[string]string{"app": "x"},
+				Ports: []ServicePortPlan{{Name: "grpc", Port: 80}},
+			},
+		},
+		{
+			name: "duplicate ports",
+			plan: ServicePlan{
+				Name: "edge", Selector: map[string]string{"app": "x"},
+				Ports: []ServicePortPlan{{Name: "grpc", Port: 80}, {Name: "http", Port: 80}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.plan.Validate(); err == nil {
+				t.Fatalf("invalid Service plan accepted: %+v", tt.plan)
+			}
+		})
 	}
 }

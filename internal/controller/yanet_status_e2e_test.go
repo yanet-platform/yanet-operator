@@ -159,17 +159,22 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 
 		BeforeEach(func() {
 			ensureNamespace(ctx, ns)
+			endpoint := "[::]:8080"
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "status-config-v2",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
-							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/cp", Tag: "v1"},
-							Port:  8080,
+							Image:    yanetv2alpha1.ImageRef{Name: "docker.io/test/cp", Tag: "v1"},
+							GRPCPort: 8080,
+							HTTPPort: 8081,
+							Service:  &yanetv2alpha1.ServiceSpec{Enabled: true},
+							Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{{
+								Key: "YANET_GATEWAY_ENDPOINT", Value: &endpoint,
+							}}},
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/dp", Tag: "v1"},
@@ -357,8 +362,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "multinode-config",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{

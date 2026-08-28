@@ -328,7 +328,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 		)
 
 		ctx := context.Background()
-		configName := types.NamespacedName{Name: "throttle-v2-config", Namespace: yanetNamespace}
+		configName := types.NamespacedName{Name: yanetv2alpha1.YanetConfigName}
 
 		BeforeEach(func() {
 			By("Creating test nodes for V2")
@@ -353,8 +353,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			By("Creating YanetConfigV2 with 5s updateWindow")
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      configName.Name,
-					Namespace: configName.Namespace,
+					Name: configName.Name,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Stop:         false,

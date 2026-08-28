@@ -39,6 +39,14 @@ func ctxV2() BuildContextV2 {
 	}
 }
 
+func envValues(env []corev1.EnvVar) map[string]string {
+	out := make(map[string]string, len(env))
+	for i := range env {
+		out[env[i].Name] = env[i].Value
+	}
+	return out
+}
+
 // --- controlplane fan-out ---------------------------------------------------
 
 func TestBuildDeployments_Controlplane_NUMAFanout(t *testing.T) {
@@ -72,6 +80,43 @@ func TestBuildDeployments_Controlplane_NUMAFanout(t *testing.T) {
 		}
 		if d.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] != "node-1" {
 			t.Errorf("d[%d] missing node selector", i)
+		}
+	}
+}
+
+func TestBuildDeployments_Controlplane_ServicePortsAndBindEnv(t *testing.T) {
+	literal := "[::]:8080"
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image:    helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		GRPCPort: 8080, HTTPPort: 8081, Numa: 2, ServiceEnabled: true,
+		Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{
+			{Key: "YANET_GATEWAY_ENDPOINT", Value: &literal},
+			{Key: "YANET_GATEWAY_ADVERTISE_ENDPOINT", Service: &yanetv2alpha1.ServiceRef{Port: 8080}},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if len(deployments) != 2 {
+		t.Fatalf("deployments = %d, want 2", len(deployments))
+	}
+	for i := range deployments {
+		container := &deployments[i].Spec.Template.Spec.Containers[0]
+		if len(container.Ports) != 2 ||
+			container.Ports[0].Name != "grpc" || container.Ports[0].ContainerPort != 8080 ||
+			container.Ports[1].Name != "http" || container.Ports[1].ContainerPort != 8081 {
+			t.Errorf("deployment[%d] ports = %+v", i, container.Ports)
+		}
+		env := envValues(container.Env)
+		if env["YANET_GATEWAY_ENDPOINT"] != literal {
+			t.Errorf("deployment[%d] literal env = %q", i, env["YANET_GATEWAY_ENDPOINT"])
+		}
+		wantService := fmt.Sprintf("edge-controlplane-numa%d.yanet.svc.cluster.local:8080", i)
+		if env["YANET_GATEWAY_ADVERTISE_ENDPOINT"] != wantService {
+			t.Errorf("deployment[%d] Service env = %q, want %q", i,
+				env["YANET_GATEWAY_ADVERTISE_ENDPOINT"], wantService)
 		}
 	}
 }
@@ -447,6 +492,34 @@ func TestBuildDeployments_Operator_NoHostIPC_NoShmem(t *testing.T) {
 	}
 }
 
+func TestBuildDeployments_Operator_BindEnv(t *testing.T) {
+	literal := "[::]:9000"
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "route", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "route-op", Tag: "v1"},
+		Port:  9000, ServiceEnabled: true, ServiceName: "route-api",
+		Containers: []helpers.ResolvedContainer{{
+			Name: "route", Image: helpers.ResolvedImage{Name: "route-op", Tag: "v1"},
+			Bind: &yanetv2alpha1.BindSpec{Env: []yanetv2alpha1.BindEnv{
+				{Key: "YANET_SERVER_ENDPOINT", Value: &literal},
+				{Key: "YANET_SERVER_ADVERTISE_ENDPOINT", Service: &yanetv2alpha1.ServiceRef{Port: 9000}},
+			}},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	env := envValues(deployments[0].Spec.Template.Spec.Containers[0].Env)
+	if env["YANET_SERVER_ENDPOINT"] != literal {
+		t.Errorf("literal env = %q", env["YANET_SERVER_ENDPOINT"])
+	}
+	wantService := "route-api.yanet.svc.cluster.local:9000"
+	if env["YANET_SERVER_ADVERTISE_ENDPOINT"] != wantService {
+		t.Errorf("Service env = %q, want %q", env["YANET_SERVER_ADVERTISE_ENDPOINT"], wantService)
+	}
+}
+
 // --- ConfigSource branches --------------------------------------------------
 
 func TestBuildDeployments_Config_HostPath(t *testing.T) {
@@ -528,6 +601,32 @@ func TestBuildDeployments_Operator_PerContainerInlineConfig(t *testing.T) {
 func TestBuildDeployments_NilComponent(t *testing.T) {
 	if _, err := BuildDeployments(ctxV2(), nil); err == nil {
 		t.Errorf("nil component must error")
+	}
+}
+
+func TestBuildDeployments_RejectsStaleServiceReference(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "announcer", Tag: "v1"}, Port: 9090,
+		Bind: &yanetv2alpha1.BindSpec{
+			Env: []yanetv2alpha1.BindEnv{{
+				Key: "YANET_ENDPOINT", Service: &yanetv2alpha1.ServiceRef{Port: 9090},
+			}},
+		},
+	}
+	if _, err := BuildDeployments(ctxV2(), c); err == nil || !strings.Contains(err.Error(), "requires service.enabled") {
+		t.Fatalf("stale Service reference must fail before Deployment apply, got %v", err)
+	}
+}
+
+func TestBuildDeployments_RejectsServiceWithoutBind(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "announcer", Tag: "v1"}, Port: 9090,
+		ServiceEnabled: true,
+	}
+	if _, err := BuildDeployments(ctxV2(), c); err == nil || !strings.Contains(err.Error(), "non-empty bind") {
+		t.Fatalf("Service without bind must fail before resource apply, got %v", err)
 	}
 }
 

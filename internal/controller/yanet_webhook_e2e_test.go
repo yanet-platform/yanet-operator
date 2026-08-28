@@ -136,8 +136,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		It("Should reject YanetConfigV2 with duplicate patch names", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "duplicate-patches",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -163,11 +162,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			Expect(err).Should(HaveOccurred())
 		})
 
-		It("Should reject YanetConfigV2 with port overlap", func() {
+		It("Should reject YanetConfigV2 with a port outside the valid range", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "port-overlap",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -177,7 +175,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
-							Port:  8080, // Same port as controlplane!
+							Port:  70000,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{
@@ -194,8 +192,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		It("Should accept YanetConfigV2 with valid spec", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "valid-config-v2",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -227,8 +224,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			// Create valid YanetConfigV2
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-config-v2",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -250,7 +246,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 
 		AfterEach(func() {
 			config := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: "test-config-v2", Namespace: "default"}, config); err == nil {
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, config); err == nil {
 				Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
 			}
 		})
@@ -312,11 +308,11 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			}
 
 			oldConfig := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutability-config", Namespace: "default"}, oldConfig); err == nil {
+			if err := k8sClient.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig); err == nil {
 				_ = k8sClient.Delete(ctx, oldConfig)
 				// Wait for deletion to complete
 				Eventually(func() bool {
-					err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutability-config", Namespace: "default"}, oldConfig)
+					err := k8sClient.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig)
 					return err != nil
 				}, 10*time.Second, 500*time.Millisecond).Should(BeTrue())
 			}
@@ -324,8 +320,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			// Create YanetConfigV2 with two boxTypes (both must wire CP+DP)
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "immutability-config",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -411,8 +406,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		It("Should reject YanetConfigV2 with boxType referencing non-existent patch", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "invalid-patch-ref",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -445,8 +439,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		It("Should accept YanetConfigV2 with valid patch references", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "valid-patch-ref",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{

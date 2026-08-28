@@ -2464,7 +2464,7 @@ spec:
     shortNames:
     - yntcfgv2
     singular: yanetconfigv2
-  scope: Namespaced
+  scope: Cluster
   versions:
   - additionalPrinterColumns:
     - jsonPath: .spec.updateWindow
@@ -2634,6 +2634,44 @@ spec:
                   announcer:
                     description: AnnouncerComp describes the announcer Deployment.
                     properties:
+                      bind:
+                        description: |-
+                          BindSpec describes environment variables used to override component
+                          configuration. Each entry is either a literal value or a reference to the
+                          Service generated for the same component.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       config:
                         description: |-
                           ConfigSource describes where the configuration of a yanet component
@@ -2704,6 +2742,21 @@ spec:
                       port:
                         format: int32
                         type: integer
+                      service:
+                        description: |-
+                          ServiceSpec controls whether the operator generates a stable ClusterIP
+                          Service for a component.
+                        properties:
+                          enabled:
+                            default: false
+                            type: boolean
+                          serviceName:
+                            description: |-
+                              ServiceName overrides the default <yanet>-<component> resource name. It is
+                              used verbatim and must be unique in the YanetV2 namespace. For controlplane
+                              it is used as the base of <serviceName>-numa<N>.
+                            type: string
+                        type: object
                     required:
                     - image
                     type: object
@@ -2790,6 +2843,44 @@ spec:
                       so the adapter can be updated without restarting bird.
                       bird ↔ birdAdapter share the bird unix socket via a hostPath.
                     properties:
+                      bind:
+                        description: |-
+                          BindSpec describes environment variables used to override component
+                          configuration. Each entry is either a literal value or a reference to the
+                          Service generated for the same component.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       config:
                         description: |-
                           ConfigSource describes where the configuration of a yanet component
@@ -2861,16 +2952,65 @@ spec:
                         description: Port is the gRPC listen port of the adapter.
                         format: int32
                         type: integer
+                      service:
+                        description: |-
+                          ServiceSpec controls whether the operator generates a stable ClusterIP
+                          Service for a component.
+                        properties:
+                          enabled:
+                            default: false
+                            type: boolean
+                          serviceName:
+                            description: |-
+                              ServiceName overrides the default <yanet>-<component> resource name. It is
+                              used verbatim and must be unique in the YanetV2 namespace. For controlplane
+                              it is used as the base of <serviceName>-numa<N>.
+                            type: string
+                        type: object
                     required:
                     - image
                     type: object
                   controlplane:
                     description: |-
-                      ControlplaneSpec describes the controlplane component. Multi-NUMA
-                      nodes get one Deployment per NUMA domain, each listening on
-                      `Port + numa_index`. The NUMA-agnostic Service uses Port and load
-                      balances across all instances.
+                      ControlplaneSpec describes the controlplane component. Multi-NUMA nodes get
+                      one Deployment and, when enabled, one stable Service per NUMA domain.
                     properties:
+                      bind:
+                        description: Bind defines temporary environment overrides
+                          for the component config.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       config:
                         description: Config is the configuration source (inline |
                           hostPath | url).
@@ -2925,6 +3065,18 @@ spec:
                           format: int32
                           type: integer
                         type: array
+                      grpcPort:
+                        description: |-
+                          GRPCPort is the gateway gRPC port used by every NUMA instance when an
+                          explicit Service is enabled.
+                        format: int32
+                        type: integer
+                      httpPort:
+                        description: |-
+                          HTTPPort is the gateway HTTP port used by every NUMA instance when an
+                          explicit Service is enabled.
+                        format: int32
+                        type: integer
                       image:
                         description: |-
                           ImageRef identifies an image. Registry and prefix come from
@@ -2946,17 +3098,28 @@ spec:
                         type: integer
                       port:
                         description: |-
-                          Port is the round-robin Service port over all CP instances.
-                          When numa>1 each instance also listens on Port+i.
+                          Port is the legacy single-port controlplane configuration. New configs
+                          should use GRPCPort and HTTPPort.
                         format: int32
                         type: integer
                       portRange:
-                        description: |-
-                          PortRange is the upper bound on per-NUMA listen ports
-                          (informational, the operator will validate that
-                          Port..Port+PortRange-1 does not overlap other component ports).
+                        description: PortRange is the legacy upper bound for Port-based
+                          NUMA fan-out.
                         format: int32
                         type: integer
+                      service:
+                        description: Service controls generation of per-NUMA Services.
+                        properties:
+                          enabled:
+                            default: false
+                            type: boolean
+                          serviceName:
+                            description: |-
+                              ServiceName overrides the default <yanet>-<component> resource name. It is
+                              used verbatim and must be unique in the YanetV2 namespace. For controlplane
+                              it is used as the base of <serviceName>-numa<N>.
+                            type: string
+                        type: object
                     required:
                     - image
                     type: object
@@ -3064,6 +3227,43 @@ spec:
                         OperatorSpec describes one dynamic operator. The whole Pod is
                         rendered as a single Deployment.
                       properties:
+                        bind:
+                          description: |-
+                            Bind is inherited by every container. Container-level entries with the
+                            same key override these values.
+                          properties:
+                            env:
+                              items:
+                                description: |-
+                                  BindEnv describes one environment variable injected into a component
+                                  container.
+                                properties:
+                                  key:
+                                    minLength: 1
+                                    type: string
+                                  service:
+                                    description: |-
+                                      Service renders the stable FQDN of the Service generated for this
+                                      component, followed by Port.
+                                    properties:
+                                      port:
+                                        format: int32
+                                        maximum: 65535
+                                        minimum: 1
+                                        type: integer
+                                    required:
+                                    - port
+                                    type: object
+                                  value:
+                                    description: |-
+                                      Value is injected verbatim. A pointer preserves the distinction between
+                                      an omitted value and an explicitly configured empty string.
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              type: array
+                          type: object
                         containers:
                           description: |-
                             Containers lists the containers of the Pod. At least one is
@@ -3072,6 +3272,43 @@ spec:
                             description: OperatorContainer describes one container
                               of an operator Pod.
                             properties:
+                              bind:
+                                description: |-
+                                  Bind augments the operator-level bind block. Entries are merged by key,
+                                  with this container-level value taking precedence.
+                                properties:
+                                  env:
+                                    items:
+                                      description: |-
+                                        BindEnv describes one environment variable injected into a component
+                                        container.
+                                      properties:
+                                        key:
+                                          minLength: 1
+                                          type: string
+                                        service:
+                                          description: |-
+                                            Service renders the stable FQDN of the Service generated for this
+                                            component, followed by Port.
+                                          properties:
+                                            port:
+                                              format: int32
+                                              maximum: 65535
+                                              minimum: 1
+                                              type: integer
+                                          required:
+                                          - port
+                                          type: object
+                                        value:
+                                          description: |-
+                                            Value is injected verbatim. A pointer preserves the distinction between
+                                            an omitted value and an explicitly configured empty string.
+                                          type: string
+                                      required:
+                                      - key
+                                      type: object
+                                    type: array
+                                type: object
                               config:
                                 description: Config is the configuration source for
                                   this container.
@@ -3142,18 +3379,28 @@ spec:
                         name:
                           description: |-
                             Name is unique within the Operators array. It is used as the
-                            component label, default container name, and (when Port is
-                            set) as the Service name.
+                            component label and default container name.
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         port:
-                          description: |-
-                            Port, when non-zero, asks the operator to render a single
-                            cluster-wide ClusterIP Service `<Name>` with
-                            internalTrafficPolicy=Local (so callers on the same node hit
-                            the local pod). targetContainer = first container.
+                          description: Port is the primary container listener and
+                            explicit Service port.
                           format: int32
                           type: integer
+                        service:
+                          description: Service controls generation of the operator
+                            Service.
+                          properties:
+                            enabled:
+                              default: false
+                              type: boolean
+                            serviceName:
+                              description: |-
+                                ServiceName overrides the default <yanet>-<component> resource name. It is
+                                used verbatim and must be unique in the YanetV2 namespace. For controlplane
+                                it is used as the base of <serviceName>-numa<N>.
+                              type: string
+                          type: object
                       required:
                       - containers
                       - name
@@ -3309,6 +3556,9 @@ spec:
                 type: array
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be config
+          rule: self.metadata.name == 'config'
     served: true
     storage: true
     subresources:
@@ -3697,21 +3947,96 @@ spec:
                       YanetComponentOverride is the only per-installation customisation
                       surface for a component. Anything broader belongs to a patch.
                     properties:
+                      bind:
+                        description: |-
+                          Bind replaces the cluster-wide component bind block when set. An empty
+                          block explicitly clears the inherited block.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation override for one rendered
+                            container. Name and Tag preserve the existing inline image override shape;
+                            Bind replaces an OperatorContainer bind block when set.
                           properties:
+                            bind:
+                              description: |-
+                                BindSpec describes environment variables used to override component
+                                configuration. Each entry is either a literal value or a reference to the
+                                Service generated for the same component.
+                              properties:
+                                env:
+                                  items:
+                                    description: |-
+                                      BindEnv describes one environment variable injected into a component
+                                      container.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        type: string
+                                      service:
+                                        description: |-
+                                          Service renders the stable FQDN of the Service generated for this
+                                          component, followed by Port.
+                                        properties:
+                                          port:
+                                            format: int32
+                                            maximum: 65535
+                                            minimum: 1
+                                            type: integer
+                                        required:
+                                        - port
+                                        type: object
+                                      value:
+                                        description: |-
+                                          Value is injected verbatim. A pointer preserves the distinction between
+                                          an omitted value and an explicitly configured empty string.
+                                        type: string
+                                    required:
+                                    - key
+                                    type: object
+                                  type: array
+                              type: object
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
+                          Containers overrides image.name, image.tag, and (for dynamic operators)
+                          bind per
                           container, keyed by container name. For the 5 hardcoded
                           components (single-container) the key is the kind:
                           "controlplane", "dataplane", "bird", "birdAdapter",
@@ -3731,21 +4056,96 @@ spec:
                       YanetComponentOverride is the only per-installation customisation
                       surface for a component. Anything broader belongs to a patch.
                     properties:
+                      bind:
+                        description: |-
+                          Bind replaces the cluster-wide component bind block when set. An empty
+                          block explicitly clears the inherited block.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation override for one rendered
+                            container. Name and Tag preserve the existing inline image override shape;
+                            Bind replaces an OperatorContainer bind block when set.
                           properties:
+                            bind:
+                              description: |-
+                                BindSpec describes environment variables used to override component
+                                configuration. Each entry is either a literal value or a reference to the
+                                Service generated for the same component.
+                              properties:
+                                env:
+                                  items:
+                                    description: |-
+                                      BindEnv describes one environment variable injected into a component
+                                      container.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        type: string
+                                      service:
+                                        description: |-
+                                          Service renders the stable FQDN of the Service generated for this
+                                          component, followed by Port.
+                                        properties:
+                                          port:
+                                            format: int32
+                                            maximum: 65535
+                                            minimum: 1
+                                            type: integer
+                                        required:
+                                        - port
+                                        type: object
+                                      value:
+                                        description: |-
+                                          Value is injected verbatim. A pointer preserves the distinction between
+                                          an omitted value and an explicitly configured empty string.
+                                        type: string
+                                    required:
+                                    - key
+                                    type: object
+                                  type: array
+                              type: object
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
+                          Containers overrides image.name, image.tag, and (for dynamic operators)
+                          bind per
                           container, keyed by container name. For the 5 hardcoded
                           components (single-container) the key is the kind:
                           "controlplane", "dataplane", "bird", "birdAdapter",
@@ -3765,21 +4165,96 @@ spec:
                       YanetComponentOverride is the only per-installation customisation
                       surface for a component. Anything broader belongs to a patch.
                     properties:
+                      bind:
+                        description: |-
+                          Bind replaces the cluster-wide component bind block when set. An empty
+                          block explicitly clears the inherited block.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation override for one rendered
+                            container. Name and Tag preserve the existing inline image override shape;
+                            Bind replaces an OperatorContainer bind block when set.
                           properties:
+                            bind:
+                              description: |-
+                                BindSpec describes environment variables used to override component
+                                configuration. Each entry is either a literal value or a reference to the
+                                Service generated for the same component.
+                              properties:
+                                env:
+                                  items:
+                                    description: |-
+                                      BindEnv describes one environment variable injected into a component
+                                      container.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        type: string
+                                      service:
+                                        description: |-
+                                          Service renders the stable FQDN of the Service generated for this
+                                          component, followed by Port.
+                                        properties:
+                                          port:
+                                            format: int32
+                                            maximum: 65535
+                                            minimum: 1
+                                            type: integer
+                                        required:
+                                        - port
+                                        type: object
+                                      value:
+                                        description: |-
+                                          Value is injected verbatim. A pointer preserves the distinction between
+                                          an omitted value and an explicitly configured empty string.
+                                        type: string
+                                    required:
+                                    - key
+                                    type: object
+                                  type: array
+                              type: object
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
+                          Containers overrides image.name, image.tag, and (for dynamic operators)
+                          bind per
                           container, keyed by container name. For the 5 hardcoded
                           components (single-container) the key is the kind:
                           "controlplane", "dataplane", "bird", "birdAdapter",
@@ -3800,21 +4275,96 @@ spec:
                       YanetComponentOverride. On top of the common enabled/image knobs it
                       carries the per-installation NUMA opt-out.
                     properties:
+                      bind:
+                        description: |-
+                          Bind replaces the cluster-wide component bind block when set. An empty
+                          block explicitly clears the inherited block.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation override for one rendered
+                            container. Name and Tag preserve the existing inline image override shape;
+                            Bind replaces an OperatorContainer bind block when set.
                           properties:
+                            bind:
+                              description: |-
+                                BindSpec describes environment variables used to override component
+                                configuration. Each entry is either a literal value or a reference to the
+                                Service generated for the same component.
+                              properties:
+                                env:
+                                  items:
+                                    description: |-
+                                      BindEnv describes one environment variable injected into a component
+                                      container.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        type: string
+                                      service:
+                                        description: |-
+                                          Service renders the stable FQDN of the Service generated for this
+                                          component, followed by Port.
+                                        properties:
+                                          port:
+                                            format: int32
+                                            maximum: 65535
+                                            minimum: 1
+                                            type: integer
+                                        required:
+                                        - port
+                                        type: object
+                                      value:
+                                        description: |-
+                                          Value is injected verbatim. A pointer preserves the distinction between
+                                          an omitted value and an explicitly configured empty string.
+                                        type: string
+                                    required:
+                                    - key
+                                    type: object
+                                  type: array
+                              type: object
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
+                          Containers overrides image.name, image.tag, and (for dynamic operators)
+                          bind per
                           container, keyed by container name. For the 5 hardcoded
                           components (single-container) the key is the kind:
                           "controlplane", "dataplane", "bird", "birdAdapter",
@@ -3854,21 +4404,96 @@ spec:
                       YanetComponentOverride is the only per-installation customisation
                       surface for a component. Anything broader belongs to a patch.
                     properties:
+                      bind:
+                        description: |-
+                          Bind replaces the cluster-wide component bind block when set. An empty
+                          block explicitly clears the inherited block.
+                        properties:
+                          env:
+                            items:
+                              description: |-
+                                BindEnv describes one environment variable injected into a component
+                                container.
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                service:
+                                  description: |-
+                                    Service renders the stable FQDN of the Service generated for this
+                                    component, followed by Port.
+                                  properties:
+                                    port:
+                                      format: int32
+                                      maximum: 65535
+                                      minimum: 1
+                                      type: integer
+                                  required:
+                                  - port
+                                  type: object
+                                value:
+                                  description: |-
+                                    Value is injected verbatim. A pointer preserves the distinction between
+                                    an omitted value and an explicitly configured empty string.
+                                  type: string
+                              required:
+                              - key
+                              type: object
+                            type: array
+                        type: object
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation override for one rendered
+                            container. Name and Tag preserve the existing inline image override shape;
+                            Bind replaces an OperatorContainer bind block when set.
                           properties:
+                            bind:
+                              description: |-
+                                BindSpec describes environment variables used to override component
+                                configuration. Each entry is either a literal value or a reference to the
+                                Service generated for the same component.
+                              properties:
+                                env:
+                                  items:
+                                    description: |-
+                                      BindEnv describes one environment variable injected into a component
+                                      container.
+                                    properties:
+                                      key:
+                                        minLength: 1
+                                        type: string
+                                      service:
+                                        description: |-
+                                          Service renders the stable FQDN of the Service generated for this
+                                          component, followed by Port.
+                                        properties:
+                                          port:
+                                            format: int32
+                                            maximum: 65535
+                                            minimum: 1
+                                            type: integer
+                                        required:
+                                        - port
+                                        type: object
+                                      value:
+                                        description: |-
+                                          Value is injected verbatim. A pointer preserves the distinction between
+                                          an omitted value and an explicitly configured empty string.
+                                        type: string
+                                    required:
+                                    - key
+                                    type: object
+                                  type: array
+                              type: object
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
+                          Containers overrides image.name, image.tag, and (for dynamic operators)
+                          bind per
                           container, keyed by container name. For the 5 hardcoded
                           components (single-container) the key is the kind:
                           "controlplane", "dataplane", "bird", "birdAdapter",
@@ -3889,21 +4514,96 @@ spec:
                         YanetComponentOverride is the only per-installation customisation
                         surface for a component. Anything broader belongs to a patch.
                       properties:
+                        bind:
+                          description: |-
+                            Bind replaces the cluster-wide component bind block when set. An empty
+                            block explicitly clears the inherited block.
+                          properties:
+                            env:
+                              items:
+                                description: |-
+                                  BindEnv describes one environment variable injected into a component
+                                  container.
+                                properties:
+                                  key:
+                                    minLength: 1
+                                    type: string
+                                  service:
+                                    description: |-
+                                      Service renders the stable FQDN of the Service generated for this
+                                      component, followed by Port.
+                                    properties:
+                                      port:
+                                        format: int32
+                                        maximum: 65535
+                                        minimum: 1
+                                        type: integer
+                                    required:
+                                    - port
+                                    type: object
+                                  value:
+                                    description: |-
+                                      Value is injected verbatim. A pointer preserves the distinction between
+                                      an omitted value and an explicitly configured empty string.
+                                    type: string
+                                required:
+                                - key
+                                type: object
+                              type: array
+                          type: object
                         containers:
                           additionalProperties:
                             description: |-
-                              ImageRef identifies an image. Registry and prefix come from
-                              YanetConfigV2.spec.images.
+                              YanetContainerOverride is the per-installation override for one rendered
+                              container. Name and Tag preserve the existing inline image override shape;
+                              Bind replaces an OperatorContainer bind block when set.
                             properties:
+                              bind:
+                                description: |-
+                                  BindSpec describes environment variables used to override component
+                                  configuration. Each entry is either a literal value or a reference to the
+                                  Service generated for the same component.
+                                properties:
+                                  env:
+                                    items:
+                                      description: |-
+                                        BindEnv describes one environment variable injected into a component
+                                        container.
+                                      properties:
+                                        key:
+                                          minLength: 1
+                                          type: string
+                                        service:
+                                          description: |-
+                                            Service renders the stable FQDN of the Service generated for this
+                                            component, followed by Port.
+                                          properties:
+                                            port:
+                                              format: int32
+                                              maximum: 65535
+                                              minimum: 1
+                                              type: integer
+                                          required:
+                                          - port
+                                          type: object
+                                        value:
+                                          description: |-
+                                            Value is injected verbatim. A pointer preserves the distinction between
+                                            an omitted value and an explicitly configured empty string.
+                                          type: string
+                                      required:
+                                      - key
+                                      type: object
+                                    type: array
+                                type: object
                               name:
-                                description: Name is the image name without registry/prefix/tag.
                                 type: string
                               tag:
-                                description: Tag is the image tag.
                                 type: string
                             type: object
                           description: |-
-                            Containers overrides image.name and/or image.tag per
+                            Containers overrides image.name, image.tag, and (for dynamic operators)
+                            bind per
                             container, keyed by container name. For the 5 hardcoded
                             components (single-container) the key is the kind:
                             "controlplane", "dataplane", "bird", "birdAdapter",

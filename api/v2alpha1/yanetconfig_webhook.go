@@ -20,9 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -35,9 +37,7 @@ var yanetConfigLog = logf.Log.WithName("yanetconfig-v2-webhook")
 // final model: unique names, cross-references between boxTypes /
 // patches / operators, and a dry-run of every strategic-merge patch
 // against an empty appsv1.Deployment.
-//
-// The validator does not need a Kubernetes client: a YanetConfigV2 is
-// fully self-contained.
+// +kubebuilder:object:generate=false
 type YanetConfigCustomValidator struct{}
 
 var _ admission.Validator[*YanetConfigV2] = &YanetConfigCustomValidator{}
@@ -55,12 +55,18 @@ func SetupYanetConfigWebhookWithManager(mgr ctrl.Manager) error {
 // ValidateCreate implements admission.Validator.
 func (v *YanetConfigCustomValidator) ValidateCreate(ctx context.Context, cfg *YanetConfigV2) (admission.Warnings, error) {
 	yanetConfigLog.Info("validate create", "name", cfg.Name)
+	if err := validateYanetConfigIdentity(cfg); err != nil {
+		return nil, err
+	}
 	return nil, validateYanetConfig(&cfg.Spec)
 }
 
 // ValidateUpdate implements admission.Validator.
 func (v *YanetConfigCustomValidator) ValidateUpdate(ctx context.Context, _, cfg *YanetConfigV2) (admission.Warnings, error) {
 	yanetConfigLog.Info("validate update", "name", cfg.Name)
+	if err := validateYanetConfigIdentity(cfg); err != nil {
+		return nil, err
+	}
 	return nil, validateYanetConfig(&cfg.Spec)
 }
 
@@ -68,6 +74,13 @@ func (v *YanetConfigCustomValidator) ValidateUpdate(ctx context.Context, _, cfg 
 // allowed.
 func (v *YanetConfigCustomValidator) ValidateDelete(ctx context.Context, _ *YanetConfigV2) (admission.Warnings, error) {
 	return nil, nil
+}
+
+func validateYanetConfigIdentity(cfg *YanetConfigV2) error {
+	if cfg.Name != YanetConfigName {
+		return fmt.Errorf("metadata.name must be %q for the cluster-wide YanetConfigV2 singleton", YanetConfigName)
+	}
+	return nil
 }
 
 // validateYanetConfig runs the full v2 model check: name uniqueness,
@@ -100,6 +113,9 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validateConfigSources(&spec.Components); err != nil {
 		return err
 	}
+	if err := validateBindings(&spec.Components); err != nil {
+		return err
+	}
 	if err := validateDisabledNuma(&spec.Components.Controlplane); err != nil {
 		return err
 	}
@@ -107,6 +123,150 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 		return err
 	}
 	return nil
+}
+
+func validateBindings(components *ComponentsSpec) error {
+	cp := &components.Controlplane
+	if err := validateComponentBinding(
+		"spec.components.controlplane", cp.Bind, cp.Service, cp.GRPCPort, cp.HTTPPort,
+	); err != nil {
+		return err
+	}
+
+	if components.BirdAdapter != nil {
+		component := components.BirdAdapter
+		if err := validateComponentBinding(
+			"spec.components.birdAdapter", component.Bind, component.Service, component.Port,
+		); err != nil {
+			return err
+		}
+	}
+	if components.Announcer != nil {
+		component := components.Announcer
+		if err := validateComponentBinding(
+			"spec.components.announcer", component.Bind, component.Service, component.Port,
+		); err != nil {
+			return err
+		}
+	}
+
+	for i := range components.Operators {
+		op := &components.Operators[i]
+		path := fmt.Sprintf("spec.components.operators[%d:%s]", i, op.Name)
+		binds := []*BindSpec{op.Bind}
+		for j := range op.Containers {
+			binds = append(binds, op.Containers[j].Bind)
+		}
+		if serviceEnabled(op.Service) && !anyBindConfigured(binds...) {
+			return fmt.Errorf("%s.service.enabled requires a non-empty bind override", path)
+		}
+		if err := validateServicePorts(path, op.Service, op.Port); err != nil {
+			return err
+		}
+		if err := validateBindSpec(path+".bind", op.Bind, op.Service, op.Port); err != nil {
+			return err
+		}
+		for j := range op.Containers {
+			container := &op.Containers[j]
+			containerPath := fmt.Sprintf("%s.containers[%d:%s].bind", path, j, container.Name)
+			if err := validateBindSpec(containerPath, container.Bind, op.Service, op.Port); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateComponentBinding(
+	path string,
+	bind *BindSpec,
+	service *ServiceSpec,
+	ports ...int32,
+) error {
+	if serviceEnabled(service) && !anyBindConfigured(bind) {
+		return fmt.Errorf("%s.service.enabled requires a non-empty bind override", path)
+	}
+	if err := validateServicePorts(path, service, ports...); err != nil {
+		return err
+	}
+	return validateBindSpec(path+".bind", bind, service, ports...)
+}
+
+func validateServicePorts(path string, service *ServiceSpec, ports ...int32) error {
+	if service != nil && service.ServiceName != "" {
+		if errs := k8svalidation.IsDNS1035Label(service.ServiceName); len(errs) > 0 {
+			return fmt.Errorf("%s.service.serviceName %q is invalid: %s", path, service.ServiceName, strings.Join(errs, "; "))
+		}
+	}
+	if !serviceEnabled(service) {
+		return nil
+	}
+	for _, port := range ports {
+		if port <= 0 || port > 65535 {
+			return fmt.Errorf("%s.service.enabled requires service ports in 1..65535, got %d", path, port)
+		}
+	}
+	if len(ports) > 1 && ports[0] == ports[1] {
+		return fmt.Errorf("%s.grpcPort and %s.httpPort must be different", path, path)
+	}
+	return nil
+}
+
+func validateBindSpec(path string, bind *BindSpec, service *ServiceSpec, servicePorts ...int32) error {
+	if bind == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(bind.Env))
+	ports := make(map[int32]struct{}, len(servicePorts))
+	for _, port := range servicePorts {
+		ports[port] = struct{}{}
+	}
+	for i := range bind.Env {
+		env := &bind.Env[i]
+		envPath := fmt.Sprintf("%s.env[%d]", path, i)
+		if strings.TrimSpace(env.Key) == "" {
+			return fmt.Errorf("%s.key is empty", envPath)
+		}
+		if errs := k8svalidation.IsEnvVarName(env.Key); len(errs) > 0 {
+			return fmt.Errorf("%s.key %q is invalid: %s", envPath, env.Key, strings.Join(errs, "; "))
+		}
+		if _, duplicate := seen[env.Key]; duplicate {
+			return fmt.Errorf("%s.key %q is duplicated", envPath, env.Key)
+		}
+		seen[env.Key] = struct{}{}
+
+		valueSet := env.Value != nil
+		serviceSet := env.Service != nil
+		if valueSet == serviceSet {
+			return fmt.Errorf("%s must define exactly one of value or service", envPath)
+		}
+		if !serviceSet {
+			continue
+		}
+		if !serviceEnabled(service) {
+			return fmt.Errorf("%s.service requires service.enabled for the same component", envPath)
+		}
+		if env.Service.Port <= 0 || env.Service.Port > 65535 {
+			return fmt.Errorf("%s.service.port must be in 1..65535, got %d", envPath, env.Service.Port)
+		}
+		if _, exposed := ports[env.Service.Port]; !exposed {
+			return fmt.Errorf("%s.service.port %d is not exposed by the component Service", envPath, env.Service.Port)
+		}
+	}
+	return nil
+}
+
+func serviceEnabled(service *ServiceSpec) bool {
+	return service != nil && service.Enabled
+}
+
+func anyBindConfigured(binds ...*BindSpec) bool {
+	for _, bind := range binds {
+		if bind != nil && len(bind.Env) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func validateConfigSources(components *ComponentsSpec) error {
@@ -322,20 +482,29 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 	return nil
 }
 
-// validatePortRanges checks that the listen-port intervals of the
-// declared components do not overlap. The controlplane occupies
-// Port..Port+PortRange-1 (per-NUMA fan-out); every other component
-// occupies a single Port. A Port of 0 means the component has no
-// listener and is skipped.
+// validatePortRanges validates each declared listener independently. Ports may
+// overlap across components because each Deployment normally has its own Pod
+// network namespace; this is also what allows every operator Service to expose
+// the same conventional port.
 func validatePortRanges(comps *ComponentsSpec) error {
-	type interval struct {
-		path     string
-		from, to int32 // inclusive
-	}
-
 	cp := comps.Controlplane
-	if cp.Port < 0 || cp.Port > 65535 {
-		return fmt.Errorf("spec.components.controlplane.port must be in 0..65535, got %d", cp.Port)
+	validate := func(path string, port int32) error {
+		if port < 0 || port > 65535 {
+			return fmt.Errorf("%s must be in 0..65535, got %d", path, port)
+		}
+		return nil
+	}
+	if err := validate("spec.components.controlplane.port", cp.Port); err != nil {
+		return err
+	}
+	if err := validate("spec.components.controlplane.grpcPort", cp.GRPCPort); err != nil {
+		return err
+	}
+	if err := validate("spec.components.controlplane.httpPort", cp.HTTPPort); err != nil {
+		return err
+	}
+	if cp.GRPCPort > 0 && cp.GRPCPort == cp.HTTPPort {
+		return fmt.Errorf("spec.components.controlplane.grpcPort and spec.components.controlplane.httpPort must be different")
 	}
 	if cp.PortRange < 0 {
 		return fmt.Errorf("spec.components.controlplane.portRange must be >= 0, got %d", cp.PortRange)
@@ -345,61 +514,28 @@ func validatePortRanges(comps *ComponentsSpec) error {
 			cp.Port, int64(cp.Port)+int64(cp.PortRange)-1)
 	}
 
-	var intervals []interval
-	if cp.Port > 0 {
-		end := cp.Port
-		if cp.PortRange > 1 {
-			end = cp.Port + cp.PortRange - 1
-		}
-		intervals = append(intervals, interval{
-			path: "spec.components.controlplane",
-			from: cp.Port, to: end,
-		})
-	}
-	add := func(path string, port int32) error {
-		if port == 0 {
-			return nil
-		}
-		if port < 0 || port > 65535 {
-			return fmt.Errorf("%s.port must be in 0..65535, got %d", path, port)
-		}
-		intervals = append(intervals, interval{path: path, from: port, to: port})
-		return nil
-	}
-	if err := add("spec.components.dataplane", comps.Dataplane.Port); err != nil {
+	if err := validate("spec.components.dataplane.port", comps.Dataplane.Port); err != nil {
 		return err
 	}
 	if comps.Bird != nil {
-		if err := add("spec.components.bird", comps.Bird.Port); err != nil {
+		if err := validate("spec.components.bird.port", comps.Bird.Port); err != nil {
 			return err
 		}
 	}
 	if comps.BirdAdapter != nil {
-		if err := add("spec.components.birdAdapter", comps.BirdAdapter.Port); err != nil {
+		if err := validate("spec.components.birdAdapter.port", comps.BirdAdapter.Port); err != nil {
 			return err
 		}
 	}
 	if comps.Announcer != nil {
-		if err := add("spec.components.announcer", comps.Announcer.Port); err != nil {
+		if err := validate("spec.components.announcer.port", comps.Announcer.Port); err != nil {
 			return err
 		}
 	}
 	for i := range comps.Operators {
 		op := &comps.Operators[i]
-		if err := add(fmt.Sprintf("spec.components.operators[%s]", op.Name), op.Port); err != nil {
+		if err := validate(fmt.Sprintf("spec.components.operators[%s].port", op.Name), op.Port); err != nil {
 			return err
-		}
-	}
-
-	// O(n^2) but n is tiny (≤5+operators).
-	for i := range intervals {
-		a := intervals[i]
-		for j := i + 1; j < len(intervals); j++ {
-			b := intervals[j]
-			if a.from <= b.to && b.from <= a.to {
-				return fmt.Errorf("port overlap between %s (%d..%d) and %s (%d..%d)",
-					a.path, a.from, a.to, b.path, b.from, b.to)
-			}
 		}
 	}
 	return nil

@@ -373,7 +373,7 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 		Build()
 	r := &YanetV2Reconciler{Client: cl, Scheme: s}
 
-	state, requeue := r.applyDeploymentV2(
+	state, requeue, err := r.applyDeploymentV2(
 		context.Background(),
 		desired.DeepCopy(),
 		true, // autoSync
@@ -381,6 +381,9 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 		"node-A",
 		silentLogger(),
 	)
+	if err != nil {
+		t.Fatalf("applyDeploymentV2: %v", err)
+	}
 	if state != "synced" {
 		t.Errorf("state=%q want synced (requeue=%v)", state, requeue)
 	}
@@ -397,6 +400,64 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 	if got.Labels["sidecar.istio.io/inject"] != "true" {
 		t.Errorf("foreign label dropped (R9 regression): %v", got.Labels)
 	}
+}
+
+func TestReconcileYanetV2_PruneFailureReturnsErrorAndDegrades(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", AutoSync: &autoSync,
+		},
+	}
+	orphan := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orphan", Namespace: "yanet",
+			Labels: map[string]string{manifests.LabelYanet: yanet.Name},
+		},
+	}
+	s := newSchemeForTest(t)
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(yanet, orphan).
+		WithStatusSubresource(&yanetv2alpha1.YanetV2{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == orphan.Name {
+					return errConflict("transient delete failure")
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &YanetV2Reconciler{
+		Client: cl,
+		Scheme: s,
+		GlobalConfigV2: &yanetv2alpha1.MutexYanetConfigSpec{
+			Config: minimalConfigV2(),
+		},
+	}
+
+	result, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "prune orphans") {
+		t.Fatalf("prune failure must be returned, got result=%+v err=%v", result, err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("prune failure must request a retry, got %+v", result)
+	}
+
+	got := &yanetv2alpha1.YanetV2{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: yanet.Name, Namespace: yanet.Namespace}, got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	for _, condition := range got.Status.Conditions {
+		if condition.Type == "Degraded" && condition.Status == metav1.ConditionTrue && condition.Reason == "ReconcileFailed" {
+			return
+		}
+	}
+	t.Fatalf("prune failure was not reflected in status: %+v", got.Status.Conditions)
 }
 
 // TestApplyServiceV2_RefusesEmptyPorts ensures the R15 guard prevents
@@ -425,8 +486,8 @@ func TestApplyServiceV2_RefusesEmptyPorts(t *testing.T) {
 	rec := events.NewFakeRecorder(8)
 	r := &YanetV2Reconciler{Client: cl, Scheme: s, Recorder: rec}
 
-	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err != nil {
-		t.Fatalf("applyServiceV2 must not bubble error: %v", err)
+	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err == nil {
+		t.Fatal("applyServiceV2 must report an empty-ports builder error")
 	}
 	got := &corev1.Service{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, got); err != nil {
@@ -468,8 +529,8 @@ func TestApplyServiceV2_RefusesEmptySelector(t *testing.T) {
 	rec := events.NewFakeRecorder(8)
 	r := &YanetV2Reconciler{Client: cl, Scheme: s, Recorder: rec}
 
-	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err != nil {
-		t.Fatalf("applyServiceV2 must not bubble error: %v", err)
+	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err == nil {
+		t.Fatal("applyServiceV2 must report an empty-selector builder error")
 	}
 	got := &corev1.Service{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, got); err != nil {
@@ -477,6 +538,44 @@ func TestApplyServiceV2_RefusesEmptySelector(t *testing.T) {
 	}
 	if len(got.Spec.Selector) != 1 {
 		t.Errorf("existing Selector must remain, got %v", got.Spec.Selector)
+	}
+}
+
+func TestApplyServiceV2_RefusesForeignService(t *testing.T) {
+	existing := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "yanet"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "foreign"},
+			Ports:    []corev1.ServicePort{{Name: "grpc", Port: 9000}},
+		},
+	}
+	controller := true
+	desired := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shared", Namespace: "yanet",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "yanet.yanet-platform.io/v2alpha1", Kind: "YanetV2",
+				Name: "edge", UID: "edge-uid", Controller: &controller,
+			}},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "route"},
+			Ports:    []corev1.ServicePort{{Name: "grpc", Port: 9000}},
+		},
+	}
+	s := newSchemeForTest(t)
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+	r := &YanetV2Reconciler{Client: cl, Scheme: s}
+
+	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err == nil {
+		t.Fatal("a Service without this YanetV2 owner must not be taken over")
+	}
+	got := &corev1.Service{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "shared", Namespace: "yanet"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.Selector["app"] != "foreign" {
+		t.Fatalf("foreign Service was overwritten: %+v", got.Spec.Selector)
 	}
 }
 
