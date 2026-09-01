@@ -8,10 +8,8 @@ spec:
   components:
     controlplane:
       image: {name: controlplane, tag: test}
-      port: 8080
     dataplane:
       image: {name: dataplane, tag: test}
-      port: 8090
   boxTypes:
     - name: release
       components:

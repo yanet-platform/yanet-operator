@@ -20,11 +20,15 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
@@ -45,6 +49,9 @@ type YanetConfigReconcilerV2 struct {
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2/finalizers,verbs=update
+//+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetsv2,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile updates the singleton in-memory snapshot whenever the
 // cluster-scoped YanetConfigV2 changes.
@@ -66,6 +73,14 @@ func (r *YanetConfigReconcilerV2) Reconcile(ctx context.Context, req ctrl.Reques
 		"patches", len(cfg.Spec.Patches),
 		"operators", len(cfg.Spec.Components.Operators),
 	)
+	if cfg.Spec.Stop {
+		logger.Info("YanetConfigV2.spec.stop is true, skipping shared Service reconcile")
+		return ctrl.Result{}, nil
+	}
+	if err := r.reconcileSharedServicesV2(ctx, cfg, logger); err != nil {
+		logger.Error(err, "failed to reconcile shared Services")
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -109,5 +124,14 @@ func (r *YanetConfigReconcilerV2) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("yanetconfig-v2alpha1").
 		For(&yanetv2alpha1.YanetConfigV2{}).
+		Watches(&yanetv2alpha1.YanetV2{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigV2Singleton)).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigV2Singleton)).
+		Owns(&corev1.Service{}).
 		Complete(r)
+}
+
+func enqueueYanetConfigV2Singleton(context.Context, client.Object) []reconcile.Request {
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: yanetv2alpha1.YanetConfigName},
+	}}
 }

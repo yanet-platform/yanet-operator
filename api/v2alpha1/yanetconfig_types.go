@@ -50,6 +50,14 @@ type YanetConfigSpec struct {
 	// +optional
 	UpdateWindow int `json:"updateWindow,omitempty"`
 
+	// HostNetworkPortRange is the inclusive range used for application
+	// listeners in workloads whose final patched PodSpec has hostNetwork=true.
+	// Service ports stay fixed; only their per-Pod target ports are allocated
+	// from this range. The field may be omitted when no service-backed workload
+	// uses the host network.
+	// +optional
+	HostNetworkPortRange *HostNetworkPortRange `json:"hostNetworkPortRange,omitempty"`
+
 	// AutoDiscovery configures the optional new-worker initializer
 	// (carried over from v1alpha1 verbatim, untyped here).
 	// +optional
@@ -75,6 +83,22 @@ type YanetConfigSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	BoxTypes []BoxType `json:"boxTypes"`
+}
+
+// HostNetworkPortRange bounds deterministic per-node listener allocation for
+// service-backed host-network workloads.
+type HostNetworkPortRange struct {
+	// Start is the first port in the inclusive range.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Start int32 `json:"start"`
+
+	// End is the last port in the inclusive range.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	End int32 `json:"end"`
 }
 
 // ImagesSpec describes global image settings.
@@ -124,92 +148,16 @@ type ComponentsSpec struct {
 	Announcer *AnnouncerComp `json:"announcer,omitempty"`
 
 	// Operators are dynamic, keyed by Name. Each is rendered as one
-	// Deployment + (optional) Service.
+	// Deployment and one Service.
 	// +optional
 	Operators []OperatorSpec `json:"operators,omitempty"`
 }
 
-// BindSpec describes environment variables used to override component
-// configuration. Each entry is either a literal value or a reference to the
-// Service generated for the same component.
-type BindSpec struct {
-	// +optional
-	Env []BindEnv `json:"env,omitempty"`
-}
-
-// BindEnv describes one environment variable injected into a component
-// container.
-type BindEnv struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Key string `json:"key"`
-
-	// Value is injected verbatim. A pointer preserves the distinction between
-	// an omitted value and an explicitly configured empty string.
-	// +optional
-	Value *string `json:"value,omitempty"`
-
-	// Service renders the stable FQDN of the Service generated for this
-	// component, followed by Port.
-	// +optional
-	Service *ServiceRef `json:"service,omitempty"`
-}
-
-// ServiceRef selects a port exposed by the Service generated for the same
-// component.
-type ServiceRef struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
-}
-
-// ServiceSpec controls whether the operator generates a stable ClusterIP
-// Service for a component.
-type ServiceSpec struct {
-	// +kubebuilder:default=false
-	// +optional
-	Enabled bool `json:"enabled,omitempty"`
-
-	// ServiceName overrides the default <yanet>-<component> resource name. It is
-	// used verbatim and must be unique in the YanetV2 namespace. For controlplane
-	// it is used as the base of <serviceName>-numa<N>.
-	// +optional
-	ServiceName string `json:"serviceName,omitempty"`
-}
-
 // ControlplaneSpec describes the controlplane component. Multi-NUMA nodes get
-// one Deployment and, when enabled, one stable Service per NUMA domain.
+// one Deployment and one stable Service per NUMA domain.
 type ControlplaneSpec struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
-
-	// Port is the legacy single-port controlplane configuration. New configs
-	// should use GRPCPort and HTTPPort.
-	// +optional
-	Port int32 `json:"port,omitempty"`
-
-	// PortRange is the legacy upper bound for Port-based NUMA fan-out.
-	// +optional
-	PortRange int32 `json:"portRange,omitempty"`
-
-	// GRPCPort is the gateway gRPC port used by every NUMA instance when an
-	// explicit Service is enabled.
-	// +optional
-	GRPCPort int32 `json:"grpcPort,omitempty"`
-
-	// HTTPPort is the gateway HTTP port used by every NUMA instance when an
-	// explicit Service is enabled.
-	// +optional
-	HTTPPort int32 `json:"httpPort,omitempty"`
-
-	// Bind defines temporary environment overrides for the component config.
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
-
-	// Service controls generation of per-NUMA Services.
-	// +optional
-	Service *ServiceSpec `json:"service,omitempty"`
 
 	// Config is the configuration source (inline | hostPath | url).
 	// +optional
@@ -245,9 +193,6 @@ type DataplaneSpec struct {
 	Image ImageRef `json:"image"`
 
 	// +optional
-	Port int32 `json:"port,omitempty"`
-
-	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 
 	// Hugepages requested by the Pod.
@@ -263,9 +208,6 @@ type DataplaneSpec struct {
 type BirdComponent struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
-	// Port is the BGP port. Default 179.
-	// +optional
-	Port int32 `json:"port,omitempty"`
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 }
@@ -274,13 +216,6 @@ type BirdComponent struct {
 type BirdAdapterComp struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
-	// Port is the gRPC listen port of the adapter.
-	// +optional
-	Port int32 `json:"port,omitempty"`
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
-	// +optional
-	Service *ServiceSpec `json:"service,omitempty"`
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 }
@@ -289,12 +224,6 @@ type BirdAdapterComp struct {
 type AnnouncerComp struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
-	// +optional
-	Port int32 `json:"port,omitempty"`
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
-	// +optional
-	Service *ServiceSpec `json:"service,omitempty"`
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 }
@@ -336,24 +265,11 @@ func (h *Hugepages) TotalQuantity() (resource.Quantity, error) {
 // OperatorSpec describes one dynamic operator. The whole Pod is
 // rendered as a single Deployment.
 type OperatorSpec struct {
-	// Name is unique within the Operators array. It is used as the
-	// component label and default container name.
+	// Name is unique within the Operators array. It is used as the component
+	// label and default container name. Built-in component names are reserved.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
-
-	// Port is the primary container listener and explicit Service port.
-	// +optional
-	Port int32 `json:"port,omitempty"`
-
-	// Bind is inherited by every container. Container-level entries with the
-	// same key override these values.
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
-
-	// Service controls generation of the operator Service.
-	// +optional
-	Service *ServiceSpec `json:"service,omitempty"`
 
 	// Containers lists the containers of the Pod. At least one is
 	// required.
@@ -379,11 +295,6 @@ type OperatorContainer struct {
 	// Config is the configuration source for this container.
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
-
-	// Bind augments the operator-level bind block. Entries are merged by key,
-	// with this container-level value taking precedence.
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
 
 	// HostIPC, when true, requests host IPC namespace for the whole
 	// Pod. Pod-level hostIPC=true is set if any container in the

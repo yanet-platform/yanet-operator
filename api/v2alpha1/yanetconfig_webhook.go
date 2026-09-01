@@ -104,16 +104,13 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validateBoxTypeRefs(spec); err != nil {
 		return err
 	}
-	if err := validatePortRanges(&spec.Components); err != nil {
+	if err := validateHostNetworkPortRange(spec.HostNetworkPortRange); err != nil {
 		return err
 	}
 	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
 		return err
 	}
 	if err := validateConfigSources(&spec.Components); err != nil {
-		return err
-	}
-	if err := validateBindings(&spec.Components); err != nil {
 		return err
 	}
 	if err := validateDisabledNuma(&spec.Components.Controlplane); err != nil {
@@ -123,150 +120,6 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 		return err
 	}
 	return nil
-}
-
-func validateBindings(components *ComponentsSpec) error {
-	cp := &components.Controlplane
-	if err := validateComponentBinding(
-		"spec.components.controlplane", cp.Bind, cp.Service, cp.GRPCPort, cp.HTTPPort,
-	); err != nil {
-		return err
-	}
-
-	if components.BirdAdapter != nil {
-		component := components.BirdAdapter
-		if err := validateComponentBinding(
-			"spec.components.birdAdapter", component.Bind, component.Service, component.Port,
-		); err != nil {
-			return err
-		}
-	}
-	if components.Announcer != nil {
-		component := components.Announcer
-		if err := validateComponentBinding(
-			"spec.components.announcer", component.Bind, component.Service, component.Port,
-		); err != nil {
-			return err
-		}
-	}
-
-	for i := range components.Operators {
-		op := &components.Operators[i]
-		path := fmt.Sprintf("spec.components.operators[%d:%s]", i, op.Name)
-		binds := []*BindSpec{op.Bind}
-		for j := range op.Containers {
-			binds = append(binds, op.Containers[j].Bind)
-		}
-		if serviceEnabled(op.Service) && !anyBindConfigured(binds...) {
-			return fmt.Errorf("%s.service.enabled requires a non-empty bind override", path)
-		}
-		if err := validateServicePorts(path, op.Service, op.Port); err != nil {
-			return err
-		}
-		if err := validateBindSpec(path+".bind", op.Bind, op.Service, op.Port); err != nil {
-			return err
-		}
-		for j := range op.Containers {
-			container := &op.Containers[j]
-			containerPath := fmt.Sprintf("%s.containers[%d:%s].bind", path, j, container.Name)
-			if err := validateBindSpec(containerPath, container.Bind, op.Service, op.Port); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func validateComponentBinding(
-	path string,
-	bind *BindSpec,
-	service *ServiceSpec,
-	ports ...int32,
-) error {
-	if serviceEnabled(service) && !anyBindConfigured(bind) {
-		return fmt.Errorf("%s.service.enabled requires a non-empty bind override", path)
-	}
-	if err := validateServicePorts(path, service, ports...); err != nil {
-		return err
-	}
-	return validateBindSpec(path+".bind", bind, service, ports...)
-}
-
-func validateServicePorts(path string, service *ServiceSpec, ports ...int32) error {
-	if service != nil && service.ServiceName != "" {
-		if errs := k8svalidation.IsDNS1035Label(service.ServiceName); len(errs) > 0 {
-			return fmt.Errorf("%s.service.serviceName %q is invalid: %s", path, service.ServiceName, strings.Join(errs, "; "))
-		}
-	}
-	if !serviceEnabled(service) {
-		return nil
-	}
-	for _, port := range ports {
-		if port <= 0 || port > 65535 {
-			return fmt.Errorf("%s.service.enabled requires service ports in 1..65535, got %d", path, port)
-		}
-	}
-	if len(ports) > 1 && ports[0] == ports[1] {
-		return fmt.Errorf("%s.grpcPort and %s.httpPort must be different", path, path)
-	}
-	return nil
-}
-
-func validateBindSpec(path string, bind *BindSpec, service *ServiceSpec, servicePorts ...int32) error {
-	if bind == nil {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(bind.Env))
-	ports := make(map[int32]struct{}, len(servicePorts))
-	for _, port := range servicePorts {
-		ports[port] = struct{}{}
-	}
-	for i := range bind.Env {
-		env := &bind.Env[i]
-		envPath := fmt.Sprintf("%s.env[%d]", path, i)
-		if strings.TrimSpace(env.Key) == "" {
-			return fmt.Errorf("%s.key is empty", envPath)
-		}
-		if errs := k8svalidation.IsEnvVarName(env.Key); len(errs) > 0 {
-			return fmt.Errorf("%s.key %q is invalid: %s", envPath, env.Key, strings.Join(errs, "; "))
-		}
-		if _, duplicate := seen[env.Key]; duplicate {
-			return fmt.Errorf("%s.key %q is duplicated", envPath, env.Key)
-		}
-		seen[env.Key] = struct{}{}
-
-		valueSet := env.Value != nil
-		serviceSet := env.Service != nil
-		if valueSet == serviceSet {
-			return fmt.Errorf("%s must define exactly one of value or service", envPath)
-		}
-		if !serviceSet {
-			continue
-		}
-		if !serviceEnabled(service) {
-			return fmt.Errorf("%s.service requires service.enabled for the same component", envPath)
-		}
-		if env.Service.Port <= 0 || env.Service.Port > 65535 {
-			return fmt.Errorf("%s.service.port must be in 1..65535, got %d", envPath, env.Service.Port)
-		}
-		if _, exposed := ports[env.Service.Port]; !exposed {
-			return fmt.Errorf("%s.service.port %d is not exposed by the component Service", envPath, env.Service.Port)
-		}
-	}
-	return nil
-}
-
-func serviceEnabled(service *ServiceSpec) bool {
-	return service != nil && service.Enabled
-}
-
-func anyBindConfigured(binds ...*BindSpec) bool {
-	for _, bind := range binds {
-		if bind != nil && len(bind.Env) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func validateConfigSources(components *ComponentsSpec) error {
@@ -379,11 +232,21 @@ func validatePatchUniqueness(patches []NamedPatch) error {
 }
 
 func validateOperatorUniqueness(ops []OperatorSpec) error {
+	reservedNames := map[string]struct{}{
+		"controlplane": {},
+		"dataplane":    {},
+		"bird":         {},
+		"bird-adapter": {},
+		"announcer":    {},
+	}
 	seen := make(map[string]struct{}, len(ops))
 	for i := range ops {
 		name := ops[i].Name
 		if name == "" {
 			return fmt.Errorf("spec.components.operators[%d].name is empty", i)
+		}
+		if _, reserved := reservedNames[name]; reserved {
+			return fmt.Errorf("spec.components.operators[%d].name %q is reserved for a built-in component", i, name)
 		}
 		if _, dup := seen[name]; dup {
 			return fmt.Errorf("spec.components.operators[%d].name %q is duplicated", i, name)
@@ -411,6 +274,9 @@ func validateBoxTypeUniqueness(boxes []BoxType) error {
 		name := boxes[i].Name
 		if name == "" {
 			return fmt.Errorf("spec.boxTypes[%d].name is empty", i)
+		}
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("spec.boxTypes[%d].name %q is invalid: %s", i, name, strings.Join(errs, "; "))
 		}
 		if _, dup := seen[name]; dup {
 			return fmt.Errorf("spec.boxTypes[%d].name %q is duplicated", i, name)
@@ -482,61 +348,22 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 	return nil
 }
 
-// validatePortRanges validates each declared listener independently. Ports may
-// overlap across components because each Deployment normally has its own Pod
-// network namespace; this is also what allows every operator Service to expose
-// the same conventional port.
-func validatePortRanges(comps *ComponentsSpec) error {
-	cp := comps.Controlplane
-	validate := func(path string, port int32) error {
-		if port < 0 || port > 65535 {
-			return fmt.Errorf("%s must be in 0..65535, got %d", path, port)
-		}
+func validateHostNetworkPortRange(portRange *HostNetworkPortRange) error {
+	if portRange == nil {
 		return nil
 	}
-	if err := validate("spec.components.controlplane.port", cp.Port); err != nil {
-		return err
+	if portRange.Start <= 0 || portRange.Start > 65535 {
+		return fmt.Errorf("spec.hostNetworkPortRange.start must be in 1..65535, got %d", portRange.Start)
 	}
-	if err := validate("spec.components.controlplane.grpcPort", cp.GRPCPort); err != nil {
-		return err
+	if portRange.End <= 0 || portRange.End > 65535 {
+		return fmt.Errorf("spec.hostNetworkPortRange.end must be in 1..65535, got %d", portRange.End)
 	}
-	if err := validate("spec.components.controlplane.httpPort", cp.HTTPPort); err != nil {
-		return err
-	}
-	if cp.GRPCPort > 0 && cp.GRPCPort == cp.HTTPPort {
-		return fmt.Errorf("spec.components.controlplane.grpcPort and spec.components.controlplane.httpPort must be different")
-	}
-	if cp.PortRange < 0 {
-		return fmt.Errorf("spec.components.controlplane.portRange must be >= 0, got %d", cp.PortRange)
-	}
-	if cp.Port > 0 && cp.PortRange > 0 && int64(cp.Port)+int64(cp.PortRange)-1 > 65535 {
-		return fmt.Errorf("spec.components.controlplane: port range %d..%d exceeds 65535",
-			cp.Port, int64(cp.Port)+int64(cp.PortRange)-1)
-	}
-
-	if err := validate("spec.components.dataplane.port", comps.Dataplane.Port); err != nil {
-		return err
-	}
-	if comps.Bird != nil {
-		if err := validate("spec.components.bird.port", comps.Bird.Port); err != nil {
-			return err
-		}
-	}
-	if comps.BirdAdapter != nil {
-		if err := validate("spec.components.birdAdapter.port", comps.BirdAdapter.Port); err != nil {
-			return err
-		}
-	}
-	if comps.Announcer != nil {
-		if err := validate("spec.components.announcer.port", comps.Announcer.Port); err != nil {
-			return err
-		}
-	}
-	for i := range comps.Operators {
-		op := &comps.Operators[i]
-		if err := validate(fmt.Sprintf("spec.components.operators[%s].port", op.Name), op.Port); err != nil {
-			return err
-		}
+	if portRange.Start > portRange.End {
+		return fmt.Errorf(
+			"spec.hostNetworkPortRange.start %d must not exceed end %d",
+			portRange.Start,
+			portRange.End,
+		)
 	}
 	return nil
 }

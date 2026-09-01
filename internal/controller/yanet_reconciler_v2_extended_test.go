@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -219,23 +220,20 @@ func TestReconcileV2_StopEnabled_SkipsReconcile(t *testing.T) {
 	cfg.Stop = true
 	snap.Config = cfg
 
-	// Install finalizer
-	if _, err := r.reconcileYanetV2(context.Background(), yanet); err != nil {
-		t.Fatalf("finalizer install: %v", err)
-	}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
-		t.Fatalf("re-get: %v", err)
-	}
-
-	// Reconcile with stop=true
 	result, err := r.reconcileYanetV2(context.Background(), yanet)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	// Verify no requeue
-	if result.RequeueAfter > 0 {
+	// Verify no requeue or finalizer write.
+	if result != (ctrl.Result{}) {
 		t.Errorf("expected no requeue when stop=true, got %+v", result)
+	}
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	if len(yanet.Finalizers) != 0 {
+		t.Fatalf("expected no finalizer write when stop=true, got %v", yanet.Finalizers)
 	}
 
 	// Verify no Deployments created
@@ -245,6 +243,40 @@ func TestReconcileV2_StopEnabled_SkipsReconcile(t *testing.T) {
 	}
 	if len(deps.Items) != 0 {
 		t.Errorf("expected 0 deployments when stop=true, got %d", len(deps.Items))
+	}
+}
+
+func TestReconcileV2_StopEnabled_FreezesDeletion(t *testing.T) {
+	now := metav1.Now()
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "y",
+			Namespace:         "yanet",
+			Finalizers:        []string{yanetFinalizer},
+			DeletionTimestamp: &now,
+		},
+	}
+	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "owned",
+		Namespace: "yanet",
+		Labels:    map[string]string{manifests.LabelYanet: "y"},
+	}}
+	r, snap := makeReconcilerEnv(t, yanet, deployment)
+	snap.Config = minimalConfigV2()
+	snap.Config.Stop = true
+
+	if result, err := r.reconcileYanetV2(context.Background(), yanet); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("stopped deletion reconcile = %+v, %v", result, err)
+	}
+	if err := r.Client.Get(context.Background(), client.ObjectKeyFromObject(deployment), &appsv1.Deployment{}); err != nil {
+		t.Fatalf("global stop must preserve owned Deployment during deletion: %v", err)
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Client.Get(context.Background(), client.ObjectKeyFromObject(yanet), got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	if len(got.Finalizers) != 1 || got.Finalizers[0] != yanetFinalizer {
+		t.Fatalf("global stop must preserve finalizer during deletion: %v", got.Finalizers)
 	}
 }
 
@@ -450,8 +482,8 @@ func TestUpdateWindow_Expired_NoThrottle(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestOrphanCleanup_MultipleResourceTypes verifies that pruneOrphans
-// correctly handles orphans across all three resource types
-// (Deployments, Services, ConfigMaps) in a single call.
+// correctly handles Deployment and ConfigMap orphans while leaving Services
+// to YanetConfigV2 reconciliation.
 func TestOrphanCleanup_MultipleResourceTypes(t *testing.T) {
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
@@ -500,17 +532,17 @@ func TestOrphanCleanup_MultipleResourceTypes(t *testing.T) {
 		t.Fatalf("prune: %v", err)
 	}
 
-	// Verify count includes all three orphans
-	if count != 3 {
-		t.Errorf("expected 3 orphans deleted (dep+svc+cm), got %d", count)
+	// Verify count includes only YanetV2-owned orphans.
+	if count != 2 {
+		t.Errorf("expected 2 orphans deleted (dep+cm), got %d", count)
 	}
 
 	// Verify orphans are deleted
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "orphan-dep", Namespace: "yanet"}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Errorf("orphan Deployment must be deleted")
 	}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "orphan-svc", Namespace: "yanet"}, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Errorf("orphan Service must be deleted")
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "orphan-svc", Namespace: "yanet"}, &corev1.Service{}); err != nil {
+		t.Errorf("Service must be left for YanetConfigV2 reconciliation: %v", err)
 	}
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "orphan-cm", Namespace: "yanet"}, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
 		t.Errorf("orphan ConfigMap must be deleted")
@@ -581,8 +613,8 @@ func TestOrphanCleanup_ForeignLabels_NotTouched(t *testing.T) {
 }
 
 // TestOrphanCleanup_EmptyDesiredSet_DeletesAll verifies that when
-// desired set is empty (e.g., during deletion), all owned resources
-// are deleted.
+// desired set is empty (e.g., during deletion), all YanetV2-owned resources
+// are deleted while Services are left for YanetConfigV2 reconciliation.
 func TestOrphanCleanup_EmptyDesiredSet_DeletesAll(t *testing.T) {
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
@@ -622,9 +654,9 @@ func TestOrphanCleanup_EmptyDesiredSet_DeletesAll(t *testing.T) {
 		t.Fatalf("prune: %v", err)
 	}
 
-	// Verify all resources were deleted
-	if count != 3 {
-		t.Errorf("expected 3 deletions (2 deps + 1 svc), got %d", count)
+	// Verify YanetV2-owned resources were deleted.
+	if count != 2 {
+		t.Errorf("expected 2 Deployment deletions, got %d", count)
 	}
 
 	// Verify resources are gone
@@ -634,8 +666,8 @@ func TestOrphanCleanup_EmptyDesiredSet_DeletesAll(t *testing.T) {
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "dep-2", Namespace: "yanet"}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Errorf("dep-2 must be deleted")
 	}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Errorf("svc must be deleted")
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, &corev1.Service{}); err != nil {
+		t.Errorf("Service must be left for YanetConfigV2 reconciliation: %v", err)
 	}
 }
 

@@ -80,7 +80,12 @@ The v2 configuration is supplied through `yanetconfigV2.spec`. The chart
 creates the cluster-scoped `YanetConfigV2` singleton with the fixed name
 `config`. Existing clusters with the older namespaced CRD must export the
 configuration and recreate the CRD before upgrading because Kubernetes cannot
-change a CRD's scope in place.
+change a CRD's scope in place. Recreate `config` manually, or let Helm create it
+by setting `yanetconfigV2`; the chart does not adopt an existing object.
+
+Chart-managed `yanetconfigV2` requires `webhook.failurePolicy: Ignore`. Helm
+creates normal resources before the post-install/post-upgrade webhook CA job;
+with `Fail`, manage the singleton separately after the webhook is ready.
 
 ## Values
 

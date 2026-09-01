@@ -22,15 +22,12 @@ spec:
   autoSync: true
 
   # The ONLY per-installation overrides are enabled, per-container image, and
-  # typed bind blocks. A bind override replaces the cluster-wide block.
-  # Everything broader (resources, securityContext, hostIPC, ...) lives in
-  # the YanetConfigV2 boxType/patches, or is emitted by the builder.
+  # controlplane disabledNuma. Runtime endpoints and everything broader
+  # (resources, securityContext, hostIPC, ...) live in YanetConfigV2 patches or
+  # are emitted by the builder.
   components:
     controlplane:
       enabled: true
-      bind:
-        env:
-          - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
       containers:
         controlplane:
           name: yanet-controlplane-director

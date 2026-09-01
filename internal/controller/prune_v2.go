@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-logr/logr"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
@@ -25,15 +26,61 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// pruneConflictingDeploymentsV2 removes only this installation's Deployments
+// from nodes won by another YanetV2. ConfigMaps are harmless and remain until a
+// later ordinary prune, while deleting the Deployments terminates conflicting
+// host-network Pods.
+func (r *YanetV2Reconciler) pruneConflictingDeploymentsV2(
+	ctx context.Context,
+	yanet *yanetv2alpha1.YanetV2,
+	nodeNames map[string]struct{},
+	logger logr.Logger,
+) error {
+	deployments := &appsv1.DeploymentList{}
+	if err := r.Client.List(
+		ctx,
+		deployments,
+		client.InNamespace(yanet.Namespace),
+		client.MatchingLabels{manifests.LabelYanet: yanet.Name},
+	); err != nil {
+		return fmt.Errorf("list conflicting Deployments: %w", err)
+	}
+	for index := range deployments.Items {
+		deployment := &deployments.Items[index]
+		if _, conflict := nodeNames[deployment.Labels[manifests.LabelNode]]; !conflict ||
+			!controlledByYanetV2(deployment, yanet) {
+			continue
+		}
+		logger.Info("deleting Deployment from node claimed by another YanetV2",
+			"deployment", deployment.Name,
+			"node", deployment.Labels[manifests.LabelNode],
+		)
+		if err := r.Client.Delete(ctx, deployment); err != nil && !isNotFoundOrGone(err) {
+			return fmt.Errorf("delete conflicting Deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
+		}
+		yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Inc()
+	}
+	return nil
+}
+
+func controlledByYanetV2(object client.Object, yanet *yanetv2alpha1.YanetV2) bool {
+	owner := metav1.GetControllerOf(object)
+	if owner == nil || owner.APIVersion != yanetv2alpha1.GroupVersion.String() ||
+		owner.Kind != "YanetV2" || owner.Name != yanet.Name {
+		return false
+	}
+	return yanet.UID == "" || owner.UID == yanet.UID
+}
 
 // desiredSet groups names of resources the reconciler intends to keep
 // for a single YanetV2 installation. Anything labelled as ours that is
 // NOT in this set is considered an orphan.
 type desiredSet struct {
 	Deployments map[string]struct{}
-	Services    map[string]struct{}
 	ConfigMaps  map[string]struct{}
 }
 
@@ -41,12 +88,11 @@ type desiredSet struct {
 func newDesiredSet() desiredSet {
 	return desiredSet{
 		Deployments: map[string]struct{}{},
-		Services:    map[string]struct{}{},
 		ConfigMaps:  map[string]struct{}{},
 	}
 }
 
-// pruneOrphans deletes every Deployment / Service / ConfigMap that
+// pruneOrphans deletes every Deployment or ConfigMap that
 //   - carries the LabelYanet=<yanet.Name> label, AND
 //   - is NOT present in the desired set.
 //
@@ -89,31 +135,6 @@ func (r *YanetV2Reconciler) pruneOrphans(
 		logger.Info("deleting orphan Deployment", "deployment", d.Name)
 		if err := r.Client.Delete(ctx, d); err != nil && !isNotFoundOrGone(err) {
 			logger.Error(err, "delete Deployment failed", "deployment", d.Name)
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-
-	// Services -------------------------------------------------
-	svcs := &corev1.ServiceList{}
-	if err := r.Client.List(ctx, svcs, ns, selector); err != nil {
-		return count, err
-	}
-	for i := range svcs.Items {
-		s := &svcs.Items[i]
-		if _, keep := desired.Services[s.Name]; keep {
-			continue
-		}
-		count++
-		if !autoSync {
-			logger.Info("orphan Service detected (autoSync=false, not deleting)",
-				"service", s.Name)
-			continue
-		}
-		logger.Info("deleting orphan Service", "service", s.Name)
-		if err := r.Client.Delete(ctx, s); err != nil && !isNotFoundOrGone(err) {
-			logger.Error(err, "delete Service failed", "service", s.Name)
 			if firstErr == nil {
 				firstErr = err
 			}

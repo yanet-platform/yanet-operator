@@ -27,19 +27,15 @@ import (
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
-// ServicePlan describes one Service the v2 reconciler should
-// reconcile. The reconciler converts each plan to a corev1.Service
-// via ToService() and runs CreateOrUpdate.
+// ServicePlan describes one box-type-wide Service reconciled by the
+// YanetConfigV2 controller.
 type ServicePlan struct {
-	Name string
-	// Selector is the final label selector for the installation, component,
-	// and optional NUMA index.
-	Selector map[string]string
-	Ports    []ServicePortPlan
-	// Local sets internalTrafficPolicy=Local. Used for per-node
-	// controlplane-numa{N} and per-operator Services to keep
-	// in-node calls in-node.
-	Local bool
+	Name      string
+	BoxType   string
+	Component string
+	Selector  map[string]string
+	Ports     []ServicePortPlan
+	Local     bool
 }
 
 // ServicePortPlan describes one named Service port.
@@ -51,10 +47,16 @@ type ServicePortPlan struct {
 }
 
 // Validate checks the fields that would otherwise be rejected by the
-// Kubernetes API after Deployments had already been updated.
+// Kubernetes API after workloads had already been updated.
 func (p ServicePlan) Validate() error {
 	if errs := k8svalidation.IsDNS1035Label(p.Name); len(errs) > 0 {
 		return fmt.Errorf("invalid Service name %q: %s", p.Name, strings.Join(errs, "; "))
+	}
+	if p.BoxType == "" {
+		return fmt.Errorf("Service %q has an empty box type", p.Name)
+	}
+	if p.Component == "" {
+		return fmt.Errorf("Service %q has an empty component", p.Name)
 	}
 	if len(p.Selector) == 0 {
 		return fmt.Errorf("Service %q has an empty selector", p.Name)
@@ -87,129 +89,105 @@ func (p ServicePlan) Validate() error {
 	return nil
 }
 
-// BuildServices returns the full set of ServicePlan objects for one
-// resolved component, given the build context.
-//
-// The reconciler aggregates plans across all components and nodes,
-// de-duplicates identical stable plans by Name, and creates/updates each one.
-func BuildServices(ctx BuildContextV2, c *helpers.ResolvedComponent) []ServicePlan {
-	if c == nil || !c.ServiceEnabled {
+// BuildServices returns the stable Service plans for one component. Services
+// are unconditional for every service-backed box slot, even when a particular
+// YanetV2 or NUMA workload is scaled to zero. Dataplane and BIRD intentionally
+// have no application Service.
+func BuildServices(ctx BuildContextV2, component *helpers.ResolvedComponent) []ServicePlan {
+	listeners := ListenerPorts(component)
+	if len(listeners) == 0 {
 		return nil
 	}
-	switch c.Kind {
-	case helpers.KindControlplane:
-		return buildControlplaneServices(ctx, c)
-	case helpers.KindOperator:
-		return buildOperatorServices(ctx, c)
-	default:
-		return buildSimpleServices(ctx, c)
+	if component.Kind != helpers.KindControlplane {
+		return []ServicePlan{buildServicePlan(ctx, component, nil, listeners)}
 	}
-}
 
-// buildControlplaneServices renders one stable Local Service per enabled NUMA
-// index. Every Service exposes the same gRPC and HTTP ports because the
-// controlplanes run in separate Pod network namespaces.
-func buildControlplaneServices(ctx BuildContextV2, c *helpers.ResolvedComponent) []ServicePlan {
-	if c.GRPCPort == 0 || c.HTTPPort == 0 {
-		return nil
-	}
-	numa := effectiveNuma(ctx, c)
-	disabled := disabledNumaSet(c)
-	plans := make([]ServicePlan, 0, int(numa))
-
-	for i := int32(0); i < numa; i++ {
-		if _, skip := disabled[i]; skip {
-			continue
-		}
-		plans = append(plans, ServicePlan{
-			Name: controlplaneServiceName(ctx, c, i),
-			Selector: map[string]string{
-				labelYanet:     ctx.YanetName,
-				labelComponent: c.Name,
-				"app":          c.Name,
-				labelNuma:      fmt.Sprintf("%d", i),
-			},
-			Ports: []ServicePortPlan{
-				{Name: "grpc", Port: c.GRPCPort, TargetPortName: "grpc"},
-				{Name: "http", Port: c.HTTPPort, TargetPortName: "http"},
-			},
-			Local: true,
-		})
+	numa := effectiveNuma(ctx, component)
+	plans := make([]ServicePlan, 0, numa)
+	for index := int32(0); index < numa; index++ {
+		index := index
+		plans = append(plans, buildServicePlan(ctx, component, &index, listeners))
 	}
 	return plans
 }
 
-// buildSimpleServices returns one Local ClusterIP Service for an explicitly
-// enabled single-port component.
-func buildSimpleServices(ctx BuildContextV2, c *helpers.ResolvedComponent) []ServicePlan {
-	if c.Port == 0 {
-		return nil
+func buildServicePlan(
+	ctx BuildContextV2,
+	component *helpers.ResolvedComponent,
+	numa *int32,
+	listeners []ListenerPort,
+) ServicePlan {
+	selector := map[string]string{
+		labelBoxType:   ctx.BoxType,
+		labelComponent: component.Name,
 	}
-	return []ServicePlan{{
-		Name: componentServiceName(ctx, c),
-		Selector: map[string]string{
-			labelYanet:     ctx.YanetName,
-			labelComponent: c.Name,
-			"app":          c.Name,
-		},
-		Ports: []ServicePortPlan{{
-			Name: defaultPortName(c.Kind), Port: c.Port, TargetPortName: defaultPortName(c.Kind),
-		}},
-		Local: true,
-	}}
-}
-
-// buildOperatorServices renders one Local ClusterIP Service for an explicitly
-// enabled operator.
-func buildOperatorServices(ctx BuildContextV2, c *helpers.ResolvedComponent) []ServicePlan {
-	if c.Port == 0 {
-		return nil
+	if numa != nil {
+		selector[labelNuma] = fmt.Sprintf("%d", *numa)
 	}
-	return []ServicePlan{{
-		Name: componentServiceName(ctx, c),
-		Selector: map[string]string{
-			labelYanet:     ctx.YanetName,
-			labelComponent: c.Name,
-			"app":          c.Name,
-		},
-		Ports: []ServicePortPlan{{Name: "grpc", Port: c.Port, TargetPortName: "grpc"}},
-		Local: true,
-	}}
-}
-
-func componentServiceName(ctx BuildContextV2, c *helpers.ResolvedComponent) string {
-	if c.ServiceName != "" {
-		return c.ServiceName
+	ports := make([]ServicePortPlan, 0, len(listeners))
+	for _, listener := range listeners {
+		ports = append(ports, ServicePortPlan{
+			Name:           listener.Name,
+			Port:           listener.ServicePort,
+			TargetPortName: listener.Name,
+		})
 	}
-	return fmt.Sprintf("%s-%s", ctx.YanetName, toLowerKebab(c.Name))
-}
-
-func controlplaneServiceName(ctx BuildContextV2, c *helpers.ResolvedComponent, numa int32) string {
-	return fmt.Sprintf("%s-numa%d", componentServiceName(ctx, c), numa)
-}
-
-func serviceEndpoint(ctx BuildContextV2, c *helpers.ResolvedComponent, numa *int32, port int32) string {
-	name := componentServiceName(ctx, c)
-	if c.Kind == helpers.KindControlplane && numa != nil {
-		name = controlplaneServiceName(ctx, c, *numa)
+	return ServicePlan{
+		Name:      SharedServiceName(ctx.BoxType, component.Name, numa),
+		BoxType:   ctx.BoxType,
+		Component: component.Name,
+		Selector:  selector,
+		Ports:     ports,
+		Local:     true,
 	}
-	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, ctx.Namespace, port)
 }
 
-// ToService materialises a ServicePlan into a corev1.Service ready
-// for CreateOrUpdate. Owner references are filled by the caller.
+// SharedServiceName returns the deterministic Service name for one box-type
+// component role. Names are readable until the Kubernetes limit requires a
+// stable hash suffix.
+func SharedServiceName(boxType, component string, numa *int32) string {
+	name := fmt.Sprintf("yanet-%s-%s", toLowerKebab(boxType), toLowerKebab(component))
+	if numa != nil {
+		name = fmt.Sprintf("%s-numa%d", name, *numa)
+	}
+	if len(name) <= 63 {
+		return name
+	}
+	const hashLength = 8
+	prefixLength := 63 - hashLength - 1
+	prefix := strings.TrimRight(name[:prefixLength], "-")
+	return fmt.Sprintf("%s-%s", prefix, shortHashStr(name))
+}
+
+// ToService materialises a ServicePlan into a corev1.Service. The shared
+// Service is owned by the cluster-scoped YanetConfigV2 singleton rather than a
+// particular YanetV2 installation.
 func (p ServicePlan) ToService(namespace string, owner metav1.OwnerReference) *corev1.Service {
-	svc := &corev1.Service{
+	labels := map[string]string{
+		labelSharedService: "true",
+		labelBoxType:       p.BoxType,
+		labelComponent:     p.Component,
+	}
+	if numa, ok := p.Selector[labelNuma]; ok {
+		labels[labelNuma] = numa
+	}
+	service := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Service",
 			APIVersion: corev1.SchemeGroupVersion.String(),
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            p.Name,
-			Namespace:       namespace,
-			OwnerReferences: []metav1.OwnerReference{owner},
+			Name:      p.Name,
+			Namespace: namespace,
+			Labels:    labels,
 		},
-		Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: p.Selector},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: p.Selector,
+		},
+	}
+	if owner.Name != "" {
+		service.OwnerReferences = []metav1.OwnerReference{owner}
 	}
 	for i := range p.Ports {
 		port := &p.Ports[i]
@@ -219,13 +197,16 @@ func (p ServicePlan) ToService(namespace string, owner metav1.OwnerReference) *c
 		} else if port.TargetPort == 0 {
 			targetPort = intstr.FromInt32(port.Port)
 		}
-		svc.Spec.Ports = append(svc.Spec.Ports, corev1.ServicePort{
-			Name: port.Name, Port: port.Port, Protocol: corev1.ProtocolTCP, TargetPort: targetPort,
+		service.Spec.Ports = append(service.Spec.Ports, corev1.ServicePort{
+			Name:       port.Name,
+			Port:       port.Port,
+			Protocol:   corev1.ProtocolTCP,
+			TargetPort: targetPort,
 		})
 	}
 	if p.Local {
 		policy := corev1.ServiceInternalTrafficPolicyLocal
-		svc.Spec.InternalTrafficPolicy = &policy
+		service.Spec.InternalTrafficPolicy = &policy
 	}
-	return svc
+	return service
 }

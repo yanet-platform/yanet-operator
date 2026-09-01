@@ -174,11 +174,9 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/dp", Tag: "v1"},
-							Port:  8081,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{

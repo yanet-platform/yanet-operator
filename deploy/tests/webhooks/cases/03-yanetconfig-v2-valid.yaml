@@ -8,25 +8,20 @@ metadata:
 spec:
   stop: false
   updateWindow: 60
+  hostNetworkPortRange: {start: 20000, end: 20100}
   images:
     registry: docker.io/test
   components:
     controlplane:
       image: {name: controlplane, tag: test}
-      port: 8080
-      portRange: 1
     dataplane:
       image: {name: dataplane, tag: test}
-      port: 8090
     bird:
       image: {name: bird, tag: test}
-      port: 179
     birdAdapter:
       image: {name: bird-adapter, tag: test}
-      port: 50052
     announcer:
       image: {name: announcer, tag: test}
-      port: 9090
   patches:
     - name: telegraf
       patch:

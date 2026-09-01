@@ -39,7 +39,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
 // BuildContextV2 carries everything the v2 builder needs to render a
@@ -49,6 +48,8 @@ type BuildContextV2 struct {
 	YanetName string
 	// Namespace where Deployments will be created.
 	Namespace string
+	// BoxType is the shared service and endpoint identity selected by YanetV2.
+	BoxType string
 	// NodeName the Deployment is pinned to (via nodeSelector).
 	// May be empty for cluster-wide operator placement; when empty
 	// the builder falls back to YanetSpec.NodeSelector and skips
@@ -78,94 +79,38 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 	if c == nil {
 		return nil, fmt.Errorf("buildDeployments: nil ResolvedComponent")
 	}
-	if err := validateResolvedComponent(ctx, c); err != nil {
-		return nil, fmt.Errorf("buildDeployments: component %q: %w", c.Name, err)
-	}
 	if c.Hugepages != nil {
 		if _, err := c.Hugepages.TotalQuantity(); err != nil {
 			return nil, fmt.Errorf("buildDeployments: invalid hugepages for component %q: %w", c.Name, err)
 		}
 	}
 
+	var deployments []*appsv1.Deployment
+	var err error
 	switch c.Kind {
 	case helpers.KindControlplane:
-		return buildControlplaneFanout(ctx, c)
+		deployments, err = buildControlplaneFanout(ctx, c)
 	case helpers.KindOperator:
-		return []*appsv1.Deployment{buildOperator(ctx, c)}, nil
+		deployments = []*appsv1.Deployment{buildOperator(ctx, c)}
 	default:
-		return []*appsv1.Deployment{buildSingle(ctx, c)}, nil
+		deployments = []*appsv1.Deployment{buildSingle(ctx, c)}
 	}
+	if err != nil {
+		return nil, err
+	}
+	for _, deployment := range deployments {
+		if err := ConfigureListeners(deployment, c, nil); err != nil {
+			return nil, fmt.Errorf("buildDeployments: component %q: %w", c.Name, err)
+		}
+	}
+	return deployments, nil
 }
 
-func validateResolvedComponent(ctx BuildContextV2, c *helpers.ResolvedComponent) error {
-	servicePorts := map[int32]struct{}{c.Port: {}}
-	if c.Kind == helpers.KindControlplane {
-		servicePorts = map[int32]struct{}{c.GRPCPort: {}, c.HTTPPort: {}}
-	}
-
-	binds := []*yanetv2alpha1.BindSpec{c.Bind}
-	if c.Kind == helpers.KindOperator {
-		for i := range c.Containers {
-			binds = append(binds, c.Containers[i].Bind)
-		}
-	}
-	bindConfigured := false
-	for _, bind := range binds {
-		if bind == nil {
-			continue
-		}
-		if len(bind.Env) > 0 {
-			bindConfigured = true
-		}
-		seen := make(map[string]struct{}, len(bind.Env))
-		for i := range bind.Env {
-			env := &bind.Env[i]
-			if errs := k8svalidation.IsEnvVarName(env.Key); len(errs) > 0 {
-				return fmt.Errorf("bind.env[%d].key %q is invalid: %s", i, env.Key, strings.Join(errs, "; "))
-			}
-			if _, duplicate := seen[env.Key]; duplicate {
-				return fmt.Errorf("bind.env[%d].key %q is duplicated", i, env.Key)
-			}
-			seen[env.Key] = struct{}{}
-			if (env.Value != nil) == (env.Service != nil) {
-				return fmt.Errorf("bind.env[%d] must define exactly one of value or service", i)
-			}
-			if env.Service == nil {
-				continue
-			}
-			if !c.ServiceEnabled {
-				return fmt.Errorf("bind.env[%d].service requires service.enabled", i)
-			}
-			if _, exposed := servicePorts[env.Service.Port]; !exposed || env.Service.Port <= 0 {
-				return fmt.Errorf("bind.env[%d].service.port %d is not exposed by the component Service", i, env.Service.Port)
-			}
-		}
-	}
-	if c.ServiceEnabled && !bindConfigured {
-		return fmt.Errorf("service.enabled requires a non-empty bind override")
-	}
-	if c.ServiceEnabled {
-		plans := BuildServices(ctx, c)
-		if len(plans) == 0 {
-			return fmt.Errorf("service.enabled has no valid service ports")
-		}
-		for i := range plans {
-			if err := plans[i].Validate(); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// buildControlplaneFanout renders one Deployment per NUMA domain. Explicit
-// grpcPort/httpPort values are shared by every Pod; the legacy Port path keeps
-// its historical per-NUMA arithmetic until that field is removed.
+// buildControlplaneFanout renders one Deployment per NUMA domain.
 //
-// NUMA indices listed in DisabledNuma are skipped entirely: no
-// Deployment, no Service (see BuildServices). The usual reason is a
-// NUMA domain without a NIC, where the dataplane runs no instance and
-// a controlplane would have no peer to attach to.
+// NUMA indices listed in DisabledNuma are skipped for Deployments. Shared
+// Services remain unconditional so their DNS names do not appear and disappear
+// as installations are scaled or temporarily disabled.
 func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*appsv1.Deployment, error) {
 	numa := effectiveNuma(ctx, c)
 	disabled := disabledNumaSet(c)
@@ -180,24 +125,11 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		d.Labels[labelNuma] = fmt.Sprintf("%d", i)
 		d.Spec.Selector.MatchLabels[labelNuma] = fmt.Sprintf("%d", i)
 		d.Spec.Template.Labels[labelNuma] = fmt.Sprintf("%d", i)
-		// Explicit Service ports are identical in each Pod netns. The legacy
-		// single-Port path retains its historical Port+i behavior.
-		cont := &d.Spec.Template.Spec.Containers[0]
-		if c.GRPCPort > 0 || c.HTTPPort > 0 {
-			cont.Ports = controlplaneContainerPorts(c)
-		} else if c.Port > 0 {
-			port := c.Port + i
-			cont.Ports = []corev1.ContainerPort{{
-				Name:          "grpc",
-				ContainerPort: port,
-				Protocol:      corev1.ProtocolTCP,
-			}}
-		}
-		cont.Env = renderBindEnv(ctx, c, c.Bind, &i)
 		// Each instance gets its own config file: the controlplane
 		// reads gateway.instance_id and all endpoints from the file
 		// and accepts only `-c <path>`, so a shared file would make
 		// every instance serve dataplane instance 0.
+		cont := &d.Spec.Template.Spec.Containers[0]
 		cont.Args = numaConfigArgs(cont.Args, i)
 		out = append(out, d)
 	}
@@ -270,7 +202,8 @@ func numaDeploymentName(ctx BuildContextV2, c *helpers.ResolvedComponent, numa i
 // AND for one controlplane NUMA instance (the caller will rename it
 // after this).
 func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
-	labels := baseLabels(ctx, c)
+	selectorLabels := baseLabels(ctx, c)
+	labels := workloadLabels(ctx, selectorLabels)
 	volumes, volumeMounts, configMapName, configArgs := buildConfigVolumes(ctx, c)
 
 	container := corev1.Container{
@@ -280,17 +213,8 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		VolumeMounts:    volumeMounts,
 	}
 	container.Args = configArgs
-	if c.Kind == helpers.KindControlplane && (c.GRPCPort > 0 || c.HTTPPort > 0) {
-		container.Ports = controlplaneContainerPorts(c)
-	} else if c.Port > 0 {
-		container.Ports = []corev1.ContainerPort{{
-			Name:          defaultPortName(c.Kind),
-			ContainerPort: c.Port,
-			Protocol:      corev1.ProtocolTCP,
-		}}
-	}
-	if c.Kind != helpers.KindControlplane {
-		container.Env = renderBindEnv(ctx, c, c.Bind, nil)
+	if c.Kind == helpers.KindBird {
+		container.Ports = birdContainerPorts()
 	}
 	// Hugepages on dataplane.
 	if c.Hugepages != nil {
@@ -347,7 +271,8 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicasFor(c),
-			Selector: &metav1.LabelSelector{MatchLabels: copyMap(labels)},
+			Selector: &metav1.LabelSelector{MatchLabels: copyMap(selectorLabels)},
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: copyMap(labels)},
 				Spec:       pod,
@@ -371,7 +296,8 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 // treated as a shmem peer (agent): it gets the dataplane shmem arena
 // mounted at /dev/hugepages, like the controlplane.
 func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
-	labels := baseLabels(ctx, c)
+	selectorLabels := baseLabels(ctx, c)
+	labels := workloadLabels(ctx, selectorLabels)
 	pod := corev1.PodSpec{
 		ImagePullSecrets: ctx.PullSecrets,
 		NodeSelector:     nodeSelector(ctx),
@@ -385,16 +311,8 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 			Image:           rc.Image.FullPath(),
 			ImagePullPolicy: ctx.PullPolicy,
 			VolumeMounts:    mounts,
-			Env:             renderBindEnv(ctx, c, rc.Bind, nil),
 		}
 		container.Args = configArgs
-		if i == 0 && c.Port > 0 {
-			container.Ports = []corev1.ContainerPort{{
-				Name:          "grpc",
-				ContainerPort: c.Port,
-				Protocol:      corev1.ProtocolTCP,
-			}}
-		}
 		// A hostIPC container is a shmem peer (agent) → give it the arena.
 		if rc.HostIPC {
 			container.VolumeMounts = append(container.VolumeMounts, shmemMount())
@@ -421,7 +339,8 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicasFor(c),
-			Selector: &metav1.LabelSelector{MatchLabels: copyMap(labels)},
+			Selector: &metav1.LabelSelector{MatchLabels: copyMap(selectorLabels)},
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: copyMap(labels)},
 				Spec:       pod,
@@ -442,65 +361,23 @@ func singleDeploymentName(ctx BuildContextV2, c *helpers.ResolvedComponent) stri
 	return fmt.Sprintf("%s-%s", ctx.YanetName, toLowerKebab(c.Name))
 }
 
-func defaultPortName(kind helpers.ComponentKind) string {
-	switch kind {
-	case helpers.KindBird:
-		return "bgp"
-	case helpers.KindControlplane, helpers.KindBirdAdapter, helpers.KindAnnouncer:
-		return "grpc"
-	default:
-		return "main"
+func birdContainerPorts() []corev1.ContainerPort {
+	return []corev1.ContainerPort{
+		{Name: "bgp", ContainerPort: 179, Protocol: corev1.ProtocolTCP},
+		{Name: "bfd", ContainerPort: 3784, Protocol: corev1.ProtocolUDP},
+		{Name: "bfd-multihop", ContainerPort: 4784, Protocol: corev1.ProtocolUDP},
 	}
-}
-
-func controlplaneContainerPorts(c *helpers.ResolvedComponent) []corev1.ContainerPort {
-	ports := make([]corev1.ContainerPort, 0, 2)
-	if c.GRPCPort > 0 {
-		ports = append(ports, corev1.ContainerPort{
-			Name: "grpc", ContainerPort: c.GRPCPort, Protocol: corev1.ProtocolTCP,
-		})
-	}
-	if c.HTTPPort > 0 {
-		ports = append(ports, corev1.ContainerPort{
-			Name: "http", ContainerPort: c.HTTPPort, Protocol: corev1.ProtocolTCP,
-		})
-	}
-	return ports
-}
-
-func renderBindEnv(
-	ctx BuildContextV2,
-	c *helpers.ResolvedComponent,
-	bind *yanetv2alpha1.BindSpec,
-	numa *int32,
-) []corev1.EnvVar {
-	if bind == nil || len(bind.Env) == 0 {
-		return nil
-	}
-	env := make([]corev1.EnvVar, 0, len(bind.Env))
-	for i := range bind.Env {
-		entry := &bind.Env[i]
-		value := ""
-		switch {
-		case entry.Value != nil:
-			value = *entry.Value
-		case entry.Service != nil:
-			value = serviceEndpoint(ctx, c, numa, entry.Service.Port)
-		default:
-			continue
-		}
-		env = append(env, corev1.EnvVar{Name: entry.Key, Value: value})
-	}
-	return env
 }
 
 // -- labels -------------------------------------------------------------------
 
 const (
-	labelYanet     = "yanet.yanet-platform.io/yanet"
-	labelComponent = "yanet.yanet-platform.io/component"
-	labelNuma      = "yanet.yanet-platform.io/numa"
-	labelNode      = "yanet.yanet-platform.io/node"
+	labelYanet         = "yanet.yanet-platform.io/yanet"
+	labelBoxType       = "yanet.yanet-platform.io/box-type"
+	labelComponent     = "yanet.yanet-platform.io/component"
+	labelNuma          = "yanet.yanet-platform.io/numa"
+	labelNode          = "yanet.yanet-platform.io/node"
+	labelSharedService = "yanet.yanet-platform.io/shared-service"
 
 	annotationConfigMap = "yanet.yanet-platform.io/configmap"
 
@@ -520,6 +397,14 @@ func baseLabels(ctx BuildContextV2, c *helpers.ResolvedComponent) map[string]str
 	}
 	if ctx.NodeName != "" {
 		out[labelNode] = ctx.NodeName
+	}
+	return out
+}
+
+func workloadLabels(ctx BuildContextV2, selectorLabels map[string]string) map[string]string {
+	out := copyMap(selectorLabels)
+	if ctx.BoxType != "" {
+		out[labelBoxType] = ctx.BoxType
 	}
 	return out
 }

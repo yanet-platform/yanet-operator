@@ -62,7 +62,8 @@ func TestHandleYanetV2Deletion_NoFinalizer_ReturnsImmediately(t *testing.T) {
 
 // TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources verifies that
 // when the finalizer is present, handleYanetV2Deletion prunes all owned
-// resources and removes the finalizer.
+// resources and removes the finalizer. Shared Services are owned by
+// YanetConfigV2 and must not be deleted here.
 func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{
@@ -110,12 +111,12 @@ func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 		t.Errorf("expected no requeue after successful cleanup, got %+v", result)
 	}
 
-	// Verify all owned resources were deleted
+	// Verify YanetV2-owned resources were deleted.
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-dep", Namespace: "yanet"}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Errorf("owned Deployment must be deleted, got err=%v", err)
 	}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-svc", Namespace: "yanet"}, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Errorf("owned Service must be deleted, got err=%v", err)
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-svc", Namespace: "yanet"}, &corev1.Service{}); err != nil {
+		t.Errorf("Service must be left for YanetConfigV2 reconciliation, got err=%v", err)
 	}
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-cm", Namespace: "yanet"}, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
 		t.Errorf("owned ConfigMap must be deleted, got err=%v", err)

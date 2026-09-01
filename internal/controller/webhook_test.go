@@ -68,11 +68,9 @@ func minimalV2ConfigSpec() yanetv2alpha1.YanetConfigSpec {
 		Components: yanetv2alpha1.ComponentsSpec{
 			Controlplane: yanetv2alpha1.ControlplaneSpec{
 				Image: yanetv2alpha1.ImageRef{Name: "controlplane", Tag: "test"},
-				Port:  8080,
 			},
 			Dataplane: yanetv2alpha1.DataplaneSpec{
 				Image: yanetv2alpha1.ImageRef{Name: "dataplane", Tag: "test"},
-				Port:  8090,
 			},
 		},
 		BoxTypes: []yanetv2alpha1.BoxType{
@@ -186,14 +184,14 @@ var _ = Describe("Validating webhooks", func() {
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 		})
 
-		It("rejects a component port outside the valid range", func() {
+		It("rejects an invalid host-network port range", func() {
 			s := minimalV2ConfigSpec()
-			s.Components.Dataplane.Port = 70000
+			s.HostNetworkPortRange = &yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 19999}
 			cfg := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       s,
 			}
-			expectWebhookRejection(k8sClient.Create(ctx, cfg), "port")
+			expectWebhookRejection(k8sClient.Create(ctx, cfg), "must not exceed")
 		})
 
 		It("rejects a boxType referencing an undeclared patch", func() {

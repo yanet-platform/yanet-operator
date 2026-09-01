@@ -364,14 +364,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 								Name: "yanet-controlplane",
 								Tag:  "1.0.0",
 							},
-							Port: 8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{
 								Name: "yanet-dataplane",
 								Tag:  "1.0.0",
 							},
-							Port: 8081,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{

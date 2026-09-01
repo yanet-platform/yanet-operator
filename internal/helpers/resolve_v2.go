@@ -86,24 +86,6 @@ type ResolvedComponent struct {
 	// rest are exposed via Containers.
 	Image ResolvedImage
 
-	// Port is the primary listener port for non-controlplane components.
-	Port int32
-	// GRPCPort and HTTPPort are the two ports shared by every controlplane
-	// NUMA instance when the explicit Service is enabled.
-	GRPCPort int32
-	HTTPPort int32
-
-	// PortRange retains the legacy Port-based controlplane fan-out.
-	PortRange int32
-
-	// Bind is the effective component-level bind override. Operator containers
-	// receive their final merged bind in ResolvedContainer.Bind.
-	Bind *yanetv2alpha1.BindSpec
-	// ServiceEnabled controls explicit Service generation. ServiceName is an
-	// optional stable name override; the builder supplies the default.
-	ServiceEnabled bool
-	ServiceName    string
-
 	// Config carries the resolved config source (inline | hostPath |
 	// URL). nil means the component does not need a config volume.
 	Config *yanetv2alpha1.ConfigSource
@@ -128,7 +110,7 @@ type ResolvedComponent struct {
 
 	// Containers is the resolved per-container view of an operator
 	// Pod. The first element is the primary container and backs the
-	// optional per-operator Service.
+	// per-operator Service.
 	Containers []ResolvedContainer
 
 	// Patches is the ordered list of patch NAMES that the box wires
@@ -143,7 +125,6 @@ type ResolvedContainer struct {
 	Name    string
 	Image   ResolvedImage
 	Config  *yanetv2alpha1.ConfigSource
-	Bind    *yanetv2alpha1.BindSpec
 	HostIPC bool
 }
 
@@ -287,23 +268,15 @@ func resolveControlplane(
 	}
 	cp := config.Components.Controlplane
 	override := componentOverride(yanet, KindControlplane, "")
-	serviceEnabled, serviceName := resolveService(cp.Service)
 	return &ResolvedComponent{
-		Kind:           KindControlplane,
-		Name:           string(KindControlplane),
-		Enabled:        resolveEnabled(override),
-		Image:          mergeImage(config.Images, cp.Image, containerOverride(override, string(KindControlplane))),
-		Port:           cp.Port,
-		GRPCPort:       cp.GRPCPort,
-		HTTPPort:       cp.HTTPPort,
-		PortRange:      cp.PortRange,
-		Bind:           resolveBind(cp.Bind, bindOverride(override)),
-		ServiceEnabled: serviceEnabled,
-		ServiceName:    serviceName,
-		Config:         cp.Config,
-		Numa:           Int32Value(cp.Numa, 0),
-		DisabledNuma:   resolveDisabledNuma(cp.DisabledNuma, yanet),
-		Patches:        slot.Patches,
+		Kind:         KindControlplane,
+		Name:         string(KindControlplane),
+		Enabled:      resolveEnabled(override),
+		Image:        mergeImage(config.Images, cp.Image, containerOverride(override, string(KindControlplane))),
+		Config:       cp.Config,
+		Numa:         Int32Value(cp.Numa, 0),
+		DisabledNuma: resolveDisabledNuma(cp.DisabledNuma, yanet),
+		Patches:      slot.Patches,
 	}, nil
 }
 
@@ -338,7 +311,6 @@ func resolveDataplane(
 		Name:        string(KindDataplane),
 		Enabled:     resolveEnabled(override),
 		Image:       mergeImage(config.Images, dp.Image, containerOverride(override, string(KindDataplane))),
-		Port:        dp.Port,
 		Config:      dp.Config,
 		Hugepages:   dp.Hugepages,
 		HostNetwork: dp.HostNetwork,
@@ -365,7 +337,6 @@ func resolveBird(
 		Name:    string(KindBird),
 		Enabled: resolveEnabled(override),
 		Image:   mergeImage(config.Images, bird.Image, containerOverride(override, string(KindBird))),
-		Port:    bird.Port,
 		Config:  bird.Config,
 		Patches: slot.Patches,
 	}, nil
@@ -385,18 +356,13 @@ func resolveBirdAdapter(
 	}
 	ad := config.Components.BirdAdapter
 	override := componentOverride(yanet, KindBirdAdapter, "")
-	serviceEnabled, serviceName := resolveService(ad.Service)
 	return &ResolvedComponent{
-		Kind:           KindBirdAdapter,
-		Name:           string(KindBirdAdapter),
-		Enabled:        resolveEnabled(override),
-		Image:          mergeImage(config.Images, ad.Image, containerOverride(override, string(KindBirdAdapter))),
-		Port:           ad.Port,
-		Bind:           resolveBind(ad.Bind, bindOverride(override)),
-		ServiceEnabled: serviceEnabled,
-		ServiceName:    serviceName,
-		Config:         ad.Config,
-		Patches:        slot.Patches,
+		Kind:    KindBirdAdapter,
+		Name:    string(KindBirdAdapter),
+		Enabled: resolveEnabled(override),
+		Image:   mergeImage(config.Images, ad.Image, containerOverride(override, string(KindBirdAdapter))),
+		Config:  ad.Config,
+		Patches: slot.Patches,
 	}, nil
 }
 
@@ -414,18 +380,13 @@ func resolveAnnouncer(
 	}
 	an := config.Components.Announcer
 	override := componentOverride(yanet, KindAnnouncer, "")
-	serviceEnabled, serviceName := resolveService(an.Service)
 	return &ResolvedComponent{
-		Kind:           KindAnnouncer,
-		Name:           string(KindAnnouncer),
-		Enabled:        resolveEnabled(override),
-		Image:          mergeImage(config.Images, an.Image, containerOverride(override, string(KindAnnouncer))),
-		Port:           an.Port,
-		Bind:           resolveBind(an.Bind, bindOverride(override)),
-		ServiceEnabled: serviceEnabled,
-		ServiceName:    serviceName,
-		Config:         an.Config,
-		Patches:        slot.Patches,
+		Kind:    KindAnnouncer,
+		Name:    string(KindAnnouncer),
+		Enabled: resolveEnabled(override),
+		Image:   mergeImage(config.Images, an.Image, containerOverride(override, string(KindAnnouncer))),
+		Config:  an.Config,
+		Patches: slot.Patches,
 	}, nil
 }
 
@@ -447,35 +408,26 @@ func resolveOperator(
 		return nil, fmt.Errorf("operator %q has no containers", operatorName)
 	}
 	override := componentOverride(yanet, KindOperator, operatorName)
-	operatorBind := resolveBind(op.Bind, bindOverride(override))
-
 	containers := make([]ResolvedContainer, 0, len(op.Containers))
 	for i := range op.Containers {
 		c := &op.Containers[i]
 		containerOvr := containerOverride(override, c.Name)
 		img := mergeImage(config.Images, c.Image, containerOvr)
-		containerBind := resolveBind(c.Bind, containerBindOverride(containerOvr))
 		containers = append(containers, ResolvedContainer{
 			Name:    c.Name,
 			Image:   img,
 			Config:  c.Config,
-			Bind:    mergeBinds(operatorBind, containerBind),
 			HostIPC: BoolValue(c.HostIPC, false),
 		})
 	}
-	serviceEnabled, serviceName := resolveService(op.Service)
 
 	return &ResolvedComponent{
-		Kind:           KindOperator,
-		Name:           op.Name,
-		Enabled:        resolveEnabled(override),
-		Image:          containers[0].Image,
-		Port:           op.Port,
-		Bind:           operatorBind,
-		ServiceEnabled: serviceEnabled,
-		ServiceName:    serviceName,
-		Containers:     containers,
-		Patches:        slot.Patches,
+		Kind:       KindOperator,
+		Name:       op.Name,
+		Enabled:    resolveEnabled(override),
+		Image:      containers[0].Image,
+		Containers: containers,
+		Patches:    slot.Patches,
 	}, nil
 }
 
@@ -559,90 +511,6 @@ func containerOverride(
 		return &v
 	}
 	return nil
-}
-
-func bindOverride(override *yanetv2alpha1.YanetComponentOverride) *yanetv2alpha1.BindSpec {
-	if override == nil {
-		return nil
-	}
-	return override.Bind
-}
-
-func containerBindOverride(override *yanetv2alpha1.YanetContainerOverride) *yanetv2alpha1.BindSpec {
-	if override == nil {
-		return nil
-	}
-	return override.Bind
-}
-
-// resolveBind applies replacement semantics. A non-nil per-installation
-// block replaces the cluster-wide block even when its Env slice is empty.
-func resolveBind(base, override *yanetv2alpha1.BindSpec) *yanetv2alpha1.BindSpec {
-	if override != nil {
-		return cloneBind(override)
-	}
-	return cloneBind(base)
-}
-
-// mergeBinds merges operator-level defaults with a container-level block by
-// key. Container entries replace matching defaults in place and append new
-// keys in declaration order.
-func mergeBinds(base, container *yanetv2alpha1.BindSpec) *yanetv2alpha1.BindSpec {
-	if base == nil && container == nil {
-		return nil
-	}
-	out := cloneBind(base)
-	if out == nil {
-		out = &yanetv2alpha1.BindSpec{}
-	}
-	index := make(map[string]int, len(out.Env))
-	for i := range out.Env {
-		index[out.Env[i].Key] = i
-	}
-	if container == nil {
-		return out
-	}
-	for i := range container.Env {
-		env := cloneBindEnv(&container.Env[i])
-		if pos, found := index[env.Key]; found {
-			out.Env[pos] = env
-			continue
-		}
-		index[env.Key] = len(out.Env)
-		out.Env = append(out.Env, env)
-	}
-	return out
-}
-
-func cloneBind(bind *yanetv2alpha1.BindSpec) *yanetv2alpha1.BindSpec {
-	if bind == nil {
-		return nil
-	}
-	out := &yanetv2alpha1.BindSpec{Env: make([]yanetv2alpha1.BindEnv, len(bind.Env))}
-	for i := range bind.Env {
-		out.Env[i] = cloneBindEnv(&bind.Env[i])
-	}
-	return out
-}
-
-func cloneBindEnv(env *yanetv2alpha1.BindEnv) yanetv2alpha1.BindEnv {
-	out := yanetv2alpha1.BindEnv{Key: env.Key}
-	if env.Value != nil {
-		value := *env.Value
-		out.Value = &value
-	}
-	if env.Service != nil {
-		service := *env.Service
-		out.Service = &service
-	}
-	return out
-}
-
-func resolveService(service *yanetv2alpha1.ServiceSpec) (enabled bool, serviceName string) {
-	if service == nil {
-		return false, ""
-	}
-	return service.Enabled, service.ServiceName
 }
 
 // FullPath assembles the full image reference (registry/prefix/name:tag).

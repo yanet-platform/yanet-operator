@@ -130,7 +130,6 @@ func (r *YanetV2Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 //     change — e.g. hugepages update — triggers re-reconcile)
 //   - corev1.Node (mapped to YanetV2 via nodeSelector)
 //   - appsv1.Deployment (Owns)
-//   - corev1.Service (Owns)
 //   - corev1.Pod (filtered by manifests.LabelYanet to enqueue the
 //     owning YanetV2 when a managed Pod changes phase)
 func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -150,7 +149,6 @@ func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(yanetPodPredicate),
 		).
 		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{}).
 		Complete(r)
 }
 

@@ -17,6 +17,9 @@ spec:
   stop: false           # true → reconcile loop does nothing (cluster-wide kill switch)
   updateWindow: 60      # seconds: GLOBAL throttling between node restarts across the WHOLE cluster
                         # (protects against mass simultaneous restarts of network boxes)
+  # Inclusive target-port pool used only when a final patched workload combines
+  # hostNetwork=true with a Service-backed listener.
+  hostNetworkPortRange: {start: 20000, end: 20100}
 
   # Global image settings.
   images:
@@ -34,13 +37,6 @@ spec:
     # --- Hardcoded components (5 fixed names) ---
     controlplane:
       image: {name: controlplane, tag: v2.1.0}
-      grpcPort: 8080        # every per-NUMA Pod can use the same ports
-      httpPort: 8081
-      bind:
-        env:
-          - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
-      service:
-        enabled: true       # <yanet>-controlplane-numa<N>, Local traffic policy
       config:
         # hostPath is the HOST directory mounted into the container at /etc/yanet2.
         # Args are passed to the binary verbatim, except for the config path:
@@ -58,7 +54,6 @@ spec:
 
     dataplane:
       image: {name: dataplane, tag: v2.1.0}
-      port: 8090
       hugepages:
         size: 1Gi
         count: 8
@@ -69,7 +64,6 @@ spec:
 
     bird:
       image: {name: bird, tag: "2.15"}
-      port: 179             # BGP
       config:
         # hostPath is the HOST directory mounted into the container at /etc/bird.
         # Bird reads its config from /etc/bird/bird.conf (or /etc/bird/bird6.conf) inside the Pod.
@@ -81,10 +75,9 @@ spec:
     # Process: /usr/bin/yanet-bird-adapter server -c /etc/yanet2/bird-adapter.yaml
     birdAdapter:
       image: {name: bird-adapter, tag: v0.3}
-      port: 50052           # gRPC listen_addr port
       config:
         # Inline config rendered to a ConfigMap and mounted at /etc/yanet2/bird-adapter.yaml.
-        # gateway_endpoint targets the explicitly named route operator Service.
+        # gateway_endpoint targets the shared route Service for the balancer box type.
         inline: |
           # YANET BIRD Adapter Configuration
 
@@ -94,14 +87,13 @@ spec:
             level: debug
 
           # gRPC endpoint to listen on for adapter service (all interfaces)
-          listen_addr: "0.0.0.0:50052"
+          listen_addr: "0.0.0.0:8080"
 
           # gRPC endpoint of the RouteService gateway for RIB updates
-          gateway_endpoint: "route-operator:9000"
+          gateway_endpoint: "yanet-balancer-route:8080"
 
     announcer:
       image: {name: announcer, tag: v0.2}
-      port: 9090
       config:
         hostPath: /etc/yanet2
         args: [-c, /etc/yanet2/yanet-announcer.yaml]
@@ -116,14 +108,6 @@ spec:
             image: {name: antiddos-agent, tag: v0.5}
             hostIPC: true
       - name: route
-        port: 9000
-        bind:
-          env:
-            - {key: YANET_SERVER_ENDPOINT, value: '[::]:9000'}
-            - {key: YANET_SERVER_ADVERTISE_ENDPOINT, service: {port: 9000}}
-        service:
-          enabled: true
-          serviceName: route-operator
         containers:
           - name: route
             image: {name: route-operator, tag: v0.4}
@@ -133,6 +117,31 @@ spec:
   #    Each patch is a fragment of appsv1.Deployment (RawExtension).
   # ============================================================
   patches:
+    # Managed listener variables are inserted before patch variables. Their
+    # values are 8080/8081 in a Pod netns or allocated from
+    # hostNetworkPortRange for a host-network Pod.
+    - name: controlplane-listener
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  env:
+                    - name: YANET_GATEWAY_ENDPOINT
+                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
+
+    - name: route-listener
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: route
+                  env:
+                    - name: YANET_SERVER_ENDPOINT
+                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
+
     # --- Universal (applied almost everywhere) ---
     - name: tolerations
       patch:
@@ -294,7 +303,7 @@ spec:
     - name: release
       components:
         controlplane:
-          patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-release]
+          patches: [controlplane-listener, tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-release]
         dataplane:
           patches: [tolerations, telegraf, checkpointer, dp-resources]
         bird:
@@ -307,25 +316,26 @@ spec:
     - name: balancer
       components:
         controlplane:
-          patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
+          patches: [controlplane-listener, tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
         dataplane:
           patches: [tolerations, telegraf, checkpointer, dp-resources]
         bird:
           patches: [tolerations, telegraf, checkpointer, bird-resources]
         birdAdapter:
           patches: [tolerations, telegraf, checkpointer]
+      operators:
+        route:
+          patches: [route-listener, tolerations, telegraf]
 
-    # ---- firewall: cp + dp (max memory) + bird + birdAdapter + antiddos
+    # ---- firewall: cp + dp (max memory) + bird + antiddos
     - name: firewall
       components:
         controlplane:
-          patches: [tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
+          patches: [controlplane-listener, tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
         dataplane:
           patches: [tolerations, telegraf, checkpointer, dp-resources, firewall-max-memory]
         bird:
           patches: [tolerations, telegraf, checkpointer, bird-resources]
-        birdAdapter:
-          patches: [tolerations, telegraf, checkpointer]
       operators:
         antiddos:
           patches: [tolerations, telegraf]

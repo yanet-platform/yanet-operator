@@ -31,9 +31,9 @@ const NFDNumaCountLabel = "feature.node.kubernetes.io/cpu-numa_nodes_count"
 // in YanetConfigV2.spec.boxTypes[<boxType>]. This CR is intentionally
 // tiny: it only selects the target nodes and references a boxType.
 //
-// No patches and no inline component specs are accepted here — the
-// only per-installation customisation knobs are typed point-overrides
-// in components.<name>.{enabled,image}.
+// No patches and no inline component specs are accepted here. The only
+// per-installation customisation knobs are typed point-overrides in
+// components.<name>.{enabled,image}.
 type YanetSpec struct {
 	// BoxType selects a boxType definition from
 	// YanetConfigV2.spec.boxTypes[]. Required.
@@ -48,11 +48,11 @@ type YanetSpec struct {
 
 	// Enabled is the "scale-to-zero" switch for the whole
 	// installation. When false, the operator still renders every
-	// Deployment/Service/ConfigMap (so generated specs can be
-	// inspected and patches still apply), but forces replicas=0
-	// on every Deployment regardless of per-component
-	// overrides. Use this to verify the rendered spec without
-	// actually running pods. Defaults to true.
+	// Deployments and ConfigMaps (so generated specs can be inspected and
+	// patches still apply), but forces replicas=0
+	// on every Deployment regardless of per-component overrides. Shared Services
+	// remain available for the box-type roles. Use this to verify the rendered
+	// spec without actually running pods. Defaults to true.
 	//
 	// To freeze the operator's view of the CR (keep existing
 	// Deployments untouched, including hand edits) use
@@ -103,14 +103,8 @@ type YanetComponentOverride struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Bind replaces the cluster-wide component bind block when set. An empty
-	// block explicitly clears the inherited block.
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
-
-	// Containers overrides image.name, image.tag, and (for dynamic operators)
-	// bind per
-	// container, keyed by container name. For the 5 hardcoded
+	// Containers overrides image.name and image.tag per container, keyed by
+	// container name. For the 5 hardcoded
 	// components (single-container) the key is the kind:
 	// "controlplane", "dataplane", "bird", "birdAdapter",
 	// "announcer". For operators the key is the
@@ -120,18 +114,14 @@ type YanetComponentOverride struct {
 	Containers map[string]YanetContainerOverride `json:"containers,omitempty"`
 }
 
-// YanetContainerOverride is the per-installation override for one rendered
-// container. Name and Tag preserve the existing inline image override shape;
-// Bind replaces an OperatorContainer bind block when set.
+// YanetContainerOverride is the per-installation image override for one
+// rendered container.
 type YanetContainerOverride struct {
 	// +optional
 	Name string `json:"name,omitempty"`
 
 	// +optional
 	Tag string `json:"tag,omitempty"`
-
-	// +optional
-	Bind *BindSpec `json:"bind,omitempty"`
 }
 
 // YanetControlplaneOverride is the controlplane flavour of

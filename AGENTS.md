@@ -346,7 +346,7 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 `Yanet` CRs reference a `boxType` by name; per-installation overrides are
 restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-plus `bind` replacement blocks and `enabled` flags. The container key must match the rendered container
+plus `enabled` and controlplane `disabledNuma`. The container key must match the rendered container
 name — the component kind for hardcoded components, the declared
 `OperatorContainer.name` for operators. No inline patches in `Yanet`.
 
@@ -354,20 +354,25 @@ Reconcile flow:
 ```
 snapshot YanetConfig → resolve box components → build skeleton Deployments
 → ApplyPatches(deployment, patchNames, registry) → CreateOrUpdate
-→ generate Services only when components.<name>.service.enabled → status
+→ report shared Service names in status
+
+YanetConfig reconciler → aggregate namespace × boxType component roles
+→ CreateOrUpdate shared Services owned by YanetConfigV2/config → prune orphans
 ```
 
 ### Controlplane NUMA fan-out
 Controlplane gets one Deployment per NUMA domain on the node. NUMA count is
 read from the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`
-(falls back to 1 when absent). Explicit `grpcPort` / `httpPort` values are shared
-by all Pod network namespaces. With `service.enabled`, each enabled NUMA gets
-one `<yanet>-controlplane-numa{N}` Service with `internalTrafficPolicy=Local`.
+(falls back to 1 when absent). Each box-type NUMA role gets one shared
+`yanet-<boxType>-controlplane-numa{N}` Service with `internalTrafficPolicy=Local`
+and fixed `grpc:8080` / `http:8081` ports.
 
 ### Operator Services
-When `OperatorSpec.Service.Enabled` is true, **one** `ClusterIP` Service is
-generated, named `<yanet>-<operator>` by default, with `internalTrafficPolicy=Local` so
-in-node callers reach the local pod.
+Each operator wired by a box type gets one shared `ClusterIP` Service named
+`yanet-<boxType>-<operator>`, with `internalTrafficPolicy=Local` so in-node
+callers reach the local pod. Named target ports resolve to `8080/8081` in a Pod
+network namespace or deterministic ports from `hostNetworkPortRange` after a
+patch enables host networking.
 
 ### Webhook pattern (controller-runtime ≥ 0.23)
 Use the generic typed validator:

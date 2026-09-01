@@ -162,20 +162,19 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			Expect(err).Should(HaveOccurred())
 		})
 
-		It("Should reject YanetConfigV2 with a port outside the valid range", func() {
+		It("Should reject YanetConfigV2 with an invalid host-network port range", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
+					HostNetworkPortRange: &yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 19999},
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
-							Port:  70000,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{
@@ -198,11 +197,9 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
-							Port:  8081, // Different port
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{

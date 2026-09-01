@@ -9,6 +9,10 @@ spec:
   # Global per-cluster throttling between any two node restarts (seconds).
   updateWindow: 60
 
+  # Optional inclusive range for application listeners after a Deployment
+  # patch enables hostNetwork. Service ports remain 8080 (gRPC) / 8081 (HTTP).
+  hostNetworkPortRange: {start: 20000, end: 20100}
+
   # Global image settings shared by every generated Deployment:
   # {registry}/{prefix}/{image}:{tag}.
   images:
@@ -26,13 +30,6 @@ spec:
   components:
     controlplane:
       image: {name: controlplane, tag: v2.1.0}
-      grpcPort: 8080      # shared by every per-NUMA Pod network namespace
-      httpPort: 8081
-      bind:
-        env:
-          - {key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080'}
-      service:
-        enabled: true     # creates <yanet>-controlplane-numa<N>
       numa: 1             # one controlplane Deployment per NUMA domain
       # disabledNuma: [1] # skip NUMA domains without a NIC
       config:
@@ -43,7 +40,6 @@ spec:
 
     dataplane:
       image: {name: dataplane, tag: v2.1.0}
-      port: 8090
       hugepages:
         size: 1Gi
         count: 8
@@ -57,6 +53,19 @@ spec:
   #    Only OPTIONAL tuning lives here (resources, tolerations, ...).
   # ============================================================
   patches:
+    # The operator injects YANET_KUBERNETES_GRPC_PORT before patch env entries.
+    # It is 8080 in a Pod network namespace and an allocated port with hostNetwork.
+    - name: controlplane-listener
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  env:
+                    - name: YANET_GATEWAY_ENDPOINT
+                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
+
     - name: tolerations
       patch:
         spec:
@@ -89,6 +98,6 @@ spec:
     - name: release
       components:
         controlplane:
-          patches: [tolerations]
+          patches: [controlplane-listener, tolerations]
         dataplane:
           patches: [tolerations, dp-resources]

@@ -152,8 +152,8 @@ The v2alpha1 design separates three independent axes of configuration:
 ```
 
 Per-installation customisation is intentionally narrow: per-container
-`image.{name,tag}` (under `containers.<name>`), `enabled`, and typed `bind`
-replacement blocks are accepted on the Yanet CR. The intrinsic security/mount baseline each component cannot run
+`image.{name,tag}` (under `containers.<name>`), `enabled`, and controlplane
+`disabledNuma` are accepted on the Yanet CR. The intrinsic security/mount baseline each component cannot run
 without is emitted by the builder itself (the dataplane's privileged +
 hostNetwork/hostIPC + minimal host devices, and the controlplane's hostIPC +
 `/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
@@ -175,28 +175,32 @@ operators it equals the `OperatorContainer.name` declared in YanetConfig
 spec:
   stop: false
   updateWindow: 0
+  hostNetworkPortRange: { start: 20000, end: 20100 }
   images: { registry: ..., prefix: ..., pullPolicy: IfNotPresent }
   components:
     controlplane:
       image: {...}
-      grpcPort: 8080
-      httpPort: 8081
-      bind: { env: [{ key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080' }] }
-      service: { enabled: true }
       numa: 2
-    dataplane:    { image: {...}, port: 8081, hugepages: { size: 1Gi, count: 8 } }
-    bird:         { image: {...}, port: 179 }
+    dataplane:    { image: {...}, hugepages: { size: 1Gi, count: 8 } }
+    bird:         { image: {...} }
     birdAdapter:  { image: {...} }
-    announcer:    { image: {...}, port: 9090 }
+    announcer:    { image: {...} }
     operators:
       - name: antiddos
-        port: 9001
-        bind: { env: [{ key: YANET_SERVER_ENDPOINT, value: '[::]:9001' }] }
-        service: { enabled: true }
         containers:
           - { name: operator, image: {...} }
           - { name: agent,    image: {...}, hostIPC: true }
   patches:
+    - name: controlplane-listener
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  env:
+                    - name: YANET_GATEWAY_ENDPOINT
+                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
     - name: telegraf
       patch:
         spec: { template: { metadata: { annotations: { telegraf...: "8080" } } } }
@@ -205,7 +209,7 @@ spec:
   boxTypes:
     - name: release
       components:
-        controlplane: { patches: [telegraf, cp-resources-release] }
+        controlplane: { patches: [controlplane-listener, telegraf, cp-resources-release] }
         dataplane:    { patches: [telegraf, dp-resources] }
         bird:         { patches: [telegraf] }
       operators:
@@ -221,8 +225,6 @@ spec:
   autoSync: true
   components:
     controlplane:
-      bind:
-        env: [{ key: YANET_GATEWAY_ENDPOINT, value: '[::]:8080' }]
       containers:
         controlplane: { tag: v2.1.5-hotfix }
 ```
@@ -250,20 +252,35 @@ snapshot                     ▼
                              │      BuildDeployments   → []Deployment skeletons
                              │      ApplyPatches       → strategic merge in order
                              │      applyDeploymentV2  → CreateOrUpdate (or status only)
-                             │      BuildServices      → ServicePlan[]
+                             │      ConfigureListeners → named ports + effective port env
                              │
-                             ├─ deduplicate ServicePlans across nodes
-                             ├─ applyServiceV2 each
+                             ├─ preflight ServicePlans for Status.Services
                              └─ Status.Sync buckets + per-node summaries
+
+YanetConfigV2 / YanetV2 / Node / owned Service change
+                             │
+                             ▼
+                 YanetConfigReconcilerV2
+                             ├─ aggregate namespace × boxType roles
+                             ├─ apply shared Services owned by config
+                             └─ prune obsolete shared Services
 ```
+
+`YanetConfigV2.spec.stop=true` is checked before finalizer, status, apply, or
+deletion work, so it freezes all v2 resources exactly as they are. A node may be
+claimed by only one `YanetV2`: an existing workload owner wins, otherwise the
+oldest CR (with namespace/name as a stable tie-breaker) wins. A deleting CR keeps
+its claim until finalizer cleanup and object removal complete.
 
 Key files:
 - [`internal/helpers/resolve_v2.go`](internal/helpers/resolve_v2.go) — `ResolveBoxComponent`, `EnabledComponentsForBox`, `FindBoxType`, `FindOperator`, `ShortNodeKey`.
 - [`internal/manifests/builder_v2.go`](internal/manifests/builder_v2.go) — `BuildDeployments`, `InlineConfigMaps`, hugepages, ConfigSource branches.
 - [`internal/manifests/patcher.go`](internal/manifests/patcher.go) — `PatchRegistry`, `ApplyPatches` via `strategicpatch.StrategicMergePatch`.
 - [`internal/manifests/service_v2.go`](internal/manifests/service_v2.go) — `ServicePlan`, `BuildServices`, `ToService`.
+- [`internal/manifests/listeners_v2.go`](internal/manifests/listeners_v2.go) — fixed listener matrix and effective port env.
 - [`internal/controller/yanet_reconciler_v2.go`](internal/controller/yanet_reconciler_v2.go) — orchestration.
-- [`internal/controller/yanetconfig_controller_v2.go`](internal/controller/yanetconfig_controller_v2.go) — snapshot watcher.
+- [`internal/controller/host_network_ports_v2.go`](internal/controller/host_network_ports_v2.go) — deterministic post-patch host port allocation.
+- [`internal/controller/yanetconfig_controller_v2.go`](internal/controller/yanetconfig_controller_v2.go) — snapshot and shared Service owner.
 
 ---
 
@@ -274,19 +291,19 @@ controls how many controlplane Deployments are generated **per node**:
 
 ```
 Node has 2 NUMA domains  ⇒  2 Deployments:
-  yanet-<nodehash>-controlplane-numa0 listening on grpcPort/httpPort
-  yanet-<nodehash>-controlplane-numa1 listening on the same ports in its own Pod netns
+  <yanet>-<nodehash>-controlplane-numa0
+  <yanet>-<nodehash>-controlplane-numa1
 ```
 
-When `service.enabled: true`, one stable Service is generated per enabled NUMA:
+One shared Service exists per box-type NUMA role, independently of replicas and
+per-installation enablement:
 
 | Service | Selector | Ports | InternalTrafficPolicy |
 |---|---|---|---|
-| `<yanet>-controlplane-numa{N}` | `yanet=<yanet>, app=controlplane, numa=N` | `grpcPort`, `httpPort` | `Local` |
+| `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>, component=controlplane, numa=N` | `grpc:8080`, `http:8081` | `Local` |
 
-The selector deliberately omits the node hash. `internalTrafficPolicy: Local`
+The selector deliberately omits Yanet and node identity. `internalTrafficPolicy: Local`
 keeps callers on their node, while the NUMA label selects the requested gateway.
-There is no `-cluster` or `-all` Service.
 
 ### Per-NUMA config files
 
@@ -311,7 +328,8 @@ file per NUMA domain, each with a matching `instance_id` and port.
 
 A NUMA domain without a NIC runs no dataplane instance, so a controlplane there
 would have no peer to attach to. Such domains are listed in
-`controlplane.disabledNuma` and get **neither a Deployment nor a Service**:
+`controlplane.disabledNuma` and get no Deployment. The shared Service remains so
+its DNS name is stable while an installation is disabled or scaled to zero:
 
 ```yaml
 components:
@@ -332,23 +350,21 @@ unique NUMA layout wants its own `YanetV2` CR selecting just that node.
 
 ### Operator services
 
-When `OperatorSpec.Service.Enabled` is true, **one** cluster-wide ClusterIP
-Service is generated. Its default name is `<yanet>-<operator>`; `serviceName`
-can override it verbatim and must be unique in the YanetV2 namespace. The Service uses
-`internalTrafficPolicy=Local` so callers on the same node hit the local pod
-without leaving the host.
+Every operator wired into a box type gets one shared ClusterIP Service named
+`yanet-<boxType>-<operator>`. `birdAdapter` and `announcer` use the same model;
+`bird` and `dataplane` do not generate application Services.
 
-`birdAdapter` and `announcer` can opt into the same explicit Service model.
-`bird` and `dataplane` do not generate Services.
+### Listener endpoints
 
-### Bind overrides
+Services expose fixed `grpc:8080` and, where applicable, `http:8081` ports with
+named target ports. A Pod-network workload uses the same numeric target. After
+patches, a service-backed `hostNetwork` workload receives a deterministic target
+from `spec.hostNetworkPortRange`, with fixed BIRD and patch-added ports reserved.
 
-`bind.env[]` injects either a literal `value` or a same-component `service`
-reference. A Service reference renders as
-`<service>.<namespace>.svc.cluster.local:<port>`. Operator-level entries are
-inherited by every container; container entries merge by key and win. A
-per-installation bind block replaces its cluster-wide counterpart, including an
-explicit empty block that clears it.
+The operator injects `YANET_KUBERNETES_GRPC_PORT` and
+`YANET_KUBERNETES_HTTP_PORT` into the listener container. Runtime-specific
+endpoint variables are added by NamedPatches and can refer to these earlier env
+entries, for example `[::]:$(YANET_KUBERNETES_GRPC_PORT)`.
 
 ---
 
@@ -403,11 +419,19 @@ Why strategic merge:
 
 Validation:
 - Webhook enforces uniqueness of names and existence of all references.
+- Dynamic operator names cannot reuse the built-in component identities
+  `controlplane`, `dataplane`, `bird`, `bird-adapter`, or `announcer`.
 - Webhook **dry-runs** every patch via `strategicpatch.StrategicMergePatch(empty Deployment, patch, appsv1.Deployment{})` so a typo (e.g. `templete:` instead of `template:`) is caught at admit time.
+
+After patching, the builder restores the Deployment name, namespace, controller
+owner, immutable selector, node placement, reserved labels, and `Recreate`
+strategy. Other metadata and Pod fields remain patchable. `Recreate` is required
+because a rolling replacement on the same node would overlap BIRD and managed
+host-network listener ports with the old Pod.
 
 JSON6902 (`jsonPatch`) is intentionally not supported. Service / ConfigMap
 patching is not supported either — those are generated entirely from the
-component definition (`port`, `Hugepages`, `ConfigSource`).
+component definition (`Hugepages`, `ConfigSource`) and the fixed listener matrix.
 
 ---
 

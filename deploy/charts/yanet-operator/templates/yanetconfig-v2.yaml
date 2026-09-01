@@ -1,14 +1,11 @@
+{{- if and .Values.yanetconfigV2 .Values.webhook.enabled (eq .Values.webhook.failurePolicy "Fail") }}
+{{- fail "yanetconfigV2 cannot be chart-managed while webhook.failurePolicy=Fail; use Ignore during Helm reconciliation or manage YanetConfigV2 separately" }}
+{{- end }}
 {{- with .Values.yanetconfigV2 }}
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetConfigV2
 metadata:
   name: config
-  annotations:
-    # Apply after operator Deployment and webhook CA update job (weight 1) are done
-    # so the webhook endpoint is reachable before this CR is created.
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "10"
-    helm.sh/hook-delete-policy: before-hook-creation
 spec:
    {{- with .spec }}
      {{- toYaml . | nindent 2 }}

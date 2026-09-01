@@ -83,20 +83,19 @@ The Pod-level `hostIPC` is set if **any** container in the list requests it.
 
 ## 3. Service Topology
 
-Created by yanet-operator:
-
-Services are opt-in through `service.enabled`:
+Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`:
 
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
-| `<yanet>-controlplane-numa{N}` | `yanet=<yanet>,app=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA domain; exposes gRPC and HTTP ports |
-| `<yanet>-<operator>` | `yanet=<yanet>,app=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks |
-| `<yanet>-announcer` | `yanet=<yanet>,app=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point |
+| `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>,component=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA role; exposes `grpc:8080` and `http:8081` |
+| `yanet-<boxType>-<operator>` | `box-type=<boxType>,component=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks on `grpc:8080` |
+| `yanet-<boxType>-announcer` | `box-type=<boxType>,component=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point on `grpc:8080` |
 
-`serviceName` can override the default base name verbatim and must be unique in
-the YanetV2 namespace. There are no node-hash, `-cluster`, or `-all` Services.
-Controlplane Pods use separate network namespaces, so every NUMA instance can
-expose the same gRPC/HTTP port pair.
+Services are unconditional for roles wired by a box type, even when an
+installation or component has zero replicas. Their selectors omit Yanet and node
+identity so installations of the same box type share the stable DNS names in a
+namespace. Named target ports let host-network Pods use target ports allocated
+from `spec.hostNetworkPortRange`, while Pod-network workloads use `8080/8081`.
 
 ## 4. Dependencies
 
@@ -128,7 +127,7 @@ flowchart TB
     subgraph TOP[" Stable Service entry points "]
         direction LR
         EXT["External clients<br/>cli / web / metrics-collector<br/>(not deployed by operator)"]:::plan
-        SVCNUMA["Service: &lt;yanet&gt;-controlplane-numa{N}<br/>internalTrafficPolicy: Local"]:::svc
+        SVCNUMA["Service: yanet-&lt;boxType&gt;-controlplane-numa{N}<br/>internalTrafficPolicy: Local"]:::svc
         EXT -->|gRPC/HTTP| SVCNUMA
     end
 
@@ -155,7 +154,7 @@ flowchart TB
             end
         end
 
-        SVCCP["Service: &lt;yanet&gt;-controlplane-numa{N}<br/>gRPC + HTTP"]:::svc
+        SVCCP["Service: yanet-&lt;boxType&gt;-controlplane-numa{N}<br/>gRPC + HTTP"]:::svc
         SVCCP --- GW
 
         OP_PIPE["yanet-pipeline-operator<br/>Deployment + Service"]:::op
@@ -200,7 +199,7 @@ flowchart TB
 
 > The diagram shows **one** NUMA domain. For an N-NUMA host the operator
 > generates N copies of the `controlplane Deployment` and matching
-> `<yanet>-controlplane-numa{N}` Services
+> `yanet-<boxType>-controlplane-numa{N}` Services
 > (see §3 above).
 
 ## 6. yanet-operator Requirements (Phase 4 input)
@@ -212,13 +211,13 @@ The architecture above translates into the following items in the implementation
    `feature.node.kubernetes.io/cpu-numa_nodes_count` to determine how many controlplane Deployments to generate per node.
 2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: true`, hugepages,
    `securityContext`, and a hostPath config.
-3. **N controlplane Deployments per node** plus one explicit
-   `<yanet>-controlplane-numa{N}` Service per enabled NUMA. Each Service has
-   `internalTrafficPolicy: Local` and exposes the shared gRPC/HTTP port pair.
+3. **N controlplane Deployments per node** plus one shared
+   `yanet-<boxType>-controlplane-numa{N}` Service per NUMA role. Each Service has
+   `internalTrafficPolicy: Local` and exposes fixed gRPC/HTTP ports `8080/8081`.
 4. **bird + bird-adapter** — a single CRD entity producing two independent Deployments,
    shared volume `/run/bird`, hostPath bird config.
 5. **Operators / agents — array in CRD** with fields:
-   - `name`, `service`, and typed `bind.env` overrides,
+   - `name` and `containers`,
    - `config: { inline | hostPath | url }` (see §7),
    - `containers[]` — one or more containers in the same Pod, each with
      its own `image`, `args`, `env`, `resources`, `hostIPC`,
@@ -226,8 +225,7 @@ The architecture above translates into the following items in the implementation
      if any container sets it. This supports both classical operators
      (single-container) and operator+agent pairs (e.g. `antiddos`) in
      a single Deployment.
-   For each item a separate Deployment is generated; a Service is generated
-   only when `service.enabled` is true.
+   For each item a separate Deployment and shared box-type Service are generated.
 6. **Announcer Deployment** — separate CRD section, with `/run/bird` mount
    and access to the gateway service.
 

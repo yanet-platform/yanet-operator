@@ -55,17 +55,23 @@ Component palette + named strategic-merge patches + named `boxTypes`
 live in the cluster-scoped `YanetConfigV2` singleton named `config`. The
 `YanetV2` CR is minimal: pick a `boxType`,
 select nodes via `nodeSelector`, optionally override per-container
-`image.{name,tag}`, typed bind env, and `enabled` flags. Services are explicit
-(`service.enabled`) and use stable per-component names. A custom `serviceName`
-is used verbatim and must be unique in the YanetV2 namespace. Per-NUMA
-controlplane fan-out is driven by the NFD label
-`feature.node.kubernetes.io/cpu-numa_nodes_count`.
+`image.{name,tag}`, `enabled`, and controlplane `disabledNuma`. Shared Services
+are unconditional for service-backed roles and are named
+`yanet-<boxType>-<component>[-numa<N>]` within each namespace. They expose
+stable gRPC/HTTP ports `8080/8081`; host-network target ports are allocated from
+`YanetConfigV2.spec.hostNetworkPortRange`. Runtime endpoint variables belong in
+named Deployment patches. Per-NUMA controlplane fan-out is driven by the NFD label
+`feature.node.kubernetes.io/cpu-numa_nodes_count`. Each node can belong to only
+one `YanetV2`; overlapping selectors are resolved in favour of the existing
+workload owner (or the oldest CR before workloads exist).
 
 > **Scope migration:** Kubernetes does not permit changing an installed CRD
 > from namespaced to cluster-scoped. Before upgrading a cluster that already
 > has the older namespaced `YanetConfigV2` CRD, export its spec, remove and
-> reinstall that CRD, then recreate the configuration as `metadata.name: config`
-> without a namespace.
+> reinstall that CRD, then recreate the configuration manually as cluster-scoped
+> `metadata.name: config` or let Helm create it through `yanetconfigV2` values.
+> Delete old per-installation v2 Services before enabling the shared-Service
+> model; the operator deliberately does not take over resources with another owner.
 
 See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
 [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable
