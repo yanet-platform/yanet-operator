@@ -524,7 +524,7 @@ func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 				t.Errorf("%s: run-bird must be a hostPath /run/bird: %+v", tc.name, pod.Volumes)
 			}
 			// Config mount must survive alongside the socket mount.
-			if !hasMount(pod.Containers[0].VolumeMounts, defaultConfigMountPath(tc.kind), true) {
+			if !hasMount(pod.Containers[0].VolumeMounts, defaultConfigMountPath, true) {
 				t.Errorf("%s: config mount missing", tc.name)
 			}
 			if pod.HostNetwork {
@@ -907,6 +907,79 @@ func TestBuildDeployments_Controlplane_PerNumaConfigArgs(t *testing.T) {
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("d[%d] args mismatch (-want +got):\n%s", i, diff)
 		}
+	}
+}
+
+func TestBuildDeployments_Controlplane_NumaPlaceholderKeepsPhysicalIndices(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		wantFormat string
+	}{
+		{
+			name:       "target config layout",
+			path:       "/etc/yanet2/controlplane.d/numa{numa}.yaml",
+			wantFormat: "/etc/yanet2/controlplane.d/numa%d.yaml",
+		},
+		{
+			name:       "yml placeholder",
+			path:       "/etc/yanet2/controlplane.d/numa{numa}.yml",
+			wantFormat: "/etc/yanet2/controlplane.d/numa%d.yml",
+		},
+		{
+			name:       "repeated placeholder without yaml extension",
+			path:       "/etc/yanet2/numa{numa}/config-{numa}",
+			wantFormat: "/etc/yanet2/numa%[1]d/config-%[1]d",
+		},
+		{
+			name:       "legacy literal path",
+			path:       "/etc/yanet2/controlplane.yaml",
+			wantFormat: "/etc/yanet2/controlplane-%d.yaml",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := ctxV2()
+			ctx.NumaCount = 4
+			component := &helpers.ResolvedComponent{
+				Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+				Image:        helpers.ResolvedImage{Name: "controlplane", Tag: "v2"},
+				DisabledNuma: []int32{0, 2},
+				Config: &yanetv2alpha1.ConfigSource{
+					HostPath: "/etc/yanet2",
+					Args:     []string{"-c", tt.path},
+				},
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				deployments, err := BuildDeployments(ctx, component)
+				if err != nil {
+					t.Fatalf("BuildDeployments: %v", err)
+				}
+				if len(deployments) != 2 {
+					t.Fatalf("deployments = %d, want physical NUMA domains 1 and 3", len(deployments))
+				}
+				for i, numa := range []int{1, 3} {
+					deployment := deployments[i]
+					want := []string{"-c", fmt.Sprintf(tt.wantFormat, numa)}
+					if diff := cmp.Diff(want, deployment.Spec.Template.Spec.Containers[0].Args); diff != "" {
+						t.Errorf("NUMA %d args mismatch (-want +got):\n%s", numa, diff)
+					}
+					if !strings.HasSuffix(deployment.Name, fmt.Sprintf("-numa%d", numa)) {
+						t.Errorf("deployment name %q lost physical NUMA index %d", deployment.Name, numa)
+					}
+					for _, labels := range []map[string]string{
+						deployment.Labels, deployment.Spec.Selector.MatchLabels, deployment.Spec.Template.Labels,
+					} {
+						if labels[labelNuma] != fmt.Sprint(numa) {
+							t.Errorf("labels lost physical NUMA index %d: %v", numa, labels)
+						}
+					}
+				}
+				if diff := cmp.Diff([]string{"-c", tt.path}, component.Config.Args); diff != "" {
+					t.Fatalf("shared ConfigSource args were mutated (-want +got):\n%s", diff)
+				}
+			}
+		})
 	}
 }
 

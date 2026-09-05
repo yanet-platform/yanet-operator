@@ -59,7 +59,13 @@ func (r *YanetV2Reconciler) pruneConflictingDeploymentsV2(
 			"deployment", deployment.Name,
 			"node", deployment.Labels[manifests.LabelNode],
 		)
-		if err := r.Client.Delete(ctx, deployment); err != nil && !isNotFoundOrGone(err) {
+		if err := r.checkGlobalStopV2(); err != nil {
+			return err
+		}
+		if err := r.Client.Delete(ctx, deployment,
+			client.PropagationPolicy(metav1.DeletePropagationForeground),
+			client.Preconditions{UID: &deployment.UID, ResourceVersion: &deployment.ResourceVersion},
+		); err != nil && !isNotFoundOrGone(err) {
 			return fmt.Errorf("delete conflicting Deployment %s/%s: %w", deployment.Namespace, deployment.Name, err)
 		}
 		yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Inc()
@@ -68,6 +74,9 @@ func (r *YanetV2Reconciler) pruneConflictingDeploymentsV2(
 }
 
 func controlledByYanetV2(object client.Object, yanet *yanetv2alpha1.YanetV2) bool {
+	if object.GetNamespace() != yanet.Namespace {
+		return false
+	}
 	owner := metav1.GetControllerOf(object)
 	if owner == nil || owner.APIVersion != yanetv2alpha1.GroupVersion.String() ||
 		owner.Kind != "YanetV2" || owner.Name != yanet.Name {
@@ -94,6 +103,7 @@ func newDesiredSet() desiredSet {
 
 // pruneOrphans deletes every Deployment or ConfigMap that
 //   - carries the LabelYanet=<yanet.Name> label, AND
+//   - is controlled by this exact YanetV2 instance, AND
 //   - is NOT present in the desired set.
 //
 // When autoSync=false the helper is a no-op for safety: orphans are
@@ -123,6 +133,9 @@ func (r *YanetV2Reconciler) pruneOrphans(
 	}
 	for i := range deps.Items {
 		d := &deps.Items[i]
+		if !controlledByYanetV2(d, yanet) {
+			continue
+		}
 		if _, keep := desired.Deployments[d.Name]; keep {
 			continue
 		}
@@ -133,11 +146,25 @@ func (r *YanetV2Reconciler) pruneOrphans(
 			continue
 		}
 		logger.Info("deleting orphan Deployment", "deployment", d.Name)
-		if err := r.Client.Delete(ctx, d); err != nil && !isNotFoundOrGone(err) {
+		if err := r.checkGlobalStopV2(); err != nil {
+			return count, err
+		}
+		if err := r.Client.Delete(ctx, d,
+			client.PropagationPolicy(metav1.DeletePropagationForeground),
+			client.Preconditions{UID: &d.UID, ResourceVersion: &d.ResourceVersion},
+		); err != nil && !isNotFoundOrGone(err) {
 			logger.Error(err, "delete Deployment failed", "deployment", d.Name)
 			if firstErr == nil {
 				firstErr = err
 			}
+		}
+	}
+
+	// Re-read after deletion so completed foreground cleanup does not keep
+	// otherwise unused ConfigMaps alive on the strength of the old snapshot.
+	if autoSync && count > 0 {
+		if err := r.List(ctx, deps, ns, selector); err != nil {
+			return count, err
 		}
 	}
 
@@ -146,9 +173,48 @@ func (r *YanetV2Reconciler) pruneOrphans(
 	if err := r.Client.List(ctx, cms, ns, selector); err != nil {
 		return count, err
 	}
+	// Desired ConfigMap names alone are insufficient: throttled Deployments
+	// and Pods from an unfinished rollout can still mount a previous hash.
+	referenced := make(map[string]struct{})
+	rolloutPending := false
+	for i := range deps.Items {
+		d := &deps.Items[i]
+		if controlledByYanetV2(d, yanet) {
+			collectPodConfigMapRefsV2(&d.Spec.Template.Spec, referenced)
+			replicas := int32(1)
+			if d.Spec.Replicas != nil {
+				replicas = *d.Spec.Replicas
+			}
+			// Until the Deployment controller has observed and completed the
+			// rollout, an old ReplicaSet may still recreate a Pod even when the
+			// Pod list is empty. Wait rather than deleting its inline config.
+			if !d.DeletionTimestamp.IsZero() || d.Status.ObservedGeneration < d.Generation ||
+				d.Status.UpdatedReplicas != replicas || d.Status.Replicas != replicas {
+				rolloutPending = true
+			}
+		}
+	}
+	if len(cms.Items) > 0 {
+		pods := &corev1.PodList{}
+		if err := r.List(ctx, pods, ns, selector); err != nil {
+			return count, err
+		}
+		for i := range pods.Items {
+			collectPodConfigMapRefsV2(&pods.Items[i].Spec, referenced)
+		}
+	}
 	for i := range cms.Items {
 		c := &cms.Items[i]
+		if !controlledByYanetV2(c, yanet) {
+			continue
+		}
 		if _, keep := desired.ConfigMaps[c.Name]; keep {
+			continue
+		}
+		if _, inUse := referenced[c.Name]; inUse {
+			continue
+		}
+		if rolloutPending {
 			continue
 		}
 		count++
@@ -158,7 +224,12 @@ func (r *YanetV2Reconciler) pruneOrphans(
 			continue
 		}
 		logger.Info("deleting orphan ConfigMap", "configmap", c.Name)
-		if err := r.Client.Delete(ctx, c); err != nil && !isNotFoundOrGone(err) {
+		if err := r.checkGlobalStopV2(); err != nil {
+			return count, err
+		}
+		if err := r.Client.Delete(ctx, c,
+			client.Preconditions{UID: &c.UID, ResourceVersion: &c.ResourceVersion},
+		); err != nil && !isNotFoundOrGone(err) {
 			logger.Error(err, "delete ConfigMap failed", "configmap", c.Name)
 			if firstErr == nil {
 				firstErr = err
@@ -167,6 +238,35 @@ func (r *YanetV2Reconciler) pruneOrphans(
 	}
 
 	return count, firstErr
+}
+
+func collectPodConfigMapRefsV2(pod *corev1.PodSpec, referenced map[string]struct{}) {
+	for _, volume := range pod.Volumes {
+		if volume.ConfigMap != nil {
+			referenced[volume.ConfigMap.Name] = struct{}{}
+		}
+		if volume.Projected != nil {
+			for _, source := range volume.Projected.Sources {
+				if source.ConfigMap != nil {
+					referenced[source.ConfigMap.Name] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+		for _, container := range containers {
+			for _, env := range container.EnvFrom {
+				if env.ConfigMapRef != nil {
+					referenced[env.ConfigMapRef.Name] = struct{}{}
+				}
+			}
+			for _, env := range container.Env {
+				if env.ValueFrom != nil && env.ValueFrom.ConfigMapKeyRef != nil {
+					referenced[env.ValueFrom.ConfigMapKeyRef.Name] = struct{}{}
+				}
+			}
+		}
+	}
 }
 
 // isNotFoundOrGone is true when the error indicates the object is

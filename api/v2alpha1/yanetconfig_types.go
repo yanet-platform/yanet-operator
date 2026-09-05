@@ -47,6 +47,8 @@ type YanetConfigSpec struct {
 	// any node, the reconciler delays the next restart (anywhere)
 	// by this many seconds.
 	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=9223372036
 	// +optional
 	UpdateWindow int `json:"updateWindow,omitempty"`
 
@@ -88,6 +90,7 @@ type YanetConfigSpec struct {
 
 // HostNetworkPortRange bounds deterministic per-node listener allocation for
 // service-backed host-network workloads.
+// +kubebuilder:validation:XValidation:rule="self.start <= self.end",message="start must not exceed end"
 type HostNetworkPortRange struct {
 	// Start is the first port in the inclusive range.
 	// +kubebuilder:validation:Required
@@ -104,12 +107,12 @@ type HostNetworkPortRange struct {
 
 // ImagesSpec describes global image settings.
 type ImagesSpec struct {
-	// Registry is the base registry shared by all components.
+	// Registry is the default registry for palette images without an override.
 	// +optional
 	Registry string `json:"registry,omitempty"`
 
-	// Prefix is an optional path segment between registry and image
-	// name: {registry}/{prefix}/{image}:{tag}.
+	// Prefix is the default path segment between registry and image
+	// name: {registry}/{prefix}/{image}:{tag}. Palette images may override it.
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
 
@@ -165,6 +168,7 @@ type ControlplaneSpec struct {
 	// Numa overrides automatic NUMA detection. When nil, the
 	// operator reads `feature.node.kubernetes.io/cpu-numa_nodes_count`
 	// from the Node and falls back to 1.
+	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Numa *int32 `json:"numa,omitempty"`
 
@@ -290,6 +294,9 @@ func (h *Hugepages) TotalQuantity() (resource.Quantity, error) {
 		return resource.Quantity{}, fmt.Errorf("count must be greater than zero, got %d", h.Count)
 	}
 	pageBytes := pageQty.Value()
+	if pageBytes <= 0 || resource.NewQuantity(pageBytes, pageQty.Format).Cmp(pageQty) != 0 {
+		return resource.Quantity{}, fmt.Errorf("size %q must be a whole number of bytes that fits in int64", h.Size)
+	}
 	if pageBytes > math.MaxInt64/int64(h.Count) {
 		return resource.Quantity{}, fmt.Errorf("size %q multiplied by count %d overflows int64", h.Size, h.Count)
 	}
@@ -302,6 +309,7 @@ type OperatorSpec struct {
 	// Name is unique within the Operators array. It is used as the component
 	// label and default container name. Built-in component names are reserved.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
@@ -320,6 +328,7 @@ type OperatorContainer struct {
 	// for per-container image overrides.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
@@ -355,6 +364,8 @@ type NamedPatch struct {
 type BoxType struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// Components defines which fixed workload components are

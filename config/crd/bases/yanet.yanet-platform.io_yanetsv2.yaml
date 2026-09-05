@@ -80,7 +80,9 @@ spec:
                 description: |-
                   BoxType selects a boxType definition from
                   YanetConfigV2.spec.boxTypes[]. Required.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               components:
                 description: |-
@@ -117,7 +119,8 @@ spec:
                           container name. The dataplane accepts "dataplane", "bird" and
                           "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       enabled:
                         description: |-
@@ -154,7 +157,8 @@ spec:
                           container name. The dataplane accepts "dataplane", "bird" and
                           "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       enabled:
                         description: |-
@@ -192,7 +196,8 @@ spec:
                           container name. The dataplane accepts "dataplane", "bird" and
                           "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       disabledNuma:
                         description: |-
@@ -209,7 +214,8 @@ spec:
 
                           An empty (but non-nil) list explicitly clears the cluster-wide
                           default, re-enabling every NUMA index. Leave the field unset
-                          to inherit the default.
+                          or null to inherit the default. Do not omit empty lists on encoding:
+                          controller updates must preserve the explicit clear.
                         items:
                           format: int32
                           type: integer
@@ -249,7 +255,8 @@ spec:
                           container name. The dataplane accepts "dataplane", "bird" and
                           "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       enabled:
                         description: |-
@@ -287,7 +294,8 @@ spec:
                             container name. The dataplane accepts "dataplane", "bird" and
                             "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                             YanetConfigV2.spec.components.operators[].containers[].name.
-                            Registry/prefix come from YanetConfigV2.spec.images.
+                            Registry/prefix come from the palette image, falling back to
+                            YanetConfigV2.spec.images.
                           type: object
                         enabled:
                           description: |-
@@ -445,6 +453,9 @@ spec:
                 type: object
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must fit in a 63-character workload label
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
     subresources:

@@ -40,6 +40,8 @@ type YanetSpec struct {
 	// YanetConfigV2.spec.boxTypes[]. Required.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BoxType string `json:"boxType"`
 
 	// NodeSelector restricts the installation to a subset of nodes.
@@ -107,7 +109,8 @@ type YanetComponentOverride struct {
 	// container name. The dataplane accepts "dataplane", "bird" and
 	// "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
 	// YanetConfigV2.spec.components.operators[].containers[].name.
-	// Registry/prefix come from YanetConfigV2.spec.images.
+	// Registry/prefix come from the palette image, falling back to
+	// YanetConfigV2.spec.images.
 	// +optional
 	Containers map[string]YanetContainerOverride `json:"containers,omitempty"`
 }
@@ -147,14 +150,25 @@ type YanetControlplaneOverride struct {
 	//
 	// An empty (but non-nil) list explicitly clears the cluster-wide
 	// default, re-enabling every NUMA index. Leave the field unset
-	// to inherit the default.
+	// or null to inherit the default. Do not omit empty lists on encoding:
+	// controller updates must preserve the explicit clear.
 	// +optional
-	DisabledNuma []int32 `json:"disabledNuma,omitempty"`
+	DisabledNuma []int32 `json:"disabledNuma"`
 }
 
-// ImageRef identifies an image. Registry and prefix come from
-// YanetConfigV2.spec.images.
+// ImageRef identifies a palette image. Registry and prefix default to
+// YanetConfigV2.spec.images but can be overridden independently for each image.
 type ImageRef struct {
+	// Registry overrides the global registry. Nil inherits the global value;
+	// an explicit empty string omits the registry segment.
+	// +optional
+	Registry *string `json:"registry,omitempty"`
+
+	// Prefix overrides the global prefix. Nil inherits the global value;
+	// an explicit empty string omits the prefix segment.
+	// +optional
+	Prefix *string `json:"prefix,omitempty"`
+
 	// Name is the image name without registry/prefix/tag.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
@@ -223,6 +237,7 @@ type NodeStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:path=yanetsv2,shortName=yntv2,categories=yanetv2
+//+kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must fit in a 63-character workload label"
 //+kubebuilder:printcolumn:name="BoxType",type=string,JSONPath=`.spec.boxType`
 //+kubebuilder:printcolumn:name="AutoSync",type=boolean,JSONPath=`.spec.autoSync`
 //+kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`

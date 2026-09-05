@@ -19,7 +19,9 @@ package v2alpha1
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -93,8 +95,14 @@ func (v *YanetCustomValidator) ValidateDelete(ctx context.Context, _ *YanetV2) (
 // gracefully to shape-only validation with a warning. Bootstrapping may create
 // the YanetV2 before the singleton YanetConfigV2.
 func (v *YanetCustomValidator) validate(ctx context.Context, y *YanetV2) (admission.Warnings, error) {
+	if len(y.Name) > 63 {
+		return nil, fmt.Errorf("metadata.name must fit in a 63-character workload label")
+	}
 	if y.Spec.BoxType == "" {
 		return nil, fmt.Errorf("spec.boxType is required")
+	}
+	if errs := k8svalidation.IsDNS1123Label(y.Spec.BoxType); len(errs) > 0 {
+		return nil, fmt.Errorf("spec.boxType %q is invalid: %s", y.Spec.BoxType, strings.Join(errs, "; "))
 	}
 	if err := validateYanetComponentOverrideShape(y.Spec.Components); err != nil {
 		return nil, err
@@ -233,9 +241,25 @@ func ValidateEffectiveYanetComponentOverrides(
 	if box.Components.Announcer == nil {
 		effective.Announcer = nil
 	}
-	for name := range effective.Operators {
+	for name, override := range effective.Operators {
 		if _, wired := box.Operators[name]; !wired {
 			delete(effective.Operators, name)
+			continue
+		}
+		for _, operator := range declared.Operators {
+			if operator.Name != name {
+				continue
+			}
+			containerNames := make(map[string]struct{}, len(operator.Containers))
+			for _, container := range operator.Containers {
+				containerNames[container.Name] = struct{}{}
+			}
+			for containerName := range override.Containers {
+				if _, rendered := containerNames[containerName]; !rendered {
+					delete(override.Containers, containerName)
+				}
+			}
+			break
 		}
 	}
 	return ValidateYanetComponentOverrides(effective, declared, box)

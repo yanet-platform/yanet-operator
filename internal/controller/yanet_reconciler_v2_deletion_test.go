@@ -99,6 +99,8 @@ func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 		},
 	}
 
+	dep.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	cm.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, dep, svc, cm)
 
 	result, err := r.handleYanetV2Deletion(context.Background(), yanet, silentLogger())
@@ -199,6 +201,7 @@ func TestHandleYanetV2Deletion_ForeignResources_NotDeleted(t *testing.T) {
 		},
 	}
 
+	owned.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, owned, foreign)
 
 	result, err := r.handleYanetV2Deletion(context.Background(), yanet, silentLogger())

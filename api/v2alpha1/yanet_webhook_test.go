@@ -353,3 +353,53 @@ func TestYanetWebhook_DeleteAlwaysAllowed(t *testing.T) {
 		t.Fatalf("ValidateDelete: %v", err)
 	}
 }
+
+func TestYanetWebhook_LocalNamesWithoutConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		yanetName string
+		boxType   string
+		wantErr   string
+	}{
+		{name: "label length boundary", yanetName: strings.Repeat("a", 63), boxType: strings.Repeat("b", 63)},
+		{name: "name too long for workload label", yanetName: strings.Repeat("a", 64), boxType: "release", wantErr: "metadata.name"},
+		{name: "box type too long", yanetName: "edge", boxType: strings.Repeat("b", 64), wantErr: "spec.boxType"},
+		{name: "invalid box type", yanetName: "edge", boxType: "not_a_box", wantErr: "spec.boxType"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validator := &YanetCustomValidator{Client: newClientWith(t)}
+			_, err := validator.ValidateCreate(context.Background(), makeYanet(tt.yanetName, "yanet", tt.boxType))
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid local shape rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateEffectiveYanetComponentOverrides_RemovedOperatorContainer(t *testing.T) {
+	config := clusterConfig("release")
+	config.Spec.Components.Operators[0].Containers = config.Spec.Components.Operators[0].Containers[:1]
+	overrides := &YanetComponentsOverride{Operators: map[string]YanetComponentOverride{
+		"antiddos": {Containers: map[string]YanetContainerOverride{
+			"operator": {Tag: "v2"},
+			"agent":    {Tag: "v2"},
+		}},
+	}}
+	if err := ValidateEffectiveYanetComponentOverrides(overrides, &config.Spec.Components, &config.Spec.BoxTypes[0]); err != nil {
+		t.Fatalf("removed container override must not block its rollout: %v", err)
+	}
+	if len(overrides.Operators["antiddos"].Containers) != 2 {
+		t.Fatal("effective validation mutated the installation overrides")
+	}
+	if err := ValidateYanetComponentOverrides(overrides, &config.Spec.Components, &config.Spec.BoxTypes[0]); err == nil {
+		t.Fatal("admission must still reject a new override for an undeclared container")
+	}
+	overrides.Operators["antiddos"].Containers["operator"] = YanetContainerOverride{Enabled: boolPointer(false)}
+	if err := ValidateEffectiveYanetComponentOverrides(overrides, &config.Spec.Components, &config.Spec.BoxTypes[0]); err == nil {
+		t.Fatal("effective validation must still reject an invalid override for a rendered container")
+	}
+}

@@ -186,8 +186,8 @@ func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
 	pod.InitContainers = restored
 }
 
-// ValidatePodContainerNames rejects patch results that Kubernetes would reject
-// because regular and init containers share one name namespace.
+// ValidatePodContainerNames rejects duplicate names and fixed dataplane sidecars
+// placed outside initContainers, even when their native-sidecar slot is disabled.
 func ValidatePodContainerNames(deployment *appsv1.Deployment) error {
 	if deployment == nil {
 		return nil
@@ -196,6 +196,10 @@ func ValidatePodContainerNames(deployment *appsv1.Deployment) error {
 	check := func(containers []corev1.Container, kind string) error {
 		for i := range containers {
 			name := containers[i].Name
+			if kind == "regular" && deployment.Spec.Template.Labels[labelComponent] == string(helpers.KindDataplane) &&
+				isFixedNativeSidecar(name) {
+				return fmt.Errorf("deployment %s must place dataplane sidecar %q in initContainers", deployment.Name, name)
+			}
 			if previous, duplicate := seen[name]; duplicate {
 				return fmt.Errorf(
 					"deployment %s uses container name %q in both %s and %s containers",

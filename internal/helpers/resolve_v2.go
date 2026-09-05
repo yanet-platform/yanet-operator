@@ -50,8 +50,8 @@ const (
 // definition from YanetConfigV2.spec.components with the optional
 // per-installation override from YanetV2.spec.components.
 //
-// Registry and Prefix come straight from YanetConfigV2.spec.images and
-// are kept here so the builder can render the full path without
+// Registry and Prefix use the palette image's overrides, falling back to
+// YanetConfigV2.spec.images. The builder can render the full path without
 // touching the global config again.
 type ResolvedImage struct {
 	Registry string
@@ -61,9 +61,8 @@ type ResolvedImage struct {
 }
 
 // ResolvedComponent is the merged view of a single Deployment slot
-// requested by a YanetV2 CR. It feeds the builder (Партия R3): the
-// builder turns this struct into one or more Deployment skeletons and
-// then ApplyPatches (Партия R3.5) layers strategic-merge patches on
+// requested by a YanetV2 CR. The builder turns this struct into one or more
+// Deployment skeletons and then ApplyPatches layers strategic-merge patches on
 // top.
 //
 // Numa is only populated for KindControlplane. Containers is only populated
@@ -230,6 +229,11 @@ func EnabledComponentsForBox(config *yanetv2alpha1.YanetConfigSpec, boxName stri
 	box, err := FindBoxType(config, boxName)
 	if err != nil {
 		return nil, err
+	}
+	for name := range box.Operators {
+		if _, err := FindOperator(config, name); err != nil {
+			return nil, err
+		}
 	}
 	var refs []ComponentRef
 	if box.Components.Controlplane != nil {
@@ -519,7 +523,8 @@ func resolveEnabled(override *yanetv2alpha1.YanetComponentOverride) bool {
 
 // mergeImage builds the final image reference. When the per-container
 // override carries Name or Tag, those win over the palette values.
-// Registry / Prefix always come from YanetConfigV2.spec.images.
+// Palette Registry / Prefix override the global defaults independently. A nil
+// pointer inherits the global value; an explicit empty string clears it.
 func mergeImage(
 	images yanetv2alpha1.ImagesSpec,
 	base yanetv2alpha1.ImageRef,
@@ -530,6 +535,12 @@ func mergeImage(
 		Prefix:   images.Prefix,
 		Name:     base.Name,
 		Tag:      base.Tag,
+	}
+	if base.Registry != nil {
+		out.Registry = *base.Registry
+	}
+	if base.Prefix != nil {
+		out.Prefix = *base.Prefix
 	}
 	if override != nil {
 		if override.Name != "" {

@@ -46,13 +46,13 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			nodeName       = "test-node-1"
 		)
 
-		ctx := context.Background()
+		testContext := context.Background()
 		yanetConfigName := types.NamespacedName{Name: "test-config", Namespace: yanetNamespace}
 		yanetLookupKey := types.NamespacedName{Name: yanetName, Namespace: yanetNamespace}
 
 		BeforeEach(func() {
 			By("Cleaning up any existing deployments in default namespace")
-			cleanupDeployments(ctx, yanetNamespace)
+			cleanupDeployments(testContext, yanetNamespace)
 
 			By("Creating a test Node")
 			node := &v1.Node{
@@ -65,7 +65,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 
 			By("Creating a YanetConfigV2")
 			config := &yanetv1alpha1.YanetConfig{
@@ -146,7 +146,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconciler time to update GlobalConfig snapshot
 			time.Sleep(1000 * time.Millisecond)
@@ -156,23 +156,23 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			By("Cleaning up resources")
 			// Delete YanetV2
 			yanet := &yanetv1alpha1.Yanet{}
-			err := k8sClient.Get(ctx, yanetLookupKey, yanet)
+			err := k8sClient.Get(testContext, yanetLookupKey, yanet)
 			if err == nil {
-				Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+				Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 			}
 
 			// Delete YanetConfigV2
 			config := &yanetv1alpha1.YanetConfig{}
-			err = k8sClient.Get(ctx, yanetConfigName, config)
+			err = k8sClient.Get(testContext, yanetConfigName, config)
 			if err == nil {
-				Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+				Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 			}
 
 			// Delete Node
 			node := &v1.Node{}
-			err = k8sClient.Get(ctx, types.NamespacedName{Name: nodeName}, node)
+			err = k8sClient.Get(testContext, types.NamespacedName{Name: nodeName}, node)
 			if err == nil {
-				Expect(k8sClient.Delete(ctx, node)).Should(Succeed())
+				Expect(k8sClient.Delete(testContext, node)).Should(Succeed())
 			}
 		})
 
@@ -208,12 +208,12 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			By("Checking that all 4 deployments are created")
 			Eventually(func() int {
 				depList := &appsv1.DeploymentList{}
-				err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace))
+				err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace))
 				if err != nil {
 					return 0
 				}
@@ -227,7 +227,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			dataplaneDep := &appsv1.Deployment{}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, dataplaneKey, dataplaneDep)
+				return k8sClient.Get(testContext, dataplaneKey, dataplaneDep)
 			}, timeout, interval).Should(Succeed())
 
 			Expect(dataplaneDep.Spec.Template.Spec.Containers).Should(HaveLen(1))
@@ -244,7 +244,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			controlplaneDep := &appsv1.Deployment{}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, controlplaneKey, controlplaneDep)
+				return k8sClient.Get(testContext, controlplaneKey, controlplaneDep)
 			}, timeout, interval).Should(Succeed())
 
 			Expect(controlplaneDep.Spec.Template.Spec.Containers).Should(HaveLen(1))
@@ -259,7 +259,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			birdDep := &appsv1.Deployment{}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, birdKey, birdDep)
+				return k8sClient.Get(testContext, birdKey, birdDep)
 			}, timeout, interval).Should(Succeed())
 
 			Expect(birdDep.Spec.Template.Spec.Containers[0].Image).Should(Equal("docker.io/test/yanet-bird:2.0.12"))
@@ -271,7 +271,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			announcerDep := &appsv1.Deployment{}
 			Eventually(func() error {
-				return k8sClient.Get(ctx, announcerKey, announcerDep)
+				return k8sClient.Get(testContext, announcerKey, announcerDep)
 			}, timeout, interval).Should(Succeed())
 
 			Expect(announcerDep.Spec.Template.Spec.InitContainers).Should(HaveLen(1))
@@ -280,7 +280,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			By("Checking YanetV2 status is updated")
 			Eventually(func() bool {
 				updatedYanet := &yanetv1alpha1.Yanet{}
-				err := k8sClient.Get(ctx, yanetLookupKey, updatedYanet)
+				err := k8sClient.Get(testContext, yanetLookupKey, updatedYanet)
 				if err != nil {
 					return false
 				}
@@ -305,12 +305,12 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			By("Verifying no deployments are created (AutoSync=false)")
 			Consistently(func() int {
 				depList := &appsv1.DeploymentList{}
-				err := k8sClient.List(ctx, depList,
+				err := k8sClient.List(testContext, depList,
 					client.InNamespace(yanetNamespace),
 					client.MatchingLabels{"topology-location-host": nodeName})
 				if err != nil {
@@ -320,7 +320,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}, time.Second*5, interval).Should(Equal(0))
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 		})
 
 		It("Should create deployments with replicas=0 when Enable=false", func() {
@@ -337,7 +337,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, disabledNode)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, disabledNode)).Should(Succeed())
 
 			By("Creating a YanetV2 resource with dataplane disabled")
 			yanet := &yanetv1alpha1.Yanet{
@@ -359,7 +359,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			By("Checking dataplane deployment has 0 replicas")
 			dataplaneKey := types.NamespacedName{
@@ -368,7 +368,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}
 			Eventually(func() int32 {
 				dep := &appsv1.Deployment{}
-				err := k8sClient.Get(ctx, dataplaneKey, dep)
+				err := k8sClient.Get(testContext, dataplaneKey, dep)
 				if err != nil {
 					return -1
 				}
@@ -378,7 +378,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			By("Checking status shows deployment as disabled")
 			Eventually(func() bool {
 				updatedYanet := &yanetv1alpha1.Yanet{}
-				err := k8sClient.Get(ctx, types.NamespacedName{
+				err := k8sClient.Get(testContext, types.NamespacedName{
 					Name:      yanet.Name,
 					Namespace: yanet.Namespace,
 				}, updatedYanet)
@@ -394,8 +394,8 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
-			Expect(k8sClient.Delete(ctx, disabledNode)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, disabledNode)).Should(Succeed())
 		})
 	})
 
@@ -405,7 +405,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			configNamespace = "default"
 		)
 
-		ctx := context.Background()
+		testContext := context.Background()
 		configKey := types.NamespacedName{Name: configName, Namespace: configNamespace}
 
 		It("Should update GlobalConfig in memory", func() {
@@ -420,7 +420,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 					UpdateWindow: 30,
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			By("Triggering reconcile")
 			configReconciler := &YanetConfigReconciler{
@@ -428,7 +428,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 				Scheme:       k8sClient.Scheme(),
 				GlobalConfig: &yanetv1alpha1.MutexYanetConfigSpec{},
 			}
-			_, err := configReconciler.Reconcile(ctx, reconcile.Request{
+			_, err := configReconciler.Reconcile(testContext, reconcile.Request{
 				NamespacedName: configKey,
 			})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -441,13 +441,13 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 
 			By("Updating YanetConfigV2")
 			updatedConfig := &yanetv1alpha1.YanetConfig{}
-			Expect(k8sClient.Get(ctx, configKey, updatedConfig)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, configKey, updatedConfig)).Should(Succeed())
 			updatedConfig.Spec.UpdateWindow = 60
 			updatedConfig.Spec.Stop = true
-			Expect(k8sClient.Update(ctx, updatedConfig)).Should(Succeed())
+			Expect(k8sClient.Update(testContext, updatedConfig)).Should(Succeed())
 
 			By("Triggering reconcile again")
-			_, err = configReconciler.Reconcile(ctx, reconcile.Request{
+			_, err = configReconciler.Reconcile(testContext, reconcile.Request{
 				NamespacedName: configKey,
 			})
 			Expect(err).ShouldNot(HaveOccurred())
@@ -459,7 +459,7 @@ var _ = Describe("YanetReconciler Integration Tests", func() {
 			configReconciler.GlobalConfig.Lock.Unlock()
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 })

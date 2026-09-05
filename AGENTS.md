@@ -88,7 +88,8 @@ yanet-operator/
 ├── cmd/main.go
 ├── internal/
 │   ├── controller/                # Reconcilers
-│   │   ├── yanet_controller.go    # Dispatches v2 → v1 by spec.boxType
+│   │   ├── yanet_controller.go    # Independent v1 controller
+│   │   ├── yanetv2_controller.go  # Independent v2 controller
 │   │   ├── yanet_reconciler.go    # v1 path
 │   │   ├── yanet_reconciler_v2.go # v2 path: resolve → build → patch → apply
 │   │   ├── yanetconfig_controller.go    # v1 in-memory snapshot
@@ -394,7 +395,7 @@ Avoid module-level `webhookClient` globals — pass dependencies through the
 validator struct.
 
 ### Controller pattern
-- `YanetReconciler` — manages `Yanet` (both versions) and `Node` events.
+- `YanetReconciler` manages v1 `Yanet`; `YanetV2Reconciler` manages `YanetV2`.
 - `YanetConfigReconciler` (v1) and `YanetConfigReconcilerV2` — keep the
   in-memory snapshots fresh.
 - All reconcilers share `*MutexYanetConfigSpec` via pointer.
@@ -406,13 +407,14 @@ validator struct.
 - ✅ AutoDiscovery without retry / without caching (not priority)
 
 ### To be implemented (v2 deferred)
-- [ ] Finalizers for graceful cleanup on Yanet delete
 - [ ] `updateWindow` global throttling on the v2 path
 - [ ] Formal `metav1.Condition` entries in `Yanet.Status` (currently only `Sync` buckets)
 - [ ] Init-container generation for `ConfigSource.URL` (today: emptyDir + patch)
 - [ ] JSON6902 (`jsonPatch`) — out of scope, only strategic merge is supported
 
 ### Done in v2 (was open in v1 era)
+- Finalizer cleanup waits for foreground Deployment deletion before releasing
+  the node claim; the global stop switch pauses cleanup too.
 - ✅ Validation webhooks (`vyanet-v2.kb.io`, `vyanetconfig-v2.kb.io`)
 - ✅ Watches: per-version `Yanet`, `Node` (with mapper), `Pod`
 - ✅ Explicit per-component `Service` generation with stable Local endpoints

@@ -44,14 +44,14 @@ func silentLogger() logr.Logger {
 // also re-fetches the YanetV2 so callers always see the latest copy.
 func reconcileTwice(t *testing.T, r *YanetV2Reconciler, yanet *yanetv2alpha1.YanetV2) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	testContext := context.Background()
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("finalizer install: %v", err)
 	}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: yanet.Name, Namespace: yanet.Namespace}, yanet); err != nil {
+	if err := r.Client.Get(testContext, types.NamespacedName{Name: yanet.Name, Namespace: yanet.Namespace}, yanet); err != nil {
 		t.Fatalf("re-get: %v", err)
 	}
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 }
@@ -127,6 +127,8 @@ func TestReconcileV2_DeletionTimestamp_RunsCleanupAndRemovesFinalizer(t *testing
 			Labels:    map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	dep.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	cm.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, dep, svc, cm)
 
 	if _, err := r.reconcileYanetV2(context.Background(), yanet); err != nil {
@@ -185,6 +187,8 @@ func TestPruneOrphans_DeletesUnknownDeployments(t *testing.T) {
 			Labels: map[string]string{manifests.LabelYanet: "another-yanet"},
 		},
 	}
+	keep.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	drop.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, keep, drop, other)
 
 	desired := newDesiredSet()
@@ -245,6 +249,8 @@ func TestPruneOrphans_DeletesStaleInlineConfigMap(t *testing.T) {
 			Labels: map[string]string{manifests.LabelYanet: "another-yanet"},
 		},
 	}
+	stale.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	fresh.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, stale, fresh, foreign)
 
 	desired := newDesiredSet()
@@ -282,6 +288,7 @@ func TestPruneOrphans_AutoSyncFalse_DoesNotDelete(t *testing.T) {
 			Labels: map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	drop.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, drop)
 
 	count, err := r.pruneOrphans(context.Background(), yanet, newDesiredSet(), false, silentLogger())
@@ -559,7 +566,10 @@ func TestCollectPodsV2_GroupsByPhase(t *testing.T) {
 		},
 	}
 	r, _ := makeReconcilerEnv(t, append(pods, yanet)...)
-	out := collectPodsV2(context.Background(), r.Client, yanet, silentLogger())
+	out, err := collectPodsV2(context.Background(), r.Client, yanet)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := out[corev1.PodRunning]; len(got) != 1 || got[0] != "p-running" {
 		t.Errorf("Running bucket: got %v want [p-running]", got)
@@ -600,6 +610,7 @@ func TestReconcileV2_AutoSyncOn_PrunesOrphanDeployment(t *testing.T) {
 			Labels:    map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	orphan.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, snap := makeReconcilerEnv(t, yanet, node, orphan)
 	snap.Config = minimalConfigV2()
 

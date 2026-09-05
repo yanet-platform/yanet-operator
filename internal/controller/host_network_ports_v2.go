@@ -38,7 +38,7 @@ type listenerPortAssignmentsV2 map[string]map[string]int32
 // service-backed listeners of host-network workloads on one node. Fixed ports
 // such as BIRD's BGP/BFD listeners and ports added by patches are reserved
 // first, so a range may safely include them as long as enough other ports are
-// available.
+// available. Explicit hostPorts of Pod-network workloads reserve node ports too.
 func allocateHostNetworkPortsV2(
 	workloads []renderedWorkloadV2,
 	portRange *yanetv2alpha1.HostNetworkPortRange,
@@ -54,23 +54,27 @@ func allocateHostNetworkPortsV2(
 		if err := validateIntraPodHostPortsV2(deployment, workload.component); err != nil {
 			return nil, err
 		}
-		if !deployment.Spec.Template.Spec.HostNetwork {
-			continue
-		}
 		listenerContainer := manifests.ListenerContainerName(workload.component)
 		reserveContainerPorts := func(containers []corev1.Container) error {
 			for containerIndex := range containers {
 				container := &containers[containerIndex]
 				for portIndex := range container.Ports {
-					port := &container.Ports[portIndex]
+					port := container.Ports[portIndex]
 					if container.Name == listenerContainer &&
 						manifests.IsManagedListener(workload.component, port.Name) {
 						continue
 					}
+					if !deployment.Spec.Template.Spec.HostNetwork {
+						port.ContainerPort = port.HostPort
+						if port.HostPort > 0 && deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 {
+							return fmt.Errorf("Deployment %s exposes hostPort %d with %d replicas pinned to one node",
+								deployment.Name, port.HostPort, *deployment.Spec.Replicas)
+						}
+					}
 					if err := reserveHostPortV2(reserved, hostPortOwnerV2{
 						deployment: deployment.Name,
 						container:  container.Name,
-					}, port); err != nil {
+					}, &port); err != nil {
 						return err
 					}
 				}
@@ -205,7 +209,7 @@ func reserveHostPortV2(
 	key := hostPortKey{port: port.ContainerPort, protocol: protocol}
 	if previous, conflict := reserved[key]; conflict && previous.deployment != owner.deployment {
 		return fmt.Errorf(
-			"containers %s/%s and %s/%s use hostNetwork with the same %s port %d",
+			"containers %s/%s and %s/%s use the same %s port %d on the node",
 			previous.deployment,
 			previous.container,
 			owner.deployment,
@@ -222,6 +226,22 @@ func validateIntraPodHostPortsV2(
 	deployment *appsv1.Deployment,
 	provisionalListeners *helpers.ResolvedComponent,
 ) error {
+	if err := validateConcurrentPortsV2(deployment, provisionalListeners, false); err != nil {
+		return err
+	}
+	if !deployment.Spec.Template.Spec.HostNetwork {
+		return validateConcurrentPortsV2(deployment, provisionalListeners, true)
+	}
+	return nil
+}
+
+// Pod-network containers share a Pod port space and may additionally publish
+// distinct container ports to the same host port. Check those spaces separately.
+func validateConcurrentPortsV2(
+	deployment *appsv1.Deployment,
+	provisionalListeners *helpers.ResolvedComponent,
+	hostPorts bool,
+) error {
 	persistent := make(map[hostPortKey]string)
 	sidecars := make(map[hostPortKey]string)
 	listenerContainer := manifests.ListenerContainerName(provisionalListeners)
@@ -229,26 +249,34 @@ func validateIntraPodHostPortsV2(
 		return provisionalListeners != nil && container.Name == listenerContainer &&
 			manifests.IsManagedListener(provisionalListeners, port.Name)
 	}
+	portKey := func(port *corev1.ContainerPort) hostPortKey {
+		number := port.ContainerPort
+		if hostPorts {
+			number = port.HostPort
+		}
+		protocol := port.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
+		return hostPortKey{port: number, protocol: protocol}
+	}
 	check := func(ports map[hostPortKey]string, container *corev1.Container) error {
 		for i := range container.Ports {
 			port := &container.Ports[i]
-			if port.ContainerPort <= 0 || provisional(container, port) {
+			key := portKey(port)
+			if key.port <= 0 || provisional(container, port) {
 				continue
 			}
-			protocol := port.Protocol
-			if protocol == "" {
-				protocol = corev1.ProtocolTCP
-			}
-			key := hostPortKey{port: port.ContainerPort, protocol: protocol}
 			if previous, conflict := ports[key]; conflict && previous != container.Name {
 				return fmt.Errorf(
-					"containers %s/%s and %s/%s run concurrently with hostNetwork and use the same %s port %d",
+					"containers %s/%s and %s/%s run concurrently and use the same %s port %d (hostPort=%t)",
 					deployment.Name,
 					previous,
 					deployment.Name,
 					container.Name,
-					protocol,
-					port.ContainerPort,
+					key.protocol,
+					key.port,
+					hostPorts,
 				)
 			}
 		}
@@ -257,14 +285,11 @@ func validateIntraPodHostPortsV2(
 	reserve := func(ports map[hostPortKey]string, container *corev1.Container) {
 		for i := range container.Ports {
 			port := &container.Ports[i]
-			if port.ContainerPort <= 0 || provisional(container, port) {
+			key := portKey(port)
+			if key.port <= 0 || provisional(container, port) {
 				continue
 			}
-			protocol := port.Protocol
-			if protocol == "" {
-				protocol = corev1.ProtocolTCP
-			}
-			ports[hostPortKey{port: port.ContainerPort, protocol: protocol}] = container.Name
+			ports[key] = container.Name
 		}
 	}
 

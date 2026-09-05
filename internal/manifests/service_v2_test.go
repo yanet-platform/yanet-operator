@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
@@ -60,7 +61,7 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 		},
 		{
 			name:      "bird adapter",
-			component: &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "bird-adapter"},
+			component: &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "birdAdapter"},
 			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC}},
 			wantCount: 1,
 		},
@@ -86,13 +87,57 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			plans := BuildServices(serviceContextV2(), tt.component)
+			ctx := ctxV2()
+			ctx.NumaCount = 2
+			tt.component.Image = helpers.ResolvedImage{Name: "component", Tag: "v2"}
+			if tt.component.Kind == helpers.KindOperator {
+				tt.component.Containers = []helpers.ResolvedContainer{{
+					Name: "operator", Image: tt.component.Image,
+				}}
+			}
+			deployments, err := BuildDeployments(ctx, tt.component)
+			if err != nil {
+				t.Fatalf("BuildDeployments: %v", err)
+			}
+			plans := BuildServices(ctx, tt.component)
 			if len(plans) != tt.wantCount {
 				t.Fatalf("plans = %+v, want count %d", plans, tt.wantCount)
 			}
 			for index := range plans {
-				if fmt.Sprint(plans[index].Ports) != fmt.Sprint(tt.wantPorts) {
-					t.Fatalf("ports = %+v, want %+v", plans[index].Ports, tt.wantPorts)
+				plan := plans[index]
+				if err := plan.Validate(); err != nil {
+					t.Fatalf("generated Service plan is invalid: %v", err)
+				}
+				if diff := cmp.Diff(tt.wantPorts, plan.Ports); diff != "" {
+					t.Fatalf("ports mismatch (-want +got):\n%s", diff)
+				}
+				if index >= len(deployments) {
+					t.Fatalf("Service %s has no matching Deployment", plan.Name)
+				}
+				pod := &deployments[index].Spec.Template
+				for key, value := range plan.Selector {
+					if key == labelYanet || key == labelNode {
+						t.Errorf("shared Service selector contains installation identity: %v", plan.Selector)
+					}
+					if pod.Labels[key] != value {
+						t.Errorf("Service %s selector %s=%s does not match Pod labels: %v", plan.Name, key, value, pod.Labels)
+					}
+				}
+				for _, target := range plan.Ports {
+					found := false
+					for _, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+						for _, container := range containers {
+							for _, port := range container.Ports {
+								if port.Name == target.TargetPortName && port.ContainerPort == target.Port &&
+									port.Protocol == corev1.ProtocolTCP {
+									found = true
+								}
+							}
+						}
+					}
+					if !found {
+						t.Errorf("Service %s target %q:%d has no Pod listener", plan.Name, target.TargetPortName, target.Port)
+					}
 				}
 			}
 		})
@@ -195,13 +240,17 @@ func TestServicePlan_ToService(t *testing.T) {
 func TestServicePlan_Validate(t *testing.T) {
 	tests := []ServicePlan{
 		{
-			Name:     "invalid.name",
-			Selector: map[string]string{"app": "x"},
-			Ports:    []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort}},
+			Name:      "invalid.name",
+			BoxType:   "firewall",
+			Component: "route",
+			Selector:  map[string]string{"app": "x"},
+			Ports:     []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort}},
 		},
 		{
-			Name:     "valid-name",
-			Selector: map[string]string{"app": "x"},
+			Name:      "valid-name",
+			BoxType:   "firewall",
+			Component: "route",
+			Selector:  map[string]string{"app": "x"},
 			Ports: []ServicePortPlan{
 				{Name: ListenerGRPC, Port: ServiceGRPCPort},
 				{Name: ListenerHTTP, Port: ServiceGRPCPort},

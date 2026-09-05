@@ -92,29 +92,24 @@ func refreshYanetConfigV2Snapshot(
 	if snapshot == nil {
 		return nil, fmt.Errorf("GlobalConfigV2 is nil")
 	}
+	// Both the config reconciler and the YanetV2 watch mapper refresh this
+	// snapshot. Serialize the read as well as publication so an older in-flight
+	// read cannot overwrite a newer config (including the global stop flag).
+	snapshot.Lock.Lock()
+	defer snapshot.Lock.Unlock()
 	cfg := &yanetv2alpha1.YanetConfigV2{}
 	err := c.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, cfg)
 	if err != nil && !apierrors.IsNotFound(err) {
+		snapshot.Config = yanetv2alpha1.YanetConfigSpec{}
 		return nil, err
 	}
 
-	snapshot.Lock.Lock()
-	defer snapshot.Lock.Unlock()
 	if apierrors.IsNotFound(err) {
 		snapshot.Config = yanetv2alpha1.YanetConfigSpec{}
 		return nil, nil
 	}
 	snapshot.Config = *cfg.Spec.DeepCopy()
 	return cfg, nil
-}
-
-func clearYanetConfigV2Snapshot(snapshot *yanetv2alpha1.MutexYanetConfigSpec) {
-	if snapshot == nil {
-		return
-	}
-	snapshot.Lock.Lock()
-	defer snapshot.Lock.Unlock()
-	snapshot.Config = yanetv2alpha1.YanetConfigSpec{}
 }
 
 // SetupWithManager wires the controller to watch v2alpha1.YanetConfigV2.

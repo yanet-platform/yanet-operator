@@ -25,14 +25,13 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
@@ -129,26 +128,19 @@ func (r *YanetV2Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 //   - v2alpha1.YanetConfigV2 (mapped to all YanetV2 CRs so a config
 //     change — e.g. hugepages update — triggers re-reconcile)
 //   - corev1.Node (mapped to YanetV2 via nodeSelector)
-//   - appsv1.Deployment (Owns)
-//   - corev1.Pod (filtered by manifests.LabelYanet to enqueue the
-//     owning YanetV2 when a managed Pod changes phase)
+//   - appsv1.Deployment and corev1.ConfigMap (Owns)
+//   - corev1.Pod (mapped by manifests.LabelYanet to enqueue the
+//     owning YanetV2 when a managed Pod changes phase or loses its label)
 func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Filter Pod events by the v2 ownership label so we don't dequeue
-	// work for every Pod in the cluster.
-	yanetPodPredicate := predicate.NewPredicateFuncs(func(o client.Object) bool {
-		_, ok := o.GetLabels()[manifests.LabelYanet]
-		return ok
-	})
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&yanetv2alpha1.YanetV2{}).
 		Watches(&yanetv2alpha1.YanetConfigV2{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigToV2Yanets)).
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToV2Yanets)).
-		Watches(
-			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(r.mapPodToYanetV2),
-			builder.WithPredicates(yanetPodPredicate),
-		).
+		// The mapper filters unlabelled Pods and handles both sides of an
+		// update. A new-object-only predicate would drop label-removal events.
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToYanetV2)).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.ConfigMap{}).
 		Complete(r)
 }
 
@@ -158,9 +150,8 @@ func (r *YanetV2Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // all installations that depend on the config snapshot.
 func (r *YanetV2Reconciler) mapConfigToV2Yanets(ctx context.Context, _ client.Object) []ctrl.Request {
 	if _, err := refreshYanetConfigV2Snapshot(ctx, r.Client, r.GlobalConfigV2); err != nil {
-		// Never enqueue a reconcile against a known-stale snapshot. The
-		// resulting ConfigNotLoaded reconcile retries after the cache recovers.
-		clearYanetConfigV2Snapshot(r.GlobalConfigV2)
+		// Refresh already cleared the failed read under the publication lock.
+		// Clearing here could erase a newer snapshot published in the meantime.
 		log.FromContext(ctx).Error(err, "failed to refresh YanetConfigV2 snapshot before enqueueing YanetV2 resources")
 	}
 	list := &yanetv2alpha1.YanetV2List{}
@@ -188,7 +179,7 @@ func (r *YanetV2Reconciler) mapNodeToV2Yanets(ctx context.Context, obj client.Ob
 	var out []ctrl.Request
 	for i := range list.Items {
 		y := &list.Items[i]
-		if labelsMatchSelector(node.Labels, y.Spec.NodeSelector) {
+		if labels.SelectorFromSet(y.Spec.NodeSelector).Matches(labels.Set(node.Labels)) {
 			out = append(out, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
 		}
 	}

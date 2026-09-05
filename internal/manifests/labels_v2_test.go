@@ -17,8 +17,11 @@ limitations under the License.
 package manifests
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
@@ -159,6 +162,148 @@ func TestValidatePodContainerNamesRejectsCrossListCollision(t *testing.T) {
 	}
 	if err := ValidatePodContainerNames(deployment); err == nil {
 		t.Fatal("expected duplicate regular/init container name to be rejected")
+	}
+}
+
+func TestValidatePodContainerNamesRejectsDisabledSidecarsInRegularContainers(t *testing.T) {
+	for _, name := range []string{
+		yanetv2alpha1.BirdSidecarContainerName,
+		yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+	} {
+		t.Run(name, func(t *testing.T) {
+			component := &helpers.ResolvedComponent{
+				Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+				Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
+			}
+			deployments, err := BuildDeployments(ctxV2(), component)
+			if err != nil {
+				t.Fatalf("BuildDeployments: %v", err)
+			}
+			deployment := deployments[0]
+			identity := CaptureWorkloadIdentity(deployment)
+			registry := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+				patch("legacy-sidecar", fmt.Sprintf(
+					`{"spec":{"template":{"spec":{"containers":[{"name":%q,"image":"sidecar:v2"}]}}}}`, name,
+				)),
+			})
+			if err := ApplyPatches(deployment, []string{"legacy-sidecar"}, registry); err != nil {
+				t.Fatalf("ApplyPatches: %v", err)
+			}
+			RestoreWorkloadIdentity(deployment, identity)
+			if err := ValidatePodContainerNames(deployment); err == nil || !strings.Contains(err.Error(), "initContainers") {
+				t.Fatalf("disabled sidecar in regular containers must be rejected, got %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePodContainerNamesAllowsOperatorContainerNamedBird(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "route", Enabled: true,
+		Containers: []helpers.ResolvedContainer{{
+			Name: "bird", Image: helpers.ResolvedImage{Name: "route", Tag: "v2"},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), component)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if err := ValidatePodContainerNames(deployments[0]); err != nil {
+		t.Fatalf("operator container names are not dataplane sidecar slots: %v", err)
+	}
+}
+
+func TestRestoreWorkloadIdentityPreservesNativeSidecarPatchFields(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image:     helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
+		Hugepages: &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 2},
+		Config:    &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2"},
+		NativeSidecars: []helpers.ResolvedContainer{
+			{
+				Name:   yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				Image:  helpers.ResolvedImage{Name: "netlink", Tag: "v2"},
+				Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2"},
+			},
+			{
+				Name:   yanetv2alpha1.BirdSidecarContainerName,
+				Image:  helpers.ResolvedImage{Name: "bird", Tag: "v2"},
+				Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/bird"},
+			},
+		},
+	}
+	deployments, err := BuildDeployments(ctxV2(), component)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	deployment := deployments[0]
+	baseline := deployment.DeepCopy()
+	identity := CaptureWorkloadIdentity(deployment)
+	registry := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+		patch("runtime", `{"spec":{"strategy":{"type":"RollingUpdate"},"template":{"spec":{
+			"hostNetwork":true,
+			"containers":[{"name":"dataplane","resources":{"limits":{"memory":"1Gi"}}}],
+			"$setElementOrder/initContainers":[{"name":"bird"},{"name":"netlink-dataplane-sidecar"}],
+			"initContainers":[
+				{"name":"bird","restartPolicy":null,"resources":{"requests":{"cpu":"100m"}}},
+				{"name":"netlink-dataplane-sidecar","restartPolicy":null,"securityContext":{"runAsUser":0},
+				 "env":[{"name":"CUSTOM","value":"kept"},{"name":"YANET_SERVER_ENDPOINT","value":"wrong"}]}
+			]
+		}}}}`),
+	})
+	if err := ApplyPatches(deployment, []string{"runtime"}, registry); err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+	RestoreWorkloadIdentity(deployment, identity)
+	if err := ValidatePodContainerNames(deployment); err != nil {
+		t.Fatalf("ValidatePodContainerNames: %v", err)
+	}
+	if err := ConfigureListeners(deployment, component, map[string]int32{ListenerGRPC: 20000}); err != nil {
+		t.Fatalf("ConfigureListeners: %v", err)
+	}
+	pod := &deployment.Spec.Template.Spec
+	if !pod.HostIPC || !pod.HostNetwork || pod.DNSPolicy != corev1.DNSClusterFirstWithHostNet ||
+		deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatalf("pod namespace or rollout invariants changed: %+v", deployment.Spec)
+	}
+	if diff := cmp.Diff(baseline.Spec.Template.Spec.Volumes, pod.Volumes); diff != "" {
+		t.Errorf("baseline volumes changed (-want +got):\n%s", diff)
+	}
+	if len(pod.InitContainers) != 2 {
+		t.Fatalf("native sidecars = %+v", pod.InitContainers)
+	}
+	for i, original := range baseline.Spec.Template.Spec.InitContainers {
+		container := &pod.InitContainers[i]
+		if container.Name != original.Name || container.RestartPolicy == nil ||
+			*container.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			t.Fatalf("native sidecar order/restart policy changed: %+v", pod.InitContainers)
+		}
+		if diff := cmp.Diff(original.VolumeMounts, container.VolumeMounts); diff != "" {
+			t.Errorf("%s mounts changed (-want +got):\n%s", container.Name, diff)
+		}
+	}
+	dataplane := &pod.Containers[0]
+	if dataplane.SecurityContext == nil || dataplane.SecurityContext.Privileged == nil ||
+		!*dataplane.SecurityContext.Privileged || dataplane.Resources.Limits.Memory().String() != "1Gi" {
+		t.Fatalf("dataplane security/resource patch = %+v", dataplane)
+	}
+	if diff := cmp.Diff(baseline.Spec.Template.Spec.Containers[0].VolumeMounts, dataplane.VolumeMounts); diff != "" {
+		t.Errorf("dataplane mounts changed (-want +got):\n%s", diff)
+	}
+	netlink := &pod.InitContainers[0]
+	if netlink.SecurityContext == nil || netlink.SecurityContext.Privileged == nil ||
+		!*netlink.SecurityContext.Privileged || netlink.SecurityContext.RunAsUser == nil ||
+		*netlink.SecurityContext.RunAsUser != 0 {
+		t.Fatalf("netlink security patch = %+v", netlink.SecurityContext)
+	}
+	env := envValues(netlink.Env)
+	if netlink.Env[0].Name != EnvKubernetesGRPCPort || env[EnvKubernetesGRPCPort] != "20000" ||
+		env[envNetlinkServerEndpoint] != "[::]:$(YANET_KUBERNETES_GRPC_PORT)" || env["CUSTOM"] != "kept" ||
+		env[envNetlinkServerAdvertiseEndpoint] != "yanet-firewall-netlink-dataplane-sidecar:8080" {
+		t.Fatalf("netlink listener env = %+v", netlink.Env)
+	}
+	if pod.InitContainers[1].Resources.Requests.Cpu().String() != "100m" || pod.InitContainers[1].SecurityContext != nil {
+		t.Fatalf("BIRD resource/security patch = %+v", pod.InitContainers[1])
 	}
 }
 

@@ -87,17 +87,13 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 	}
 
 	var deployments []*appsv1.Deployment
-	var err error
 	switch c.Kind {
 	case helpers.KindControlplane:
-		deployments, err = buildControlplaneFanout(ctx, c)
+		deployments = buildControlplaneFanout(ctx, c)
 	case helpers.KindOperator:
 		deployments = []*appsv1.Deployment{buildOperator(ctx, c)}
 	default:
 		deployments = []*appsv1.Deployment{buildSingle(ctx, c)}
-	}
-	if err != nil {
-		return nil, err
 	}
 	for _, deployment := range deployments {
 		if err := ConfigureListeners(deployment, c, nil); err != nil {
@@ -112,7 +108,7 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 // NUMA indices listed in DisabledNuma are skipped for Deployments. Shared
 // Services remain unconditional so their DNS names do not appear and disappear
 // as installations are scaled or temporarily disabled.
-func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*appsv1.Deployment, error) {
+func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) []*appsv1.Deployment {
 	numa := effectiveNuma(ctx, c)
 	disabled := disabledNumaSet(c)
 	out := make([]*appsv1.Deployment, 0, numa)
@@ -134,7 +130,7 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		cont.Args = numaConfigArgs(cont.Args, i)
 		out = append(out, d)
 	}
-	return out, nil
+	return out
 }
 
 // disabledNumaSet indexes ResolvedComponent.DisabledNuma for O(1)
@@ -151,22 +147,26 @@ func disabledNumaSet(c *helpers.ResolvedComponent) map[int32]struct{} {
 	return out
 }
 
-// numaConfigArgs rewrites the config path inside the component args so
-// that each per-NUMA instance reads its own file. The NUMA index is
-// appended to the file base name, keeping the directory and extension:
+// numaConfigArgs substitutes {numa} in explicit per-NUMA arguments, for example
+// /etc/yanet2/controlplane.d/numa{numa}.yaml. Arguments without a placeholder
+// retain the legacy config-path convention: append the NUMA index to the file
+// base name, keeping the directory and extension:
 //
 //	/etc/yanet2/controlplane.yaml → /etc/yanet2/controlplane-0.yaml
 //
-// Only arguments that look like a config file path (a *.yaml / *.yml
-// element) are touched, so flags such as `-c` and subcommands are
-// preserved verbatim. Args without any such element are returned
-// unchanged — the caller stays responsible for a sane args list.
+// Without a placeholder, only *.yaml / *.yml elements are touched. Flags such
+// as `-c` and subcommands are preserved verbatim. The index is the physical
+// fan-out index, not the position among enabled NUMA domains.
 func numaConfigArgs(args []string, numa int32) []string {
 	if len(args) == 0 {
 		return args
 	}
 	out := append([]string(nil), args...)
 	for i, a := range out {
+		if strings.Contains(a, "{numa}") {
+			out[i] = strings.ReplaceAll(a, "{numa}", fmt.Sprint(numa))
+			continue
+		}
 		ext := filepath.Ext(a)
 		if ext != ".yaml" && ext != ".yml" {
 			continue
@@ -462,7 +462,7 @@ func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 	if cs.IsZero() {
 		return nil, nil, "", nil
 	}
-	mountPath := defaultConfigMountPath(c.Kind)
+	mountPath := defaultConfigMountPath
 	switch {
 	case cs.HostPath != "":
 		volumes = []corev1.Volume{{
@@ -510,7 +510,7 @@ func buildConfigVolumesForContainer(
 		return nil, nil, "", nil
 	}
 	volName := fmt.Sprintf("config-%d", idx)
-	mountPath := defaultConfigMountPath(c.Kind)
+	mountPath := defaultConfigMountPath
 	switch {
 	case rc.Config.HostPath != "":
 		volumes = []corev1.Volume{{
@@ -549,7 +549,7 @@ func buildConfigVolumesForNativeSidecar(
 		return nil, nil, nil
 	}
 	volName := "config-" + rc.Name
-	mountPath := "/etc/yanet2"
+	mountPath := defaultConfigMountPath
 	if rc.Name == yanetv2alpha1.BirdSidecarContainerName {
 		mountPath = "/etc/bird"
 	}
@@ -582,12 +582,9 @@ func buildConfigVolumesForNativeSidecar(
 	return volumes, mounts, append([]string(nil), rc.Config.Args...)
 }
 
-// defaultConfigMountPath gives a sensible per-component mount
-// directory. Patches can override the actual file path inside the
-// container if needed.
-func defaultConfigMountPath(kind helpers.ComponentKind) string {
-	return "/etc/yanet2"
-}
+// defaultConfigMountPath is shared by workload and netlink configuration.
+// The BIRD native sidecar uses /etc/bird instead.
+const defaultConfigMountPath = "/etc/yanet2"
 
 // toLowerKebab converts a camelCase or mixed-case string to a lowercase
 // kebab-case string safe for use in Kubernetes resource names (RFC 1123).

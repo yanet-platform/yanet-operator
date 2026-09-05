@@ -84,6 +84,16 @@ workload owner (or the oldest CR before workloads exist).
 > Before enabling the native BIRD sidecar, stop the old operator and delete its
 > standalone v2 BIRD Deployments. The old and new BIRD processes share the
 > node-local `/run/bird` control-socket directory and must not overlap.
+> Host-port migrations also require a stop-first transition when new allocations
+> overlap old workloads. Preflight checks live Deployments, Pods, and ReplicaSets
+> and refuses the conflicting migration; stop those workloads and wait for their
+> Pods to terminate before retrying. Stopping the operator alone does not stop Pods.
+
+Palette images may override `registry` and `prefix` independently: omission
+inherits `spec.images`, while `""` clears that part. Installation container
+overrides still only support `name`, `tag`, and native-sidecar `enabled`.
+Controlplane `config.args` supports `{numa}` for the physical NUMA index;
+literal `.yaml`/`.yml` arguments without it retain the legacy `-<index>` suffix.
 
 See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
 [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable

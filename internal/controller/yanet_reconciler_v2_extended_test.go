@@ -519,7 +519,12 @@ func TestOrphanCleanup_MultipleResourceTypes(t *testing.T) {
 			Labels: map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	zero := int32(0)
+	keepDep.Spec.Replicas = &zero
 
+	for _, object := range []client.Object{orphanDep, orphanCM, keepDep} {
+		object.SetOwnerReferences([]metav1.OwnerReference{yanetV2OwnerReferenceForTest()})
+	}
 	r, _ := makeReconcilerEnv(t, yanet, orphanDep, orphanSvc, orphanCM, keepDep)
 
 	// Desired set only includes keepDep
@@ -643,6 +648,8 @@ func TestOrphanCleanup_EmptyDesiredSet_DeletesAll(t *testing.T) {
 		},
 	}
 
+	dep1.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	dep2.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, dep1, dep2, svc)
 
 	// Empty desired set (simulates deletion scenario)
@@ -685,6 +692,7 @@ func TestOrphanCleanup_AutoSyncFalse_OnlyCounts(t *testing.T) {
 		},
 	}
 
+	orphan.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, orphan)
 
 	// Empty desired set

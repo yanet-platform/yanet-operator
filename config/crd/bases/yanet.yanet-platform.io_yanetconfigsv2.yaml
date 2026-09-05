@@ -174,7 +174,9 @@ spec:
                           type: object
                       type: object
                     name:
+                      maxLength: 63
                       minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     operators:
                       additionalProperties:
@@ -258,12 +260,22 @@ spec:
                         type: object
                       image:
                         description: |-
-                          ImageRef identifies an image. Registry and prefix come from
-                          YanetConfigV2.spec.images.
+                          ImageRef identifies a palette image. Registry and prefix default to
+                          YanetConfigV2.spec.images but can be overridden independently for each image.
                         properties:
                           name:
                             description: Name is the image name without registry/prefix/tag.
                             minLength: 1
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix overrides the global prefix. Nil inherits the global value;
+                              an explicit empty string omits the prefix segment.
+                            type: string
+                          registry:
+                            description: |-
+                              Registry overrides the global registry. Nil inherits the global value;
+                              an explicit empty string omits the registry segment.
                             type: string
                           tag:
                             description: Tag is the image tag.
@@ -336,12 +348,22 @@ spec:
                         type: object
                       image:
                         description: |-
-                          ImageRef identifies an image. Registry and prefix come from
-                          YanetConfigV2.spec.images.
+                          ImageRef identifies a palette image. Registry and prefix default to
+                          YanetConfigV2.spec.images but can be overridden independently for each image.
                         properties:
                           name:
                             description: Name is the image name without registry/prefix/tag.
                             minLength: 1
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix overrides the global prefix. Nil inherits the global value;
+                              an explicit empty string omits the prefix segment.
+                            type: string
+                          registry:
+                            description: |-
+                              Registry overrides the global registry. Nil inherits the global value;
+                              an explicit empty string omits the registry segment.
                             type: string
                           tag:
                             description: Tag is the image tag.
@@ -412,12 +434,22 @@ spec:
                         type: array
                       image:
                         description: |-
-                          ImageRef identifies an image. Registry and prefix come from
-                          YanetConfigV2.spec.images.
+                          ImageRef identifies a palette image. Registry and prefix default to
+                          YanetConfigV2.spec.images but can be overridden independently for each image.
                         properties:
                           name:
                             description: Name is the image name without registry/prefix/tag.
                             minLength: 1
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix overrides the global prefix. Nil inherits the global value;
+                              an explicit empty string omits the prefix segment.
+                            type: string
+                          registry:
+                            description: |-
+                              Registry overrides the global registry. Nil inherits the global value;
+                              an explicit empty string omits the registry segment.
                             type: string
                           tag:
                             description: Tag is the image tag.
@@ -431,6 +463,7 @@ spec:
                           operator reads `feature.node.kubernetes.io/cpu-numa_nodes_count`
                           from the Node and falls back to 1.
                         format: int32
+                        minimum: 1
                         type: integer
                     required:
                     - image
@@ -517,12 +550,22 @@ spec:
                         type: object
                       image:
                         description: |-
-                          ImageRef identifies an image. Registry and prefix come from
-                          YanetConfigV2.spec.images.
+                          ImageRef identifies a palette image. Registry and prefix default to
+                          YanetConfigV2.spec.images but can be overridden independently for each image.
                         properties:
                           name:
                             description: Name is the image name without registry/prefix/tag.
                             minLength: 1
+                            type: string
+                          prefix:
+                            description: |-
+                              Prefix overrides the global prefix. Nil inherits the global value;
+                              an explicit empty string omits the prefix segment.
+                            type: string
+                          registry:
+                            description: |-
+                              Registry overrides the global registry. Nil inherits the global value;
+                              an explicit empty string omits the registry segment.
                             type: string
                           tag:
                             description: Tag is the image tag.
@@ -595,12 +638,22 @@ spec:
                                 type: object
                               image:
                                 description: |-
-                                  ImageRef identifies an image. Registry and prefix come from
-                                  YanetConfigV2.spec.images.
+                                  ImageRef identifies a palette image. Registry and prefix default to
+                                  YanetConfigV2.spec.images but can be overridden independently for each image.
                                 properties:
                                   name:
                                     description: Name is the image name without registry/prefix/tag.
                                     minLength: 1
+                                    type: string
+                                  prefix:
+                                    description: |-
+                                      Prefix overrides the global prefix. Nil inherits the global value;
+                                      an explicit empty string omits the prefix segment.
+                                    type: string
+                                  registry:
+                                    description: |-
+                                      Registry overrides the global registry. Nil inherits the global value;
+                                      an explicit empty string omits the registry segment.
                                     type: string
                                   tag:
                                     description: Tag is the image tag.
@@ -672,12 +725,22 @@ spec:
                                 type: object
                               image:
                                 description: |-
-                                  ImageRef identifies an image. Registry and prefix come from
-                                  YanetConfigV2.spec.images.
+                                  ImageRef identifies a palette image. Registry and prefix default to
+                                  YanetConfigV2.spec.images but can be overridden independently for each image.
                                 properties:
                                   name:
                                     description: Name is the image name without registry/prefix/tag.
                                     minLength: 1
+                                    type: string
+                                  prefix:
+                                    description: |-
+                                      Prefix overrides the global prefix. Nil inherits the global value;
+                                      an explicit empty string omits the prefix segment.
+                                    type: string
+                                  registry:
+                                    description: |-
+                                      Registry overrides the global registry. Nil inherits the global value;
+                                      an explicit empty string omits the registry segment.
                                     type: string
                                   tag:
                                     description: Tag is the image tag.
@@ -750,12 +813,22 @@ spec:
                                 type: boolean
                               image:
                                 description: |-
-                                  ImageRef identifies an image. Registry and prefix come from
-                                  YanetConfigV2.spec.images.
+                                  ImageRef identifies a palette image. Registry and prefix default to
+                                  YanetConfigV2.spec.images but can be overridden independently for each image.
                                 properties:
                                   name:
                                     description: Name is the image name without registry/prefix/tag.
                                     minLength: 1
+                                    type: string
+                                  prefix:
+                                    description: |-
+                                      Prefix overrides the global prefix. Nil inherits the global value;
+                                      an explicit empty string omits the prefix segment.
+                                    type: string
+                                  registry:
+                                    description: |-
+                                      Registry overrides the global registry. Nil inherits the global value;
+                                      an explicit empty string omits the registry segment.
                                     type: string
                                   tag:
                                     description: Tag is the image tag.
@@ -768,6 +841,7 @@ spec:
                                   Name of the container. Must be unique within the operator and
                                   is the key used by YanetV2.spec.components.operators[].containers
                                   for per-container image overrides.
+                                maxLength: 63
                                 minLength: 1
                                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                                 type: string
@@ -782,6 +856,7 @@ spec:
                           description: |-
                             Name is unique within the Operators array. It is used as the component
                             label and default container name. Built-in component names are reserved.
+                          maxLength: 63
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                       required:
@@ -817,6 +892,9 @@ spec:
                 - end
                 - start
                 type: object
+                x-kubernetes-validations:
+                - message: start must not exceed end
+                  rule: self.start <= self.end
               images:
                 description: |-
                   Images defines global image settings shared by all generated
@@ -824,8 +902,8 @@ spec:
                 properties:
                   prefix:
                     description: |-
-                      Prefix is an optional path segment between registry and image
-                      name: {registry}/{prefix}/{image}:{tag}.
+                      Prefix is the default path segment between registry and image
+                      name: {registry}/{prefix}/{image}:{tag}. Palette images may override it.
                     type: string
                   pullPolicy:
                     description: PullPolicy applies to every container the operator
@@ -857,7 +935,8 @@ spec:
                       x-kubernetes-map-type: atomic
                     type: array
                   registry:
-                    description: Registry is the base registry shared by all components.
+                    description: Registry is the default registry for palette images
+                      without an override.
                     type: string
                 type: object
               patches:
@@ -896,6 +975,8 @@ spec:
                   two node restarts. Expressed in seconds. After a restart on
                   any node, the reconciler delays the next restart (anywhere)
                   by this many seconds.
+                maximum: 9223372036
+                minimum: 0
                 type: integer
             required:
             - boxTypes

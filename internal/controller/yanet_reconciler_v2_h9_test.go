@@ -459,7 +459,8 @@ func TestReconcileYanetV2_PruneFailureReturnsErrorAndDegrades(t *testing.T) {
 	orphan := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "orphan", Namespace: "yanet",
-			Labels: map[string]string{manifests.LabelYanet: yanet.Name},
+			Labels:          map[string]string{manifests.LabelYanet: yanet.Name},
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
 		},
 	}
 	s := newSchemeForTest(t)

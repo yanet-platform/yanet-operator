@@ -17,6 +17,7 @@ limitations under the License.
 package helpers
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -25,7 +26,7 @@ import (
 
 func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 	return &yanetv2alpha1.YanetConfigSpec{
-		Images: yanetv2alpha1.ImagesSpec{Registry: "cr.yandex/yanet", Prefix: "edge"},
+		Images: yanetv2alpha1.ImagesSpec{Registry: "registry.example/test", Prefix: "edge"},
 		Components: yanetv2alpha1.ComponentsSpec{
 			Controlplane: yanetv2alpha1.ControlplaneSpec{
 				Image: yanetv2alpha1.ImageRef{Name: "controlplane", Tag: "v2.1"},
@@ -154,7 +155,7 @@ func TestResolveBoxComponent_Hardcoded(t *testing.T) {
 	if controlplane.Name != "controlplane" || controlplane.Numa != 2 || !controlplane.Enabled {
 		t.Fatalf("controlplane = %+v", controlplane)
 	}
-	if controlplane.Image.FullPath() != "cr.yandex/yanet/edge/controlplane:v2.1" {
+	if controlplane.Image.FullPath() != "registry.example/test/edge/controlplane:v2.1" {
 		t.Fatalf("controlplane image = %+v", controlplane.Image)
 	}
 	if diff := cmp.Diff([]string{"telegraf", "cp-resources"}, controlplane.Patches); diff != "" {
@@ -314,20 +315,31 @@ func TestResolveControlplane_DisabledNuma(t *testing.T) {
 	config.Components.Controlplane.DisabledNuma = []int32{1}
 	tests := []struct {
 		name     string
+		override bool
 		disabled []int32
 		want     []int32
 	}{
 		{name: "inherit", want: []int32{1}},
+		{name: "inherit with null list", override: true, want: []int32{1}},
 		{name: "replace", disabled: []int32{0}, want: []int32{0}},
 		{name: "clear", disabled: []int32{}, want: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
-			if tt.disabled != nil {
+			if tt.override || tt.disabled != nil {
 				yanet.Components = &yanetv2alpha1.YanetComponentsOverride{
 					Controlplane: &yanetv2alpha1.YanetControlplaneOverride{DisabledNuma: tt.disabled},
 				}
+			}
+			// Typed client updates must preserve the explicit empty-list override.
+			raw, err := json.Marshal(yanet)
+			if err != nil {
+				t.Fatalf("marshal Yanet spec: %v", err)
+			}
+			yanet = &yanetv2alpha1.YanetSpec{}
+			if err = json.Unmarshal(raw, yanet); err != nil {
+				t.Fatalf("unmarshal Yanet spec: %v", err)
 			}
 			component, err := ResolveBoxComponent(config, yanet, KindControlplane, "")
 			if err != nil {
@@ -337,6 +349,103 @@ func TestResolveControlplane_DisabledNuma(t *testing.T) {
 				t.Fatalf("disabled NUMA mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestResolveBoxComponent_ImageLocationOverrides(t *testing.T) {
+	registry := "other.example/public"
+	prefix := "stable"
+	empty := ""
+	tests := []struct {
+		name     string
+		registry *string
+		prefix   *string
+		want     string
+	}{
+		{name: "inherit", want: "registry.example/test/edge/controlplane:hotfix"},
+		{name: "registry only", registry: &registry, want: "other.example/public/edge/controlplane:hotfix"},
+		{name: "prefix only", prefix: &prefix, want: "registry.example/test/stable/controlplane:hotfix"},
+		{name: "both", registry: &registry, prefix: &prefix, want: "other.example/public/stable/controlplane:hotfix"},
+		{name: "clear prefix", registry: &registry, prefix: &empty, want: "other.example/public/controlplane:hotfix"},
+		{name: "clear registry", registry: &empty, want: "edge/controlplane:hotfix"},
+		{name: "clear both", registry: &empty, prefix: &empty, want: "controlplane:hotfix"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := fixtureConfig()
+			config.Components.Controlplane.Image.Registry = tt.registry
+			config.Components.Controlplane.Image.Prefix = tt.prefix
+			yanet := &yanetv2alpha1.YanetSpec{
+				BoxType: "release",
+				Components: &yanetv2alpha1.YanetComponentsOverride{
+					Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+						YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
+							Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+								"controlplane": {Tag: "hotfix"},
+							},
+						},
+					},
+				},
+			}
+			component, err := ResolveBoxComponent(config, yanet, KindControlplane, "")
+			if err != nil {
+				t.Fatalf("resolve controlplane: %v", err)
+			}
+			if got := component.Image.FullPath(); got != tt.want {
+				t.Fatalf("image = %q, want %q", got, tt.want)
+			}
+			if config.Components.Controlplane.Image.Tag != "v2.1" {
+				t.Fatal("resolving the override mutated the palette")
+			}
+		})
+	}
+}
+
+func TestResolveBoxComponent_MixedRegistryPalette(t *testing.T) {
+	config := fixtureConfig()
+	publicRegistry, privateRegistry, empty := "docker.io/test", "private.example/test", ""
+	config.Components.Dataplane.Image.Registry = &privateRegistry
+	config.Components.Dataplane.Sidecars.Bird.Image.Registry = &publicRegistry
+	config.Components.Dataplane.Sidecars.Bird.Image.Prefix = &empty
+	config.Components.Operators[0].Containers[0].Image.Registry = &privateRegistry
+	config.Components.Operators[0].Containers[1].Image.Registry = &publicRegistry
+	config.Components.Operators[0].Containers[1].Image.Prefix = &empty
+	yanet := &yanetv2alpha1.YanetSpec{BoxType: "firewall"}
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve dataplane: %v", err)
+	}
+	operator, err := ResolveBoxComponent(config, yanet, KindOperator, "antiddos")
+	if err != nil {
+		t.Fatalf("resolve operator: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 2 || len(operator.Containers) != 2 {
+		t.Fatalf("unexpected resolved container counts: dataplane=%+v operator=%+v", dataplane, operator)
+	}
+	want := []string{
+		"private.example/test/edge/dataplane:v2.1",
+		"registry.example/test/edge/netlink-dataplane-sidecar:v2.1",
+		"docker.io/test/bird:2.15",
+		"private.example/test/edge/antiddos-operator:v0.5",
+		"docker.io/test/antiddos-agent:v0.5",
+	}
+	got := []string{
+		dataplane.Image.FullPath(),
+		dataplane.NativeSidecars[0].Image.FullPath(),
+		dataplane.NativeSidecars[1].Image.FullPath(),
+		operator.Containers[0].Image.FullPath(),
+		operator.Containers[1].Image.FullPath(),
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("mixed-registry images mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEnabledComponentsForBox_UndeclaredOperator(t *testing.T) {
+	config := fixtureConfig()
+	config.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{"missing": {}}
+	if refs, err := EnabledComponentsForBox(config, "release"); err == nil {
+		t.Fatalf("undeclared wired operator must fail rather than disappear from the desired set: %+v", refs)
 	}
 }
 

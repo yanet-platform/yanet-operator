@@ -42,7 +42,7 @@ func validBoxComponents() yanetv2alpha1.BoxComponents {
 }
 
 var _ = Describe("Webhook Validation E2E Tests", func() {
-	ctx := context.Background()
+	testContext := context.Background()
 
 	Context("V1 API - YanetConfig validation", func() {
 		It("Should reject YanetConfig with negative updateWindow", func() {
@@ -56,7 +56,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -72,10 +72,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 
@@ -92,7 +92,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, yanet)
+			err := k8sClient.Create(testContext, yanet)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -108,7 +108,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, yanet)
+			err := k8sClient.Create(testContext, yanet)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -125,10 +125,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 		})
 	})
 
@@ -158,7 +158,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -184,7 +184,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -209,10 +209,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 
@@ -238,13 +238,13 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 		})
 
 		AfterEach(func() {
 			config := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, config); err == nil {
-				Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			if err := k8sClient.Get(testContext, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, config); err == nil {
+				Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 			}
 		})
 
@@ -262,7 +262,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, yanet)
+			err := k8sClient.Create(testContext, yanet)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -281,10 +281,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 		})
 	})
 
@@ -295,21 +295,21 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		BeforeEach(func() {
 			// Clean up any leftover resources from previous tests
 			oldYanet := &yanetv2alpha1.YanetV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet); err == nil {
-				_ = k8sClient.Delete(ctx, oldYanet)
+			if err := k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet); err == nil {
+				_ = k8sClient.Delete(testContext, oldYanet)
 				// Wait for deletion to complete
 				Eventually(func() bool {
-					err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet)
+					err := k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet)
 					return err != nil
 				}, 10*time.Second, 500*time.Millisecond).Should(BeTrue())
 			}
 
 			oldConfig := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig); err == nil {
-				_ = k8sClient.Delete(ctx, oldConfig)
+			if err := k8sClient.Get(testContext, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig); err == nil {
+				_ = k8sClient.Delete(testContext, oldConfig)
 				// Wait for deletion to complete
 				Eventually(func() bool {
-					err := k8sClient.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig)
+					err := k8sClient.Get(testContext, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig)
 					return err != nil
 				}, 10*time.Second, 500*time.Millisecond).Should(BeTrue())
 			}
@@ -340,7 +340,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Create YanetV2 (no matching node ⇒ no deployments spawned)
 			yanet = &yanetv2alpha1.YanetV2{
@@ -356,27 +356,27 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					AutoSync: helpers.PtrBool(false),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 		})
 
 		AfterEach(func() {
 			if yanet != nil {
-				_ = k8sClient.Delete(ctx, yanet)
+				_ = k8sClient.Delete(testContext, yanet)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
 		It("Should reject update to immutable boxType field", func() {
 			// Get current yanet
 			current := &yanetv2alpha1.YanetV2{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current)).Should(Succeed())
 
 			// Try to change boxType
 			current.Spec.BoxType = "box-b"
 
-			err := k8sClient.Update(ctx, current)
+			err := k8sClient.Update(testContext, current)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -385,7 +385,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			Eventually(func() error {
 				// Get fresh copy each time
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current); err != nil {
+				if err := k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current); err != nil {
 					return err
 				}
 
@@ -394,7 +394,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					"kubernetes.io/hostname": "another-nonexistent-node",
 				}
 
-				return k8sClient.Update(ctx, current)
+				return k8sClient.Update(testContext, current)
 			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
 		})
 	})
@@ -429,7 +429,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -467,10 +467,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 })

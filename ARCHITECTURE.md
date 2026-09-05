@@ -167,6 +167,12 @@ Fixed workloads use their own names; dataplane also accepts the native-sidecar
 names `bird` and `netlink-dataplane-sidecar`. Operators use the mandatory
 `OperatorContainer.name` declared in YanetConfigV2.
 
+Each palette `image` may set `registry` and `prefix` independently. An omitted
+field inherits the corresponding `spec.images` value; an explicit empty string
+clears that part of the image path. These fields are not accepted in
+`YanetV2` container overrides, which remain limited to `name`, `tag`, and native
+sidecar `enabled`.
+
 ### CR shape
 
 `YanetConfig` (v2alpha1) — see [`api/v2alpha1/yanetconfig_types.go`](api/v2alpha1/yanetconfig_types.go):
@@ -280,6 +286,10 @@ claimed by only one `YanetV2`: an existing workload owner wins, otherwise the
 oldest CR (with namespace/name as a stable tie-breaker) wins. A deleting CR keeps
 its claim until finalizer cleanup and object removal complete.
 
+Finalizer cleanup requests foreground deletion of owned Deployments and waits
+for their removal before releasing the finalizer. A successful delete request
+alone does not release the node claim; `spec.stop=true` also pauses this cleanup.
+
 Key files:
 - [`internal/helpers/resolve_v2.go`](internal/helpers/resolve_v2.go) — `ResolveBoxComponent`, `EnabledComponentsForBox`, `FindBoxType`, `FindOperator`, `ShortNodeKey`.
 - [`internal/manifests/builder_v2.go`](internal/manifests/builder_v2.go) — `BuildDeployments`, `InlineConfigMaps`, hugepages, ConfigSource branches.
@@ -315,8 +325,12 @@ keeps callers on their node, while the NUMA label selects the requested gateway.
 
 ### Per-NUMA config files
 
-Each fan-out instance is pointed at its **own** config file. The operator takes
-the config path from `config.args` and appends the NUMA index to its base name:
+Each controlplane fan-out instance is pointed at its **own** config file.
+In `config.args`, `{numa}` is replaced by the physical NUMA index, for example
+`/etc/yanet2/controlplane.d/numa{numa}.yaml` becomes
+`/etc/yanet2/controlplane.d/numa0.yaml`. No extra suffix is added to an argument
+containing the placeholder. Disabled NUMA domains do not renumber the survivors.
+Arguments without the placeholder retain the legacy suffix convention:
 
 ```
 args: [-c, /etc/yanet2/controlplane.yaml]
@@ -324,8 +338,8 @@ args: [-c, /etc/yanet2/controlplane.yaml]
   ⇒ NUMA 1:  -c /etc/yanet2/controlplane-1.yaml
 ```
 
-Only `*.yaml` / `*.yml` argument elements are rewritten; flags and subcommands
-are passed through verbatim. This is required rather than cosmetic: the
+Without `{numa}`, only `*.yaml` / `*.yml` argument elements are rewritten;
+other arguments are passed through verbatim. This is required rather than cosmetic: the
 controlplane reads `gateway.instance_id`, the gateway endpoint and every module
 endpoint **from the file**, and the binary accepts only `-c <path>`. A shared
 file would make every instance serve dataplane instance `0` and contend for the
@@ -362,6 +376,8 @@ Every operator wired into a box type gets one shared ClusterIP Service named
 `yanet-<boxType>-<operator>`. `birdAdapter` and `announcer` use the same model;
 the netlink dataplane sidecar gets
 `yanet-<boxType>-netlink-dataplane-sidecar`. BIRD is service-less.
+The netlink Service remains when its box-type slot is declared but disabled,
+or an installation disables the sidecar; disabling it does not remove its DNS name.
 
 ### Listener endpoints
 
@@ -369,6 +385,12 @@ Services expose fixed `grpc:8080` and, where applicable, `http:8081` ports with
 named target ports. A Pod-network workload uses the same numeric target. After
 patches, a service-backed `hostNetwork` workload receives a deterministic target
 from `spec.hostNetworkPortRange`, with fixed BIRD and patch-added ports reserved.
+
+Before applying workloads, the live host-port guard checks Deployments, Pods,
+and ReplicaSets. If a new allocation overlaps another live workload's reserved
+port, preflight fails without applying that migration. Stop the conflicting old
+workloads and wait for their Pods to terminate before retrying. `Recreate` only
+serializes replacements within one Deployment, not port moves between Deployments.
 
 The operator injects `YANET_KUBERNETES_GRPC_PORT` and
 `YANET_KUBERNETES_HTTP_PORT` into the listener container. Runtime-specific
@@ -394,7 +416,8 @@ The webhook enforces that exactly one variant is set.
 
 ### Literal process arguments
 
-`ConfigSource.args` is copied to the container verbatim. The builder does not
+`ConfigSource.args` is copied to the container verbatim except for controlplane
+NUMA substitution described above. The builder does not
 impose a generic config flag because YANET binaries use different conventions:
 dataplane accepts a positional path, controlplane uses `-c`, and bird-adapter
 uses `server -c`. For `hostPath`, args can reference any file in the mounted

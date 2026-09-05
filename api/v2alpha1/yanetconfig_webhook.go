@@ -20,7 +20,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net/url"
+	"path"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
@@ -91,6 +95,10 @@ func validateYanetConfigIdentity(cfg *YanetConfigV2) error {
 func validateYanetConfig(spec *YanetConfigSpec) error {
 	if spec.UpdateWindow < 0 {
 		return fmt.Errorf("spec.updateWindow must be >= 0, got %d", spec.UpdateWindow)
+	}
+	const maxUpdateWindow = math.MaxInt64 / int64(time.Second)
+	if int64(spec.UpdateWindow) > maxUpdateWindow {
+		return fmt.Errorf("spec.updateWindow must not exceed %d seconds, got %d", maxUpdateWindow, spec.UpdateWindow)
 	}
 	if err := validatePatchUniqueness(spec.Patches); err != nil {
 		return err
@@ -180,12 +188,21 @@ func validateComponentImages(components *ComponentsSpec) error {
 }
 
 func validateConfigSources(components *ComponentsSpec) error {
-	validate := func(path string, source *ConfigSource) error {
+	validate := func(fieldPath string, source *ConfigSource) error {
 		if source == nil {
 			return nil
 		}
 		if variants := source.VariantsSet(); variants != 1 {
-			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", path, variants)
+			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", fieldPath, variants)
+		}
+		if source.HostPath != "" && !path.IsAbs(source.HostPath) {
+			return fmt.Errorf("%s.hostPath must be an absolute path", fieldPath)
+		}
+		if source.URL != "" {
+			parsed, err := url.Parse(source.URL)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+				return fmt.Errorf("%s.url must be an absolute HTTP(S) URL with a host", fieldPath)
+			}
 		}
 		return nil
 	}
@@ -247,6 +264,9 @@ func validateConfigSources(components *ComponentsSpec) error {
 // pinned explicitly. With NFD auto-detection the count is a per-node
 // runtime property, so the equivalent guard lives in the reconciler.
 func validateDisabledNuma(cp *ControlplaneSpec) error {
+	if cp.Numa != nil && *cp.Numa <= 0 {
+		return fmt.Errorf("spec.components.controlplane.numa must be greater than zero, got %d", *cp.Numa)
+	}
 	if len(cp.DisabledNuma) == 0 {
 		return nil
 	}
@@ -263,8 +283,8 @@ func validateDisabledNuma(cp *ControlplaneSpec) error {
 	}
 	count := *cp.Numa
 	disabled := int32(0)
-	for i := int32(0); i < count; i++ {
-		if _, ok := seen[i]; ok {
+	for index := range seen {
+		if index < count {
 			disabled++
 		}
 	}
@@ -316,6 +336,9 @@ func validateOperatorUniqueness(ops []OperatorSpec) error {
 		if name == "" {
 			return fmt.Errorf("spec.components.operators[%d].name is empty", i)
 		}
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("spec.components.operators[%d].name %q is invalid: %s", i, name, strings.Join(errs, "; "))
+		}
 		if _, reserved := reservedNames[name]; reserved {
 			return fmt.Errorf("spec.components.operators[%d].name %q is reserved for a built-in component", i, name)
 		}
@@ -324,11 +347,17 @@ func validateOperatorUniqueness(ops []OperatorSpec) error {
 		}
 		seen[name] = struct{}{}
 
+		if count := len(ops[i].Containers); count < 1 || count > 8 {
+			return fmt.Errorf("spec.components.operators[%d:%s].containers must contain between 1 and 8 entries, got %d", i, name, count)
+		}
 		containerNames := make(map[string]struct{}, len(ops[i].Containers))
 		for j := range ops[i].Containers {
 			cname := ops[i].Containers[j].Name
 			if cname == "" {
 				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name is required", i, name, j)
+			}
+			if errs := k8svalidation.IsDNS1123Label(cname); len(errs) > 0 {
+				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name %q is invalid: %s", i, name, j, cname, strings.Join(errs, "; "))
 			}
 			if _, dup := containerNames[cname]; dup {
 				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name %q is duplicated", i, name, j, cname)
@@ -340,6 +369,9 @@ func validateOperatorUniqueness(ops []OperatorSpec) error {
 }
 
 func validateBoxTypeUniqueness(boxes []BoxType) error {
+	if len(boxes) == 0 {
+		return fmt.Errorf("spec.boxTypes must contain at least one entry")
+	}
 	seen := make(map[string]struct{}, len(boxes))
 	for i := range boxes {
 		name := boxes[i].Name
@@ -473,10 +505,9 @@ func assertPatchesExist(path string, refs []string, registry map[string]struct{}
 	return nil
 }
 
-// dryRunPatches verifies that each patch is valid JSON/YAML and that
-// it can be merged into an empty appsv1.Deployment via the strategic
-// merge algorithm. A failure here means the patch references a field
-// that does not exist in appsv1.Deployment.
+// dryRunPatches verifies JSON object shape, strategic-merge applicability and
+// decoding of the merged Deployment's field types. This is not full Kubernetes
+// validation: the reconciler still checks the final rendered workload invariants.
 func dryRunPatches(patches []NamedPatch) error {
 	skeleton, err := json.Marshal(&appsv1.Deployment{})
 	if err != nil {
@@ -487,18 +518,20 @@ func dryRunPatches(patches []NamedPatch) error {
 		if len(raw) == 0 {
 			return fmt.Errorf("spec.patches[%d:%s].patch is empty", i, patches[i].Name)
 		}
-		// runtime.RawExtension stores arbitrary JSON; ensure it
-		// parses by re-marshalling.
-		var probe map[string]any
+		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &probe); err != nil {
 			return fmt.Errorf("spec.patches[%d:%s].patch is not valid JSON: %w", i, patches[i].Name, err)
 		}
-		patchBytes, err := json.Marshal(probe)
-		if err != nil {
-			return fmt.Errorf("spec.patches[%d:%s].patch re-marshal failed: %w", i, patches[i].Name, err)
+		if probe == nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch must be a JSON object, not null", i, patches[i].Name)
 		}
-		if _, err := strategicpatch.StrategicMergePatch(skeleton, patchBytes, appsv1.Deployment{}); err != nil {
+		merged, err := strategicpatch.StrategicMergePatch(skeleton, raw, appsv1.Deployment{})
+		if err != nil {
 			return fmt.Errorf("spec.patches[%d:%s].patch is not a valid strategic merge fragment of appsv1.Deployment: %w", i, patches[i].Name, err)
+		}
+		var deployment appsv1.Deployment
+		if err := json.Unmarshal(merged, &deployment); err != nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch has invalid Deployment field types: %w", i, patches[i].Name, err)
 		}
 	}
 	return nil

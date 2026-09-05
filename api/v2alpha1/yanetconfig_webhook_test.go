@@ -18,6 +18,8 @@ package v2alpha1
 
 import (
 	"context"
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -81,6 +83,9 @@ func TestYanetConfigWebhook_Hugepages(t *testing.T) {
 		{name: "invalid size", size: "not-a-quantity", count: 8, wantErr: "not a valid Kubernetes quantity"},
 		{name: "zero size", size: "0", count: 8, wantErr: "must be greater than zero"},
 		{name: "zero count", size: "2Mi", count: 0, wantErr: "count must be greater than zero"},
+		{name: "fractional byte size", size: "1m", count: 8, wantErr: "whole number of bytes"},
+		{name: "size overflow", size: "10000000000000000000", count: 1, wantErr: "int64"},
+		{name: "total overflow", size: "1Ei", count: 8, wantErr: "overflows int64"},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +119,10 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 			Inline:   "logging: {}",
 		}, wantErr: "exactly one"},
 		{name: "no variant", source: &ConfigSource{Args: []string{"-c", "/etc/yanet2/config.yaml"}}, wantErr: "exactly one"},
+		{name: "relative host path", source: &ConfigSource{HostPath: "etc/yanet2"}, wantErr: "absolute"},
+		{name: "https URL", source: &ConfigSource{URL: "https://config.example/controlplane"}},
+		{name: "non HTTP URL", source: &ConfigSource{URL: "file:///etc/yanet2/config"}, wantErr: "HTTP(S)"},
+		{name: "URL without host", source: &ConfigSource{URL: "https:///controlplane"}, wantErr: "HTTP(S)"},
 	}
 
 	for _, tt := range tests {
@@ -432,6 +441,18 @@ func TestYanetConfigWebhook_PositiveUpdateWindow_OK(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_UpdateWindowOverflow(t *testing.T) {
+	for _, seconds := range []int{9223372036, 9223372037} {
+		cfg := validConfig()
+		cfg.Spec.UpdateWindow = seconds
+		_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+		wantErr := seconds > 9223372036
+		if (err != nil) != wantErr {
+			t.Errorf("updateWindow %d: error = %v, want error %t", seconds, err, wantErr)
+		}
+	}
+}
+
 // --- disabledNuma -----------------------------------------------------------
 
 func TestYanetConfigWebhook_DisabledNuma_Accepted(t *testing.T) {
@@ -480,3 +501,130 @@ func TestYanetConfigWebhook_DisabledNuma_AutoDetectionNotRejected(t *testing.T) 
 }
 
 func ptrInt32(v int32) *int32 { return &v }
+
+func TestYanetConfigWebhook_OperatorShape(t *testing.T) {
+	tests := []struct {
+		name      string
+		operator  string
+		container string
+		count     int
+		wantErr   string
+	}{
+		{name: "boundary names", operator: strings.Repeat("a", 63), container: strings.Repeat("b", 63), count: 1},
+		{name: "operator too long", operator: strings.Repeat("a", 64), container: "main", count: 1, wantErr: "name"},
+		{name: "container too long", operator: "test", container: strings.Repeat("b", 64), count: 1, wantErr: "containers[0].name"},
+		{name: "invalid operator name", operator: "not_an_operator", container: "main", count: 1, wantErr: "name"},
+		{name: "invalid container name", operator: "test", container: "not.a.container", count: 1, wantErr: "containers[0].name"},
+		{name: "no containers", operator: "test", count: 0, wantErr: "between 1 and 8"},
+		{name: "too many containers", operator: "test", count: 9, wantErr: "between 1 and 8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			containers := make([]OperatorContainer, tt.count)
+			for i := range containers {
+				containers[i] = OperatorContainer{Name: tt.container, Image: ImageRef{Name: "test"}}
+			}
+			cfg.Spec.Components.Operators = []OperatorSpec{{Name: tt.operator, Containers: containers}}
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid operator rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_Numa(t *testing.T) {
+	tests := []struct {
+		name     string
+		count    int32
+		disabled []int32
+		wantErr  bool
+	}{
+		{name: "zero", count: 0, wantErr: true},
+		{name: "negative", count: -1, wantErr: true},
+		{name: "single domain", count: 1},
+		{name: "duplicate and out of range exclusions", count: 2, disabled: []int32{1, 1, 99}},
+		{name: "large count with sparse exclusions", count: math.MaxInt32, disabled: []int32{1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Controlplane.Numa = ptrInt32(tt.count)
+			cfg.Spec.Components.Controlplane.DisabledNuma = tt.disabled
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validation error = %v, want error %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_EmptyBoxTypes(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.BoxTypes = nil
+	if _, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg); err == nil {
+		t.Fatal("an empty box palette must be rejected")
+	}
+}
+
+func TestYanetConfigWebhook_DryRun_TypedPatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   string
+		wantErr bool
+	}{
+		{name: "null is not a fragment", patch: `null`, wantErr: true},
+		{name: "array is not a fragment", patch: `[]`, wantErr: true},
+		{name: "wrong replica type", patch: `{"spec":{"replicas":"many"}}`, wantErr: true},
+		{name: "replica integer overflow", patch: `{"spec":{"replicas":2147483648}}`, wantErr: true},
+		{name: "wrong pod field type", patch: `{"spec":{"template":{"spec":{"hostNetwork":"yes"}}}}`, wantErr: true},
+		{name: "wrong annotation type", patch: `{"spec":{"template":{"metadata":{"annotations":{"test":true}}}}}`, wantErr: true},
+		{name: "native sidecar", patch: `{"spec":{"template":{"spec":{"initContainers":[{"name":"helper","image":"test","restartPolicy":"Always"}]}}}}`},
+		{name: "delete container", patch: `{"spec":{"template":{"spec":{"containers":[{"name":"helper","$patch":"delete"}]}}}}`},
+		{name: "replace container list", patch: `{"spec":{"template":{"spec":{"containers":[{"$patch":"replace"},{"name":"main","image":"test"}]}}}}`},
+		{name: "delete optional field", patch: `{"spec":{"template":{"spec":{"securityContext":null}}}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Patches[0].Patch.Raw = []byte(tt.patch)
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validation error = %v, want error %t", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestImageRef_LocationJSONAndDeepCopy(t *testing.T) {
+	empty := ""
+	image := ImageRef{Name: "test", Registry: &empty, Prefix: &empty}
+	raw, err := json.Marshal(image)
+	if err != nil {
+		t.Fatalf("marshal image: %v", err)
+	}
+	var decoded ImageRef
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal image: %v", err)
+	}
+	if decoded.Registry == nil || decoded.Prefix == nil || *decoded.Registry != "" || *decoded.Prefix != "" {
+		t.Fatalf("explicit empty location was lost: %s", raw)
+	}
+	copied := decoded.DeepCopy()
+	*copied.Registry = "other.example/test"
+	*copied.Prefix = "other"
+	if *decoded.Registry != "" || *decoded.Prefix != "" {
+		t.Fatal("DeepCopy aliased an image location pointer; regenerate the deepcopy methods")
+	}
+	image = ImageRef{}
+	if err := json.Unmarshal([]byte(`{"name":"test"}`), &image); err != nil {
+		t.Fatalf("decode inherited image: %v", err)
+	}
+	if image.Registry != nil || image.Prefix != nil {
+		t.Fatal("omitted image locations must inherit the global defaults")
+	}
+}

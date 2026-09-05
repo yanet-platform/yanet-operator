@@ -274,7 +274,7 @@ func TestReconcileV2_CrossListContainerNameCollisionFailsBeforeApply(t *testing.
 	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"regular-bird"}
 
 	_, err := r.reconcileYanetV2(context.Background(), yanet)
-	if err == nil || !strings.Contains(err.Error(), "both regular and init containers") {
+	if err == nil || !strings.Contains(err.Error(), "bird") || !strings.Contains(err.Error(), "init") {
 		t.Fatalf("expected cross-list container name collision, got %v", err)
 	}
 	deployments := &appsv1.DeploymentList{}
@@ -682,21 +682,21 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 	}
 	r, snap := makeReconcilerEnv(t, yanet, node)
 	snap.Config = minimalConfigV2()
-	ctx := context.Background()
+	testContext := context.Background()
 
 	// Phase 1: autoSync=true creates the resources from scratch.
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("phase1 finalizer install: %v", err)
 	}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
+	if err := r.Client.Get(testContext, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
 		t.Fatalf("phase1 re-get: %v", err)
 	}
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("phase1 reconcile: %v", err)
 	}
 
 	deps := &appsv1.DeploymentList{}
-	if err := r.Client.List(ctx, deps, client.InNamespace("yanet")); err != nil {
+	if err := r.Client.List(testContext, deps, client.InNamespace("yanet")); err != nil {
 		t.Fatalf("list deps: %v", err)
 	}
 	if len(deps.Items) == 0 {
@@ -711,7 +711,7 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 		targetDep.Labels = map[string]string{}
 	}
 	targetDep.Labels["operator.example.com/owned-by-human"] = "yes"
-	if err := r.Client.Update(ctx, targetDep); err != nil {
+	if err := r.Client.Update(testContext, targetDep); err != nil {
 		t.Fatalf("hand-edit deployment: %v", err)
 	}
 	depKey := types.NamespacedName{Name: targetDep.Name, Namespace: targetDep.Namespace}
@@ -730,28 +730,28 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 		},
 		Data: map[string]string{"config": "human-managed content"},
 	}
-	if err := r.Client.Create(ctx, staleCM); err != nil {
+	if err := r.Client.Create(testContext, staleCM); err != nil {
 		t.Fatalf("seed stale CM: %v", err)
 	}
 	cmKey := types.NamespacedName{Name: staleCM.Name, Namespace: staleCM.Namespace}
 
 	// Phase 2: flip autoSync to false. The reconciler must observe
 	// drift but must NOT push the hand edits back.
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
+	if err := r.Client.Get(testContext, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
 		t.Fatalf("phase2 re-get yanet: %v", err)
 	}
 	off := false
 	yanet.Spec.AutoSync = &off
-	if err := r.Client.Update(ctx, yanet); err != nil {
+	if err := r.Client.Update(testContext, yanet); err != nil {
 		t.Fatalf("phase2 disable autoSync: %v", err)
 	}
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("phase2 reconcile: %v", err)
 	}
 
 	// Assert line A: hand-edited Deployment is untouched.
 	gotDep := &appsv1.Deployment{}
-	if err := r.Client.Get(ctx, depKey, gotDep); err != nil {
+	if err := r.Client.Get(testContext, depKey, gotDep); err != nil {
 		t.Fatalf("re-get deployment: %v", err)
 	}
 	if gotDep.Spec.Replicas == nil || *gotDep.Spec.Replicas != handEditedReplicas {
@@ -765,7 +765,7 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 	// Assert line B/C: pre-existing CM is left alone (content
 	// preserved AND object not garbage-collected by prune).
 	gotCM := &corev1.ConfigMap{}
-	if err := r.Client.Get(ctx, cmKey, gotCM); err != nil {
+	if err := r.Client.Get(testContext, cmKey, gotCM); err != nil {
 		t.Fatalf("autoSync=false MUST NOT delete pre-existing CM, got err=%v", err)
 	}
 	if gotCM.Data["config"] != "human-managed content" {

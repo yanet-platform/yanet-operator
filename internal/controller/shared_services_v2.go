@@ -30,6 +30,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/util/retry"
@@ -84,7 +85,7 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 		numaCount := int32(1)
 		for nodeIndex := range nodes.Items {
 			node := &nodes.Items[nodeIndex]
-			if !labelsMatchSelector(node.Labels, yanet.Spec.NodeSelector) {
+			if !labels.SelectorFromSet(yanet.Spec.NodeSelector).Matches(labels.Set(node.Labels)) {
 				continue
 			}
 			if nodeNuma := readNumaFromNode(node); nodeNuma > numaCount {
@@ -97,9 +98,25 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 			NumaCount: numaCount,
 		}
 		for _, ref := range refs {
+			serviceSpec := &yanet.Spec
+			if ref.Kind == helpers.KindDataplane {
+				// Shared DNS follows declared box/palette wiring, not whether any
+				// installation currently runs the netlink sidecar. This override is
+				// only for Service planning; unwired slots remain absent on resolve.
+				serviceSpec = &yanetv2alpha1.YanetSpec{
+					BoxType: yanet.Spec.BoxType,
+					Components: &yanetv2alpha1.YanetComponentsOverride{
+						Dataplane: &yanetv2alpha1.YanetComponentOverride{
+							Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+								yanetv2alpha1.NetlinkDataplaneSidecarContainerName: {Enabled: helpers.PtrTrue()},
+							},
+						},
+					},
+				}
+			}
 			component, resolveErr := helpers.ResolveBoxComponent(
 				&config.Spec,
-				&yanet.Spec,
+				serviceSpec,
 				ref.Kind,
 				ref.OperatorName,
 			)
@@ -164,15 +181,23 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 		return keys[i].namespace < keys[j].namespace
 	})
 	for _, key := range keys {
+		if r.sharedServicesStoppedV2() {
+			return nil
+		}
 		if err := r.applySharedServiceV2(ctx, desired[key]); err != nil {
-			return err
+			planErrs = append(planErrs, fmt.Errorf("apply shared Service %s/%s: %w", key.namespace, key.name, err))
+			protectedScopes[sharedServiceScopeV2{
+				namespace: key.namespace,
+				boxType:   desired[key].Labels[manifests.LabelBoxType],
+			}] = struct{}{}
 		}
 	}
 	services := &corev1.ServiceList{}
 	if err := r.Client.List(ctx, services, client.MatchingLabels{
 		manifests.LabelSharedService: "true",
 	}); err != nil {
-		return fmt.Errorf("list shared Services for pruning: %w", err)
+		planErrs = append(planErrs, fmt.Errorf("list shared Services for pruning: %w", err))
+		return errors.Join(planErrs...)
 	}
 	for index := range services.Items {
 		service := &services.Items[index]
@@ -182,15 +207,32 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 			boxType:   service.Labels[manifests.LabelBoxType],
 		}
 		_, protected := protectedScopes[scope]
-		if _, keep := desired[key]; keep || protected || !controlledByV2(service, &owner) {
+		_, ambiguous := blocked[key]
+		if _, keep := desired[key]; keep || protected || ambiguous || !controlledByV2(service, &owner) {
 			continue
 		}
+		if r.sharedServicesStoppedV2() {
+			return nil
+		}
 		logger.Info("deleting orphan shared Service", "namespace", service.Namespace, "service", service.Name)
-		if err := r.Client.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete shared Service %s/%s: %w", service.Namespace, service.Name, err)
+		if err := r.Client.Delete(ctx, service, client.Preconditions{
+			UID: &service.UID, ResourceVersion: &service.ResourceVersion,
+		}); err != nil && !apierrors.IsNotFound(err) {
+			planErrs = append(planErrs, fmt.Errorf("delete shared Service %s/%s: %w", service.Namespace, service.Name, err))
 		}
 	}
 	return errors.Join(planErrs...)
+}
+
+// A newer snapshot can publish stop while an API read or retry is in flight.
+// Recheck before writes without holding the snapshot mutex across API calls.
+func (r *YanetConfigReconcilerV2) sharedServicesStoppedV2() bool {
+	if r.GlobalConfigV2 == nil {
+		return false
+	}
+	r.GlobalConfigV2.Lock.Lock()
+	defer r.GlobalConfigV2.Lock.Unlock()
+	return r.GlobalConfigV2.Config.Stop
 }
 
 func (r *YanetConfigReconcilerV2) applySharedServiceV2(
@@ -204,6 +246,9 @@ func (r *YanetConfigReconcilerV2) applySharedServiceV2(
 	existing := &corev1.Service{}
 	err := r.Client.Get(ctx, key, existing)
 	if apierrors.IsNotFound(err) {
+		if r.sharedServicesStoppedV2() {
+			return nil
+		}
 		return r.Client.Create(ctx, desired)
 	}
 	if err != nil {
@@ -221,7 +266,7 @@ func (r *YanetConfigReconcilerV2) applySharedServiceV2(
 			return ownershipErr
 		}
 		candidate, changed := desiredSharedServiceUpdateV2(fresh, desired)
-		if !changed {
+		if !changed || r.sharedServicesStoppedV2() {
 			return nil
 		}
 		return r.Client.Update(ctx, candidate)
