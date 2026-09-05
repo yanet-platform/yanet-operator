@@ -3,12 +3,12 @@
 #   components.<name>.enabled                       — true → replicas=1, false → replicas=0 (same as enable in v1)
 #   components.<name>.containers.<cname>.name       — override image name for container <cname>
 #   components.<name>.containers.<cname>.tag        — override image tag for container <cname>
+#   components.dataplane.containers.<sidecar>.enabled — enable/disable a wired native sidecar
 #   components.controlplane.disabledNuma            — replace the default NUMA exclusions
 #
-# For the 5 hardcoded components <cname> equals the component name
-# itself ("controlplane", "dataplane", "bird", "birdAdapter",
-# "announcer"). For operators it must match an
-# OperatorContainer.name from YanetConfig.
+# For fixed workloads <cname> equals the rendered container name. Dataplane
+# additionally accepts "bird" and "netlink-dataplane-sidecar". For operators
+# it must match an OperatorContainer.name from YanetConfigV2.
 ---
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetV2
@@ -31,14 +31,12 @@ spec:
     dataplane:
       containers:
         dataplane: {tag: v2.1.5-hotfix}
-
-    # Fully disable bird on this box (replicas=0), keeping everything else from boxType=balancer.
-    bird:
-      enabled: false
+        # Omit BIRD from this dataplane Pod while keeping the netlink sidecar.
+        bird: {enabled: false}
 
     # Replace bird-adapter image with a fork.
     birdAdapter:
       containers:
-        birdAdapter:
+        bird-adapter:
           name: bird-adapter-forked
           tag: v0.3-fork

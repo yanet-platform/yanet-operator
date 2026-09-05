@@ -1,6 +1,6 @@
 # Full YanetConfig v2alpha1 example (final model).
 # Demonstrates all three layers:
-#   1. spec.components — palette of components (5 hardcoded + dynamic operators[])
+#   1. spec.components — workload palette (fixed workloads, dataplane sidecars, dynamic operators[])
 #   2. spec.patches    — named registry of strategic-merge Deployment patch fragments
 #   3. spec.boxTypes   — box presets: which components are enabled and which patches to apply
 #
@@ -34,7 +34,7 @@ spec:
   # 1) COMPONENTS — component palette
   # ============================================================
   components:
-    # --- Hardcoded components (5 fixed names) ---
+    # --- Fixed workloads ---
     controlplane:
       image: {name: controlplane, tag: v2.1.0}
       config:
@@ -57,19 +57,26 @@ spec:
       hugepages:
         size: 1Gi
         count: 8
-      hostNetwork: true     # default for DPDK
+      hostNetwork: false    # default; set true only for legacy deployments
       config:
         hostPath: /etc/yanet2
         args: [/etc/yanet2/dataplane.yaml]
 
-    bird:
-      image: {name: bird, tag: "2.15"}
-      config:
-        # hostPath is the HOST directory mounted into the container at /etc/bird.
-        # Bird reads its config from /etc/bird/bird.conf (or /etc/bird/bird6.conf) inside the Pod.
-        hostPath: /etc/bird
+      # Fixed optional native sidecars share the dataplane Pod network namespace.
+      # They are rendered as restartable init containers (restartPolicy: Always).
+      sidecars:
+        bird:
+          image: {name: bird, tag: "2.15"}
+          config:
+            # Mounted at /etc/bird. BIRD reads bird.conf or bird6.conf.
+            hostPath: /etc/bird
+        netlinkDataplaneSidecar:
+          image: {name: netlink-dataplane-sidecar, tag: v2.1.0}
+          config:
+            hostPath: /etc/yanet2
+            args: [-c, /etc/yanet2/netlink-dataplane-sidecar.yaml]
 
-    # NOTE: birdAdapter is a SEPARATE Deployment (not a sidecar to bird),
+    # NOTE: birdAdapter is a separate Deployment (not a native sidecar),
     # so the adapter can be updated without restarting bird.
     # bird ↔ birdAdapter communicate via a shared hostPath (e.g. /run/bird/bird.sock).
     # Process: /usr/bin/yanet-bird-adapter server -c /etc/yanet2/bird-adapter.yaml
@@ -227,7 +234,7 @@ spec:
     #     /dev/vhost-net is blocked by the device cgroup for non-privileged
     #     containers, even root with CAP_SYS_ADMIN/CAP_SYS_RAWIO; the only
     #     alternative is an SR-IOV device plugin, out of scope)
-    #   - hostNetwork: true, hostIPC: true
+    #   - hostNetwork: false by default, hostIPC: true
     #   - minimal host devices: /dev/vfio, /dev/vhost-net, /dev/net
     #   - /sys read-only, config read-only, hugepages
     # Do NOT re-add those here. Patches only tune resources.
@@ -252,13 +259,13 @@ spec:
                   resources:
                     limits: {memory: 64Gi}
 
-    # --- bird / announcer ---
+    # --- BIRD native sidecar / announcer ---
     - name: bird-resources
       patch:
         spec:
           template:
             spec:
-              containers:
+              initContainers:
                 - name: bird
                   resources:
                     requests: {cpu: 100m, memory: 4Gi}
@@ -299,43 +306,46 @@ spec:
   #    If a section is absent — the component is DISABLED for this boxType.
   # ============================================================
   boxTypes:
-    # ---- release: cp + dp + bird + announcer (standard)
+    # ---- release: cp + dp with native sidecars + announcer (standard)
     - name: release
       components:
         controlplane:
           patches: [controlplane-listener, tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-release]
         dataplane:
-          patches: [tolerations, telegraf, checkpointer, dp-resources]
-        bird:
-          patches: [tolerations, telegraf, checkpointer, bird-resources]
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
+          patches: [tolerations, telegraf, checkpointer, dp-resources, bird-resources]
         announcer:
           patches: [tolerations, telegraf, checkpointer, announcer-resources]
       # operators: {}   # not enabled
 
-    # ---- balancer: cp + dp + bird + birdAdapter (no announcer)
+    # ---- balancer: cp + dp with native sidecars + birdAdapter (no announcer)
     - name: balancer
       components:
         controlplane:
           patches: [controlplane-listener, tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
         dataplane:
-          patches: [tolerations, telegraf, checkpointer, dp-resources]
-        bird:
-          patches: [tolerations, telegraf, checkpointer, bird-resources]
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
+          patches: [tolerations, telegraf, checkpointer, dp-resources, bird-resources]
         birdAdapter:
           patches: [tolerations, telegraf, checkpointer]
       operators:
         route:
           patches: [route-listener, tolerations, telegraf]
 
-    # ---- firewall: cp + dp (max memory) + bird + antiddos
+    # ---- firewall: cp + dp (max memory) with native sidecars + antiddos
     - name: firewall
       components:
         controlplane:
           patches: [controlplane-listener, tolerations, telegraf, checkpointer, cp-reloader-poststart, cp-resources-balancer]
         dataplane:
-          patches: [tolerations, telegraf, checkpointer, dp-resources, firewall-max-memory]
-        bird:
-          patches: [tolerations, telegraf, checkpointer, bird-resources]
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
+          patches: [tolerations, telegraf, checkpointer, dp-resources, firewall-max-memory, bird-resources]
       operators:
         antiddos:
           patches: [tolerations, telegraf]

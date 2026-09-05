@@ -1,6 +1,6 @@
 # v2alpha1 YanetConfig — must be ACCEPTED.
 # Trimmed version of deploy/examples/v2alpha1-yanetconfig-full.yaml: two patches,
-# one boxType (release) referencing them, all five hardcoded components present.
+# one boxType (release) referencing them, including both dataplane sidecars.
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetConfigV2
 metadata:
@@ -16,8 +16,11 @@ spec:
       image: {name: controlplane, tag: test}
     dataplane:
       image: {name: dataplane, tag: test}
-    bird:
-      image: {name: bird, tag: test}
+      sidecars:
+        bird:
+          image: {name: bird, tag: test}
+        netlinkDataplaneSidecar:
+          image: {name: netlink-dataplane-sidecar, tag: test}
     birdAdapter:
       image: {name: bird-adapter, tag: test}
     announcer:
@@ -43,8 +46,9 @@ spec:
         controlplane:
           patches: [telegraf, checkpointer]
         dataplane:
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
           patches: [telegraf, checkpointer]
-        bird:
-          patches: [checkpointer]
         announcer:
           patches: [checkpointer]

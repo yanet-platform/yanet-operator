@@ -46,7 +46,7 @@ func validConfig() *YanetConfigV2 {
 				Name: "release",
 				Components: BoxComponents{
 					Controlplane: &BoxComponent{Patches: []string{"telegraf"}},
-					Dataplane:    &BoxComponent{},
+					Dataplane:    &BoxDataplane{},
 				},
 			}},
 		},
@@ -131,6 +131,23 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_DataplaneSidecarConfigSource(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Dataplane.Sidecars = &DataplaneSidecarsSpec{
+		Bird: &DataplaneSidecarSpec{
+			Image:  ImageRef{Name: "bird"},
+			Config: &ConfigSource{HostPath: "/etc/bird", Inline: "invalid"},
+		},
+	}
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
+		Bird: &BoxDataplaneSidecar{},
+	}
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "spec.components.dataplane.sidecars.bird.config") {
+		t.Fatalf("invalid BIRD sidecar config source must be rejected, got %v", err)
+	}
+}
+
 func TestYanetConfigWebhook_HostNetworkPortRange(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -184,7 +201,14 @@ func TestYanetConfigWebhook_DuplicateOperatorName(t *testing.T) {
 }
 
 func TestYanetConfigWebhook_ReservedOperatorName(t *testing.T) {
-	for _, name := range []string{"controlplane", "dataplane", "bird", "bird-adapter", "announcer"} {
+	for _, name := range []string{
+		"controlplane",
+		"dataplane",
+		"bird",
+		"bird-adapter",
+		"netlink-dataplane-sidecar",
+		"announcer",
+	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.Spec.Components.Operators = []OperatorSpec{{
@@ -268,6 +292,17 @@ func TestYanetConfigWebhook_UnknownPatchRef(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_UndeclaredDataplaneSidecar(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
+		NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+	}
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "netlinkDataplaneSidecar") {
+		t.Fatalf("undeclared dataplane sidecar must be rejected, got %v", err)
+	}
+}
+
 func TestYanetConfigWebhook_UnknownOperatorRef(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"ghost": {}}
@@ -275,6 +310,49 @@ func TestYanetConfigWebhook_UnknownOperatorRef(t *testing.T) {
 	_, err := v.ValidateCreate(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("expected unknown operator ref, got %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_OptionalComponentRequiresPaletteDeclaration(t *testing.T) {
+	tests := []struct {
+		name string
+		wire func(*BoxComponents)
+		want string
+	}{
+		{
+			name: "bird adapter",
+			wire: func(components *BoxComponents) { components.BirdAdapter = &BoxComponent{} },
+			want: "birdAdapter",
+		},
+		{
+			name: "announcer",
+			wire: func(components *BoxComponents) { components.Announcer = &BoxComponent{} },
+			want: "announcer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.wire(&cfg.Spec.BoxTypes[0].Components)
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("undeclared optional component must be rejected, got %v", err)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_ComponentImageNameRequired(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Dataplane.Sidecars = &DataplaneSidecarsSpec{
+		NetlinkDataplaneSidecar: &DataplaneSidecarSpec{},
+	}
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
+		NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+	}
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "netlinkDataplaneSidecar.image.name is required") {
+		t.Fatalf("empty sidecar image name must be rejected, got %v", err)
 	}
 }
 

@@ -177,7 +177,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 						Name: boxTypeNm,
 						Components: yanetv2alpha1.BoxComponents{
 							Controlplane: &yanetv2alpha1.BoxComponent{},
-							Dataplane:    &yanetv2alpha1.BoxComponent{},
+							Dataplane:    &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
@@ -369,7 +369,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 						Name: boxTypeNm,
 						Components: yanetv2alpha1.BoxComponents{
 							Controlplane: &yanetv2alpha1.BoxComponent{},
-							Dataplane:    &yanetv2alpha1.BoxComponent{},
+							Dataplane:    &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},

@@ -19,6 +19,8 @@ package manifests
 import (
 	"testing"
 
+	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,5 +90,93 @@ func TestRestoreWorkloadIdentityRejectsPatchedReservedLabels(t *testing.T) {
 	}
 	if deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
 		t.Fatalf("Deployment strategy was not restored: %#v", deployment.Spec.Strategy)
+	}
+}
+
+func TestRestoreWorkloadIdentityRestoresNativeSidecars(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v1"},
+		NativeSidecars: []helpers.ResolvedContainer{
+			{
+				Name:  yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				Image: helpers.ResolvedImage{Name: "netlink-dataplane-sidecar", Tag: "v1"},
+			},
+			{
+				Name:  yanetv2alpha1.BirdSidecarContainerName,
+				Image: helpers.ResolvedImage{Name: "bird", Tag: "v1"},
+			},
+		},
+	}
+	deployments, err := BuildDeployments(ctxV2(), component)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	deployment := deployments[0]
+	identity := CaptureWorkloadIdentity(deployment)
+	deployment.Spec.Template.Spec.InitContainers[0].RestartPolicy = nil
+	deployment.Spec.Template.Spec.InitContainers[1].RestartPolicy = nil
+	deployment.Spec.Template.Spec.InitContainers = []corev1.Container{
+		deployment.Spec.Template.Spec.InitContainers[0],
+		{Name: "prepare-network"},
+		deployment.Spec.Template.Spec.InitContainers[1],
+	}
+
+	RestoreWorkloadIdentity(deployment, identity)
+
+	initContainers := deployment.Spec.Template.Spec.InitContainers
+	if len(initContainers) != 3 ||
+		initContainers[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		initContainers[1].Name != "prepare-network" ||
+		initContainers[2].Name != yanetv2alpha1.BirdSidecarContainerName {
+		t.Fatalf("restored init containers = %+v", initContainers)
+	}
+	for _, index := range []int{0, 2} {
+		if initContainers[index].RestartPolicy == nil ||
+			*initContainers[index].RestartPolicy != corev1.ContainerRestartPolicyAlways {
+			t.Fatalf("restored native sidecar restartPolicy = %v", initContainers[index].RestartPolicy)
+		}
+	}
+
+	deployment.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "prepare-network"}}
+	RestoreWorkloadIdentity(deployment, identity)
+	initContainers = deployment.Spec.Template.Spec.InitContainers
+	if len(initContainers) != 3 ||
+		initContainers[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		initContainers[1].Name != yanetv2alpha1.BirdSidecarContainerName ||
+		initContainers[2].Name != "prepare-network" {
+		t.Fatalf("restored deleted native sidecar order = %+v", initContainers)
+	}
+}
+
+func TestValidatePodContainerNamesRejectsCrossListCollision(t *testing.T) {
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "dataplane"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers:     []corev1.Container{{Name: yanetv2alpha1.BirdSidecarContainerName}},
+			InitContainers: []corev1.Container{{Name: yanetv2alpha1.BirdSidecarContainerName}},
+		}}},
+	}
+	if err := ValidatePodContainerNames(deployment); err == nil {
+		t.Fatal("expected duplicate regular/init container name to be rejected")
+	}
+}
+
+func TestRestoreWorkloadIdentityLeavesNonDataplaneInitContainers(t *testing.T) {
+	deployment := &appsv1.Deployment{
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelComponent: "operator"}},
+				Spec: corev1.PodSpec{InitContainers: []corev1.Container{{
+					Name: yanetv2alpha1.BirdSidecarContainerName,
+				}}},
+			},
+		},
+	}
+	identity := CaptureWorkloadIdentity(deployment)
+	RestoreWorkloadIdentity(deployment, identity)
+	if len(deployment.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("non-dataplane init container was removed: %+v", deployment.Spec.Template.Spec.InitContainers)
 	}
 }

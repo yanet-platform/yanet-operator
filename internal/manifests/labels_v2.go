@@ -17,7 +17,12 @@ limitations under the License.
 package manifests
 
 import (
+	"fmt"
+
+	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -57,15 +62,17 @@ const (
 // patch from disconnecting a Pod from its shared Service, moving it to another
 // node, changing its controller owner, or enabling an unsafe rolling update.
 type WorkloadIdentity struct {
-	Name            string
-	Namespace       string
-	OwnerReferences []metav1.OwnerReference
-	Deployment      map[string]string
-	Selector        *metav1.LabelSelector
-	Pod             map[string]string
-	NodeName        string
-	NodeSelector    map[string]string
-	Strategy        appsv1.DeploymentStrategy
+	Name                 string
+	Namespace            string
+	OwnerReferences      []metav1.OwnerReference
+	Deployment           map[string]string
+	Selector             *metav1.LabelSelector
+	Pod                  map[string]string
+	NodeName             string
+	NodeSelector         map[string]string
+	Strategy             appsv1.DeploymentStrategy
+	ManageNativeSidecars bool
+	NativeSidecars       []corev1.Container
 }
 
 var workloadIdentityLabels = map[string]struct{}{
@@ -94,6 +101,15 @@ func CaptureWorkloadIdentity(deployment *appsv1.Deployment) WorkloadIdentity {
 	identity.NodeName = deployment.Spec.Template.Spec.NodeName
 	identity.NodeSelector = copyMap(deployment.Spec.Template.Spec.NodeSelector)
 	identity.Strategy = *deployment.Spec.Strategy.DeepCopy()
+	identity.ManageNativeSidecars = identity.Pod[labelComponent] == string(helpers.KindDataplane)
+	if identity.ManageNativeSidecars {
+		for i := range deployment.Spec.Template.Spec.InitContainers {
+			container := &deployment.Spec.Template.Spec.InitContainers[i]
+			if isFixedNativeSidecar(container.Name) {
+				identity.NativeSidecars = append(identity.NativeSidecars, *container.DeepCopy())
+			}
+		}
+	}
 	return identity
 }
 
@@ -116,6 +132,92 @@ func RestoreWorkloadIdentity(deployment *appsv1.Deployment, identity WorkloadIde
 	deployment.Spec.Template.Spec.NodeName = identity.NodeName
 	deployment.Spec.Template.Spec.NodeSelector = copyMap(identity.NodeSelector)
 	deployment.Spec.Strategy = *identity.Strategy.DeepCopy()
+	if identity.ManageNativeSidecars {
+		restoreNativeSidecars(&deployment.Spec.Template.Spec, identity.NativeSidecars)
+	}
+}
+
+func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
+	patched := make(map[string]corev1.Container, len(expected))
+	lastFixed := -1
+	for i := range pod.InitContainers {
+		container := pod.InitContainers[i]
+		if isFixedNativeSidecar(container.Name) {
+			patched[container.Name] = container
+			lastFixed = i
+		}
+	}
+	restoredExpected := make([]corev1.Container, 0, len(expected))
+	for i := range expected {
+		baseline := &expected[i]
+		container, present := patched[baseline.Name]
+		if !present {
+			container = *baseline.DeepCopy()
+		}
+		if baseline.RestartPolicy == nil {
+			container.RestartPolicy = nil
+		} else {
+			restartPolicy := *baseline.RestartPolicy
+			container.RestartPolicy = &restartPolicy
+		}
+		restoredExpected = append(restoredExpected, container)
+	}
+
+	restored := make([]corev1.Container, 0, len(pod.InitContainers)+len(expected))
+	if lastFixed == -1 {
+		restored = append(restored, restoredExpected...)
+	}
+	nextExpected := 0
+	for i := range pod.InitContainers {
+		container := pod.InitContainers[i]
+		if isFixedNativeSidecar(container.Name) {
+			if nextExpected < len(restoredExpected) {
+				restored = append(restored, restoredExpected[nextExpected])
+				nextExpected++
+			}
+			if i == lastFixed {
+				restored = append(restored, restoredExpected[nextExpected:]...)
+				nextExpected = len(restoredExpected)
+			}
+			continue
+		}
+		restored = append(restored, container)
+	}
+	pod.InitContainers = restored
+}
+
+// ValidatePodContainerNames rejects patch results that Kubernetes would reject
+// because regular and init containers share one name namespace.
+func ValidatePodContainerNames(deployment *appsv1.Deployment) error {
+	if deployment == nil {
+		return nil
+	}
+	seen := make(map[string]string)
+	check := func(containers []corev1.Container, kind string) error {
+		for i := range containers {
+			name := containers[i].Name
+			if previous, duplicate := seen[name]; duplicate {
+				return fmt.Errorf(
+					"deployment %s uses container name %q in both %s and %s containers",
+					deployment.Name,
+					name,
+					previous,
+					kind,
+				)
+			}
+			seen[name] = kind
+		}
+		return nil
+	}
+	if err := check(deployment.Spec.Template.Spec.Containers, "regular"); err != nil {
+		return err
+	}
+	return check(deployment.Spec.Template.Spec.InitContainers, "init")
+}
+
+func isFixedNativeSidecar(name string) bool {
+	return name == yanetv2alpha1.BirdSidecarContainerName ||
+		name == yanetv2alpha1.NetlinkDataplaneSidecarContainerName
 }
 
 func reservedLabels(labels map[string]string) map[string]string {

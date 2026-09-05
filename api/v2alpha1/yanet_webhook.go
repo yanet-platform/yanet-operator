@@ -96,6 +96,9 @@ func (v *YanetCustomValidator) validate(ctx context.Context, y *YanetV2) (admiss
 	if y.Spec.BoxType == "" {
 		return nil, fmt.Errorf("spec.boxType is required")
 	}
+	if err := validateYanetComponentOverrideShape(y.Spec.Components); err != nil {
+		return nil, err
+	}
 
 	config := &YanetConfigV2{}
 	if err := v.Client.Get(ctx, client.ObjectKey{Name: YanetConfigName}, config); err != nil {
@@ -107,7 +110,7 @@ func (v *YanetCustomValidator) validate(ctx context.Context, y *YanetV2) (admiss
 	spec := &config.Spec
 	for j := range spec.BoxTypes {
 		if spec.BoxTypes[j].Name == y.Spec.BoxType {
-			return nil, validateOperatorOverrides(y.Spec.Components, &spec.Components)
+			return nil, ValidateYanetComponentOverrides(y.Spec.Components, &spec.Components, &spec.BoxTypes[j])
 		}
 	}
 	return nil, fmt.Errorf("spec.boxType %q is not defined in the cluster YanetConfigV2", y.Spec.BoxType)
@@ -116,47 +119,48 @@ func (v *YanetCustomValidator) validate(ctx context.Context, y *YanetV2) (admiss
 // validateOperatorOverrides checks that:
 //   - every key in YanetV2.spec.components.operators corresponds to a
 //     declared operator in YanetConfigV2.spec.components.operators;
-//   - every per-container override key (in .containers map) matches
-//     the rendered container name — for the 5 hardcoded components
-//     the only allowed key is the kind name itself, for operators
-//     it must be a declared OperatorContainer.Name.
-func validateOperatorOverrides(overrides *YanetComponentsOverride, declared *ComponentsSpec) error {
+//   - every per-container override key (in .containers map) matches the
+//     rendered container name. The dataplane additionally accepts its fixed
+//     native-sidecar names; operators accept declared OperatorContainer names.
+//
+// ValidateYanetComponentOverrides checks per-installation overrides against the
+// selected box type and cluster-wide component palette. The reconciler repeats
+// this validation because admission may have run while YanetConfigV2 was
+// temporarily unavailable.
+func ValidateYanetComponentOverrides(
+	overrides *YanetComponentsOverride,
+	declared *ComponentsSpec,
+	box *BoxType,
+) error {
+	if err := validateYanetComponentOverrideShape(overrides); err != nil {
+		return err
+	}
 	if overrides == nil {
 		return nil
 	}
-	if overrides.Controlplane != nil {
-		override := &overrides.Controlplane.YanetComponentOverride
-		if err := validateHardcodedContainerKeys(
-			"controlplane", override); err != nil {
-			return err
-		}
-		if err := validateOverrideDisabledNuma(overrides.Controlplane.DisabledNuma); err != nil {
-			return err
-		}
+	if declared == nil {
+		return fmt.Errorf("YanetConfigV2 component palette is nil")
 	}
-	if err := validateHardcodedContainerKeys("dataplane", overrides.Dataplane); err != nil {
-		return err
+	if box == nil {
+		return fmt.Errorf("selected YanetConfigV2 boxType is nil")
 	}
-	if err := validateHardcodedContainerKeys("bird", overrides.Bird); err != nil {
-		return err
-	}
-	if overrides.Bird != nil && declared.Bird == nil {
-		return fmt.Errorf("spec.components.bird override has no matching YanetConfigV2 component")
-	}
-	if err := validateHardcodedContainerKeys("birdAdapter", overrides.BirdAdapter); err != nil {
+	if err := validateDataplaneOverride(overrides.Dataplane, &declared.Dataplane, box.Components.Dataplane); err != nil {
 		return err
 	}
 	if overrides.BirdAdapter != nil {
 		if declared.BirdAdapter == nil {
 			return fmt.Errorf("spec.components.birdAdapter override has no matching YanetConfigV2 component")
 		}
-	}
-	if err := validateHardcodedContainerKeys("announcer", overrides.Announcer); err != nil {
-		return err
+		if box.Components.BirdAdapter == nil {
+			return fmt.Errorf("spec.components.birdAdapter override is not wired by the selected boxType")
+		}
 	}
 	if overrides.Announcer != nil {
 		if declared.Announcer == nil {
 			return fmt.Errorf("spec.components.announcer override has no matching YanetConfigV2 component")
+		}
+		if box.Components.Announcer == nil {
+			return fmt.Errorf("spec.components.announcer override is not wired by the selected boxType")
 		}
 	}
 
@@ -173,6 +177,9 @@ func validateOperatorOverrides(overrides *YanetComponentsOverride, declared *Com
 		if !ok {
 			return fmt.Errorf("spec.components.operators[%q] is not declared in YanetConfigV2.spec.components.operators", opName)
 		}
+		if _, wired := box.Operators[opName]; !wired {
+			return fmt.Errorf("spec.components.operators[%q] is not wired by the selected boxType", opName)
+		}
 		containerNames := make(map[string]struct{}, len(op.Containers))
 		for i := range op.Containers {
 			containerNames[op.Containers[i].Name] = struct{}{}
@@ -180,6 +187,164 @@ func validateOperatorOverrides(overrides *YanetComponentsOverride, declared *Com
 		for cname := range ovr.Containers {
 			if _, ok := containerNames[cname]; !ok {
 				return fmt.Errorf("spec.components.operators[%q].containers[%q] is not declared in YanetConfigV2.spec.components.operators[%q].containers", opName, cname, opName)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateEffectiveYanetComponentOverrides validates only overrides that can
+// affect the selected box. The reconciler uses this form so stale overrides for
+// components removed from a box do not prevent their old resources from being
+// pruned. Admission remains strict through ValidateYanetComponentOverrides.
+func ValidateEffectiveYanetComponentOverrides(
+	overrides *YanetComponentsOverride,
+	declared *ComponentsSpec,
+	box *BoxType,
+) error {
+	if overrides == nil {
+		return nil
+	}
+	if declared == nil {
+		return fmt.Errorf("YanetConfigV2 component palette is nil")
+	}
+	if box == nil {
+		return fmt.Errorf("selected YanetConfigV2 boxType is nil")
+	}
+
+	effective := overrides.DeepCopy()
+	if box.Components.Controlplane == nil {
+		effective.Controlplane = nil
+	}
+	if box.Components.Dataplane == nil {
+		effective.Dataplane = nil
+	} else if effective.Dataplane != nil {
+		if box.Components.Dataplane.Sidecars == nil || box.Components.Dataplane.Sidecars.Bird == nil {
+			delete(effective.Dataplane.Containers, BirdSidecarContainerName)
+		}
+		if box.Components.Dataplane.Sidecars == nil ||
+			box.Components.Dataplane.Sidecars.NetlinkDataplaneSidecar == nil {
+			delete(effective.Dataplane.Containers, NetlinkDataplaneSidecarContainerName)
+		}
+	}
+	if box.Components.BirdAdapter == nil {
+		effective.BirdAdapter = nil
+	}
+	if box.Components.Announcer == nil {
+		effective.Announcer = nil
+	}
+	for name := range effective.Operators {
+		if _, wired := box.Operators[name]; !wired {
+			delete(effective.Operators, name)
+		}
+	}
+	return ValidateYanetComponentOverrides(effective, declared, box)
+}
+
+func validateYanetComponentOverrideShape(overrides *YanetComponentsOverride) error {
+	if overrides == nil {
+		return nil
+	}
+	if overrides.Controlplane != nil {
+		if err := validateHardcodedContainerKeys(
+			"controlplane",
+			"controlplane",
+			&overrides.Controlplane.YanetComponentOverride,
+		); err != nil {
+			return err
+		}
+		if err := validateOverrideDisabledNuma(overrides.Controlplane.DisabledNuma); err != nil {
+			return err
+		}
+	}
+	if err := validateDataplaneOverrideShape(overrides.Dataplane); err != nil {
+		return err
+	}
+	if err := validateHardcodedContainerKeys(
+		"birdAdapter",
+		BirdAdapterContainerName,
+		overrides.BirdAdapter,
+	); err != nil {
+		return err
+	}
+	if err := validateHardcodedContainerKeys("announcer", "announcer", overrides.Announcer); err != nil {
+		return err
+	}
+	for operatorName, override := range overrides.Operators {
+		for containerName, container := range override.Containers {
+			if container.Enabled != nil {
+				return fmt.Errorf(
+					"spec.components.operators[%q].containers[%q].enabled is only supported for dataplane native sidecars",
+					operatorName,
+					containerName,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func validateDataplaneOverrideShape(override *YanetComponentOverride) error {
+	if override == nil {
+		return nil
+	}
+	for name, container := range override.Containers {
+		switch name {
+		case DataplaneContainerName:
+			if container.Enabled != nil {
+				return fmt.Errorf(
+					"spec.components.dataplane.containers[%q].enabled is invalid; use spec.components.dataplane.enabled",
+					name,
+				)
+			}
+		case BirdSidecarContainerName, NetlinkDataplaneSidecarContainerName:
+		default:
+			return fmt.Errorf(
+				"spec.components.dataplane.containers[%q] is not a fixed dataplane Pod container",
+				name,
+			)
+		}
+	}
+	return nil
+}
+
+func validateDataplaneOverride(
+	override *YanetComponentOverride,
+	declared *DataplaneSpec,
+	box *BoxDataplane,
+) error {
+	if override == nil {
+		return nil
+	}
+	for name := range override.Containers {
+		switch name {
+		case DataplaneContainerName:
+			continue
+		case BirdSidecarContainerName:
+			if declared.Sidecars == nil || declared.Sidecars.Bird == nil {
+				return fmt.Errorf(
+					"spec.components.dataplane.containers[%q] has no matching YanetConfigV2 sidecar",
+					name,
+				)
+			}
+			if box == nil || box.Sidecars == nil || box.Sidecars.Bird == nil {
+				return fmt.Errorf(
+					"spec.components.dataplane.containers[%q] is not wired by the selected boxType",
+					name,
+				)
+			}
+		case NetlinkDataplaneSidecarContainerName:
+			if declared.Sidecars == nil || declared.Sidecars.NetlinkDataplaneSidecar == nil {
+				return fmt.Errorf(
+					"spec.components.dataplane.containers[%q] has no matching YanetConfigV2 sidecar",
+					name,
+				)
+			}
+			if box == nil || box.Sidecars == nil || box.Sidecars.NetlinkDataplaneSidecar == nil {
+				return fmt.Errorf(
+					"spec.components.dataplane.containers[%q] is not wired by the selected boxType",
+					name,
+				)
 			}
 		}
 	}
@@ -204,13 +369,25 @@ func validateOverrideDisabledNuma(disabled []int32) error {
 // validateHardcodedContainerKeys ensures the container key map of a
 // hardcoded component override has at most one entry, and that entry
 // matches the kind name (the only container the builder renders).
-func validateHardcodedContainerKeys(kind string, ovr *YanetComponentOverride) error {
+func validateHardcodedContainerKeys(fieldName, containerName string, ovr *YanetComponentOverride) error {
 	if ovr == nil {
 		return nil
 	}
 	for k := range ovr.Containers {
-		if k != kind {
-			return fmt.Errorf("spec.components.%s.containers[%q]: only key %q is allowed for hardcoded components", kind, k, kind)
+		if k != containerName {
+			return fmt.Errorf(
+				"spec.components.%s.containers[%q]: only key %q is allowed for fixed workloads",
+				fieldName,
+				k,
+				containerName,
+			)
+		}
+		if ovr.Containers[k].Enabled != nil {
+			return fmt.Errorf(
+				"spec.components.%s.containers[%q].enabled is only supported for dataplane native sidecars",
+				fieldName,
+				k,
+			)
 		}
 	}
 	return nil

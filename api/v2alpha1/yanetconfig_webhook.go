@@ -110,6 +110,9 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
 		return err
 	}
+	if err := validateComponentImages(&spec.Components); err != nil {
+		return err
+	}
 	if err := validateConfigSources(&spec.Components); err != nil {
 		return err
 	}
@@ -118,6 +121,60 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	}
 	if err := dryRunPatches(spec.Patches); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateComponentImages(components *ComponentsSpec) error {
+	validate := func(path string, image ImageRef) error {
+		if image.Name == "" {
+			return fmt.Errorf("%s.name is required", path)
+		}
+		return nil
+	}
+	if err := validate("spec.components.controlplane.image", components.Controlplane.Image); err != nil {
+		return err
+	}
+	if err := validate("spec.components.dataplane.image", components.Dataplane.Image); err != nil {
+		return err
+	}
+	if components.Dataplane.Sidecars != nil {
+		if components.Dataplane.Sidecars.Bird != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.bird.image",
+				components.Dataplane.Sidecars.Bird.Image,
+			); err != nil {
+				return err
+			}
+		}
+		if components.Dataplane.Sidecars.NetlinkDataplaneSidecar != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar.image",
+				components.Dataplane.Sidecars.NetlinkDataplaneSidecar.Image,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if components.BirdAdapter != nil {
+		if err := validate("spec.components.birdAdapter.image", components.BirdAdapter.Image); err != nil {
+			return err
+		}
+	}
+	if components.Announcer != nil {
+		if err := validate("spec.components.announcer.image", components.Announcer.Image); err != nil {
+			return err
+		}
+	}
+	for i := range components.Operators {
+		for j := range components.Operators[i].Containers {
+			if err := validate(
+				fmt.Sprintf("spec.components.operators[%d].containers[%d].image", i, j),
+				components.Operators[i].Containers[j].Image,
+			); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -139,9 +196,22 @@ func validateConfigSources(components *ComponentsSpec) error {
 	if err := validate("spec.components.dataplane.config", components.Dataplane.Config); err != nil {
 		return err
 	}
-	if components.Bird != nil {
-		if err := validate("spec.components.bird.config", components.Bird.Config); err != nil {
-			return err
+	if components.Dataplane.Sidecars != nil {
+		if components.Dataplane.Sidecars.Bird != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.bird.config",
+				components.Dataplane.Sidecars.Bird.Config,
+			); err != nil {
+				return err
+			}
+		}
+		if components.Dataplane.Sidecars.NetlinkDataplaneSidecar != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar.config",
+				components.Dataplane.Sidecars.NetlinkDataplaneSidecar.Config,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	if components.BirdAdapter != nil {
@@ -233,11 +303,12 @@ func validatePatchUniqueness(patches []NamedPatch) error {
 
 func validateOperatorUniqueness(ops []OperatorSpec) error {
 	reservedNames := map[string]struct{}{
-		"controlplane": {},
-		"dataplane":    {},
-		"bird":         {},
-		"bird-adapter": {},
-		"announcer":    {},
+		"controlplane":              {},
+		"dataplane":                 {},
+		"bird":                      {},
+		"bird-adapter":              {},
+		"netlink-dataplane-sidecar": {},
+		"announcer":                 {},
 	}
 	seen := make(map[string]struct{}, len(ops))
 	for i := range ops {
@@ -320,17 +391,21 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 		if err := assertPatchesExist(path+".components.dataplane.patches", box.Components.Dataplane.Patches, patchSet); err != nil {
 			return err
 		}
-		if box.Components.Bird != nil {
-			if err := assertPatchesExist(path+".components.bird.patches", box.Components.Bird.Patches, patchSet); err != nil {
-				return err
-			}
+		if err := validateDataplaneSidecarRefs(path, &spec.Components.Dataplane, box.Components.Dataplane); err != nil {
+			return err
 		}
 		if box.Components.BirdAdapter != nil {
+			if spec.Components.BirdAdapter == nil {
+				return fmt.Errorf("%s.components.birdAdapter has no matching spec.components.birdAdapter", path)
+			}
 			if err := assertPatchesExist(path+".components.birdAdapter.patches", box.Components.BirdAdapter.Patches, patchSet); err != nil {
 				return err
 			}
 		}
 		if box.Components.Announcer != nil {
+			if spec.Components.Announcer == nil {
+				return fmt.Errorf("%s.components.announcer has no matching spec.components.announcer", path)
+			}
 			if err := assertPatchesExist(path+".components.announcer.patches", box.Components.Announcer.Patches, patchSet); err != nil {
 				return err
 			}
@@ -344,6 +419,27 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func validateDataplaneSidecarRefs(path string, palette *DataplaneSpec, box *BoxDataplane) error {
+	if box.Sidecars == nil {
+		return nil
+	}
+	if box.Sidecars.Bird != nil && (palette.Sidecars == nil || palette.Sidecars.Bird == nil) {
+		return fmt.Errorf(
+			"%s.components.dataplane.sidecars.bird has no matching spec.components.dataplane.sidecars.bird",
+			path,
+		)
+	}
+	if box.Sidecars.NetlinkDataplaneSidecar != nil &&
+		(palette.Sidecars == nil || palette.Sidecars.NetlinkDataplaneSidecar == nil) {
+		return fmt.Errorf(
+			"%s.components.dataplane.sidecars.netlinkDataplaneSidecar has no matching "+
+				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar",
+			path,
+		)
 	}
 	return nil
 }

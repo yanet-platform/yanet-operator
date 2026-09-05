@@ -2,6 +2,8 @@ apiVersion: v2
 name: yanet-operator
 description: A Helm chart for yanet-operator - Kubernetes operator for YANET deployments
 type: application
+# Native-sidecar named target ports are resolved by EndpointSlice starting in 1.33.
+kubeVersion: ">=1.33.0-0"
 # Version is set manually and used for Helm chart versioning
 version: 0.1.11
 # appVersion is automatically synced with version during CI/CD build

@@ -118,9 +118,9 @@ The v2alpha1 design separates three independent axes of configuration:
 │ YanetConfig (cluster-wide, in-memory snapshot)                  │
 │                                                                 │
 │  spec.components       — palette of available components        │
-│    ├─ controlplane     — 5 hardcoded slots                      │
+│    ├─ controlplane     — 4 fixed workload slots                 │
 │    ├─ dataplane                                                 │
-│    ├─ bird                                                      │
+│    │    └─ sidecars    — bird + netlink-dataplane-sidecar       │
 │    ├─ birdAdapter                                               │
 │    ├─ announcer                                                 │
 │    └─ operators[]      — dynamic, by name                       │
@@ -152,20 +152,20 @@ The v2alpha1 design separates three independent axes of configuration:
 ```
 
 Per-installation customisation is intentionally narrow: per-container
-`image.{name,tag}` (under `containers.<name>`), `enabled`, and controlplane
-`disabledNuma` are accepted on the Yanet CR. The intrinsic security/mount baseline each component cannot run
-without is emitted by the builder itself (the dataplane's privileged +
-hostNetwork/hostIPC + minimal host devices, and the controlplane's hostIPC +
-`/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
+`image.{name,tag}` (under `containers.<name>`), workload `enabled`, dataplane
+native-sidecar `enabled`, and controlplane `disabledNuma` are accepted on the
+Yanet CR. The intrinsic security/mount baseline each component cannot run
+without is emitted by the builder itself (the dataplane's privileged + hostIPC
++ minimal host devices, the netlink sidecar's privileged + read-only netplan,
+and the controlplane's hostIPC + `/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
 `applyControlplaneShmem` in `builder_v2.go`). Everything optional beyond that
 (annotations, postStart, extra hostIPC/privileged for operators, resources)
 belongs in a NamedPatch.
 
-The container key inside `containers` must match the rendered container name
-— for the 5 hardcoded components it equals the component kind itself
-(`controlplane`, `dataplane`, `bird`, `birdAdapter`, `announcer`); for
-operators it equals the `OperatorContainer.name` declared in YanetConfig
-(which is mandatory).
+The container key inside `containers` must match the rendered container name.
+Fixed workloads use their own names; dataplane also accepts the native-sidecar
+names `bird` and `netlink-dataplane-sidecar`. Operators use the mandatory
+`OperatorContainer.name` declared in YanetConfigV2.
 
 ### CR shape
 
@@ -181,8 +181,13 @@ spec:
     controlplane:
       image: {...}
       numa: 2
-    dataplane:    { image: {...}, hugepages: { size: 1Gi, count: 8 } }
-    bird:         { image: {...} }
+    dataplane:
+      image: {...}
+      hugepages: { size: 1Gi, count: 8 }
+      hostNetwork: false
+      sidecars:
+        bird: { image: {...} }
+        netlinkDataplaneSidecar: { image: {...} }
     birdAdapter:  { image: {...} }
     announcer:    { image: {...} }
     operators:
@@ -210,8 +215,11 @@ spec:
     - name: release
       components:
         controlplane: { patches: [controlplane-listener, telegraf, cp-resources-release] }
-        dataplane:    { patches: [telegraf, dp-resources] }
-        bird:         { patches: [telegraf] }
+        dataplane:
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
+          patches: [telegraf, dp-resources]
       operators:
         antiddos:     { patches: [telegraf] }
 ```
@@ -352,7 +360,8 @@ unique NUMA layout wants its own `YanetV2` CR selecting just that node.
 
 Every operator wired into a box type gets one shared ClusterIP Service named
 `yanet-<boxType>-<operator>`. `birdAdapter` and `announcer` use the same model;
-`bird` and `dataplane` do not generate application Services.
+the netlink dataplane sidecar gets
+`yanet-<boxType>-netlink-dataplane-sidecar`. BIRD is service-less.
 
 ### Listener endpoints
 
@@ -364,13 +373,15 @@ from `spec.hostNetworkPortRange`, with fixed BIRD and patch-added ports reserved
 The operator injects `YANET_KUBERNETES_GRPC_PORT` and
 `YANET_KUBERNETES_HTTP_PORT` into the listener container. Runtime-specific
 endpoint variables are added by NamedPatches and can refer to these earlier env
-entries, for example `[::]:$(YANET_KUBERNETES_GRPC_PORT)`.
+entries, for example `[::]:$(YANET_KUBERNETES_GRPC_PORT)`. For the fixed netlink
+sidecar, the builder directly supplies `YANET_SERVER_ENDPOINT` and
+`YANET_SERVER_ADVERTISE_ENDPOINT`; the latter advertises its shared Service.
 
 ---
 
 ## 5. ConfigSource — three variants
 
-All five hardcoded components and every operator container can supply a
+Every fixed workload, dataplane native sidecar, and operator container can supply a
 `ConfigSource` ([`api/v2alpha1/config_source.go`](api/v2alpha1/config_source.go)):
 
 | Variant   | What the builder does                                            |
@@ -419,8 +430,9 @@ Why strategic merge:
 
 Validation:
 - Webhook enforces uniqueness of names and existence of all references.
-- Dynamic operator names cannot reuse the built-in component identities
-  `controlplane`, `dataplane`, `bird`, `bird-adapter`, or `announcer`.
+- Dynamic operator names cannot reuse the built-in workload/container identities
+  `controlplane`, `dataplane`, `bird`, `bird-adapter`,
+  `netlink-dataplane-sidecar`, or `announcer`.
 - Webhook **dry-runs** every patch via `strategicpatch.StrategicMergePatch(empty Deployment, patch, appsv1.Deployment{})` so a typo (e.g. `templete:` instead of `template:`) is caught at admit time.
 
 After patching, the builder restores the Deployment name, namespace, controller
@@ -428,6 +440,11 @@ owner, immutable selector, node placement, reserved labels, and `Recreate`
 strategy. Other metadata and Pod fields remain patchable. `Recreate` is required
 because a rolling replacement on the same node would overlap BIRD and managed
 host-network listener ports with the old Pod.
+
+Patches for BIRD or the netlink sidecar target `spec.template.spec.initContainers`
+because Kubernetes native sidecars are restartable init containers with
+`restartPolicy: Always`. All such patches remain attached to the single
+dataplane box slot.
 
 JSON6902 (`jsonPatch`) is intentionally not supported. Service / ConfigMap
 patching is not supported either — those are generated entirely from the

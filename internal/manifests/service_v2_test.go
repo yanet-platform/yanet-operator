@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"testing"
 
+	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,18 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 		wantPorts []ServicePortPlan
 		wantCount int
 	}{
+		{
+			name: "dataplane netlink sidecar",
+			component: &helpers.ResolvedComponent{
+				Kind: helpers.KindDataplane,
+				Name: "dataplane",
+				NativeSidecars: []helpers.ResolvedContainer{{
+					Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				}},
+			},
+			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: NetlinkGRPCTargetPort}},
+			wantCount: 1,
+		},
 		{
 			name:      "controlplane",
 			component: &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane"},
@@ -69,8 +82,7 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 			wantPorts: []ServicePortPlan{{Name: ListenerHTTP, Port: ServiceHTTPPort, TargetPortName: ListenerHTTP}},
 			wantCount: 1,
 		},
-		{name: "dataplane", component: &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane"}},
-		{name: "bird", component: &helpers.ResolvedComponent{Kind: helpers.KindBird, Name: "bird"}},
+		{name: "dataplane without sidecar", component: &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,6 +96,28 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBuildServices_DataplaneNetlinkSidecar(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane,
+		Name: "dataplane",
+		NativeSidecars: []helpers.ResolvedContainer{{
+			Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+		}},
+	}
+	plans := BuildServices(serviceContextV2(), component)
+	if len(plans) != 1 {
+		t.Fatalf("plans = %+v, want one netlink sidecar Service", plans)
+	}
+	plan := plans[0]
+	if plan.Name != "yanet-firewall-netlink-dataplane-sidecar" ||
+		plan.Component != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("dataplane sidecar Service identity = %+v", plan)
+	}
+	if plan.Selector[LabelComponent] != "dataplane" || !plan.Local {
+		t.Fatalf("dataplane sidecar Service selector/locality = %+v", plan)
 	}
 }
 

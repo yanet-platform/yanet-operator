@@ -123,6 +123,11 @@ yanetconfigV2: {}
 #      dataplane:
 #        image: {name: dataplane, tag: v2.1}
 #        hugepages: {size: 1Gi, count: 8}
+#        sidecars:
+#          bird:
+#            image: {name: bird, tag: "2.15"}
+#          netlinkDataplaneSidecar:
+#            image: {name: netlink-dataplane-sidecar, tag: v2.1}
 #    patches:
 #      - name: controlplane-listener
 #        patch:
@@ -145,4 +150,8 @@ yanetconfigV2: {}
 #      - name: release
 #        components:
 #          controlplane: {patches: [controlplane-listener, telegraf]}
-#          dataplane: {patches: [telegraf]}
+#          dataplane:
+#            sidecars:
+#              bird: {}
+#              netlinkDataplaneSidecar: {}
+#            patches: [telegraf]

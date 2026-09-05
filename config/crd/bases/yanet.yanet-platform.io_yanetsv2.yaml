@@ -65,7 +65,8 @@ spec:
 
               No patches and no inline component specs are accepted here. The only
               per-installation customisation knobs are typed point-overrides in
-              components.<name>.{enabled,image}.
+              components.<name>.{enabled,image}. Dataplane native sidecars can also be
+              disabled through their entries in components.dataplane.containers.
             properties:
               autoSync:
                 description: |-
@@ -99,6 +100,12 @@ spec:
                             YanetContainerOverride is the per-installation image override for one
                             rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set for the BIRD and netlink native sidecars of the
+                                dataplane Pod. The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
                               type: string
                             tag:
@@ -106,42 +113,9 @@ spec:
                           type: object
                         description: |-
                           Containers overrides image.name and image.tag per container, keyed by
-                          container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
-                          YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
-                        type: object
-                      enabled:
-                        description: |-
-                          Enabled toggles this component for this installation only.
-                          true → replicas=1, false → replicas=0 (component still
-                          rendered, but with zero pods).
-                        type: boolean
-                    type: object
-                  bird:
-                    description: |-
-                      YanetComponentOverride is the only per-installation customisation
-                      surface for a component. Anything broader belongs to a patch.
-                    properties:
-                      containers:
-                        additionalProperties:
-                          description: |-
-                            YanetContainerOverride is the per-installation image override for one
-                            rendered container.
-                          properties:
-                            name:
-                              type: string
-                            tag:
-                              type: string
-                          type: object
-                        description: |-
-                          Containers overrides image.name and image.tag per container, keyed by
-                          container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts "dataplane", "bird" and
+                          "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
                           Registry/prefix come from YanetConfigV2.spec.images.
                         type: object
@@ -163,6 +137,12 @@ spec:
                             YanetContainerOverride is the per-installation image override for one
                             rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set for the BIRD and netlink native sidecars of the
+                                dataplane Pod. The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
                               type: string
                             tag:
@@ -170,10 +150,9 @@ spec:
                           type: object
                         description: |-
                           Containers overrides image.name and image.tag per container, keyed by
-                          container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts "dataplane", "bird" and
+                          "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
                           Registry/prefix come from YanetConfigV2.spec.images.
                         type: object
@@ -196,6 +175,12 @@ spec:
                             YanetContainerOverride is the per-installation image override for one
                             rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set for the BIRD and netlink native sidecars of the
+                                dataplane Pod. The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
                               type: string
                             tag:
@@ -203,10 +188,9 @@ spec:
                           type: object
                         description: |-
                           Containers overrides image.name and image.tag per container, keyed by
-                          container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts "dataplane", "bird" and
+                          "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
                           Registry/prefix come from YanetConfigV2.spec.images.
                         type: object
@@ -248,6 +232,12 @@ spec:
                             YanetContainerOverride is the per-installation image override for one
                             rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set for the BIRD and netlink native sidecars of the
+                                dataplane Pod. The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
                               type: string
                             tag:
@@ -255,10 +245,9 @@ spec:
                           type: object
                         description: |-
                           Containers overrides image.name and image.tag per container, keyed by
-                          container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts "dataplane", "bird" and
+                          "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
                           Registry/prefix come from YanetConfigV2.spec.images.
                         type: object
@@ -281,6 +270,12 @@ spec:
                               YanetContainerOverride is the per-installation image override for one
                               rendered container.
                             properties:
+                              enabled:
+                                description: |-
+                                  Enabled may only be set for the BIRD and netlink native sidecars of the
+                                  dataplane Pod. The dataplane field itself uses the component-level Enabled
+                                  switch because a Pod cannot run without its primary container.
+                                type: boolean
                               name:
                                 type: string
                               tag:
@@ -288,10 +283,9 @@ spec:
                             type: object
                           description: |-
                             Containers overrides image.name and image.tag per container, keyed by
-                            container name. For the 5 hardcoded
-                            components (single-container) the key is the kind:
-                            "controlplane", "dataplane", "bird", "birdAdapter",
-                            "announcer". For operators the key is the
+                            container name. Single-container fixed components use their rendered
+                            container name. The dataplane accepts "dataplane", "bird" and
+                            "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
                             YanetConfigV2.spec.components.operators[].containers[].name.
                             Registry/prefix come from YanetConfigV2.spec.images.
                           type: object

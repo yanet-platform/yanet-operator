@@ -91,8 +91,8 @@ func (p ServicePlan) Validate() error {
 
 // BuildServices returns the stable Service plans for one component. Services
 // are unconditional for every service-backed box slot, even when a particular
-// YanetV2 or NUMA workload is scaled to zero. Dataplane and BIRD intentionally
-// have no application Service.
+// YanetV2 or NUMA workload is scaled to zero. A dataplane with the netlink
+// native sidecar receives a Service for that sidecar; BIRD remains service-less.
 func BuildServices(ctx BuildContextV2, component *helpers.ResolvedComponent) []ServicePlan {
 	listeners := ListenerPorts(component)
 	if len(listeners) == 0 {
@@ -117,6 +117,10 @@ func buildServicePlan(
 	numa *int32,
 	listeners []ListenerPort,
 ) ServicePlan {
+	serviceComponent := component.Name
+	if component.Kind == helpers.KindDataplane {
+		serviceComponent = ListenerContainerName(component)
+	}
 	selector := map[string]string{
 		labelBoxType:   ctx.BoxType,
 		labelComponent: component.Name,
@@ -129,13 +133,13 @@ func buildServicePlan(
 		ports = append(ports, ServicePortPlan{
 			Name:           listener.Name,
 			Port:           listener.ServicePort,
-			TargetPortName: listener.Name,
+			TargetPortName: listenerTargetPortName(listener),
 		})
 	}
 	return ServicePlan{
-		Name:      SharedServiceName(ctx.BoxType, component.Name, numa),
+		Name:      SharedServiceName(ctx.BoxType, serviceComponent, numa),
 		BoxType:   ctx.BoxType,
-		Component: component.Name,
+		Component: serviceComponent,
 		Selector:  selector,
 		Ports:     ports,
 		Local:     true,

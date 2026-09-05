@@ -37,7 +37,7 @@ import (
 func validBoxComponents() yanetv2alpha1.BoxComponents {
 	return yanetv2alpha1.BoxComponents{
 		Controlplane: &yanetv2alpha1.BoxComponent{},
-		Dataplane:    &yanetv2alpha1.BoxComponent{},
+		Dataplane:    &yanetv2alpha1.BoxDataplane{},
 	}
 }
 
@@ -423,7 +423,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 							Controlplane: &yanetv2alpha1.BoxComponent{
 								Patches: []string{"non-existent-patch"}, // Invalid reference!
 							},
-							Dataplane: &yanetv2alpha1.BoxComponent{},
+							Dataplane: &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
@@ -461,7 +461,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 							Controlplane: &yanetv2alpha1.BoxComponent{
 								Patches: []string{"my-patch"}, // Valid reference
 							},
-							Dataplane: &yanetv2alpha1.BoxComponent{},
+							Dataplane: &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},

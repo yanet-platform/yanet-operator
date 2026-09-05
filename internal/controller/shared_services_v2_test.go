@@ -45,6 +45,14 @@ func TestReconcileSharedServicesV2AggregatesInstallationsAndPrunesOwnedOrphans(t
 		},
 		Spec: minimalConfigV2(),
 	}
+	config.Spec.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
+		NetlinkDataplaneSidecar: &yanetv2alpha1.DataplaneSidecarSpec{
+			Image: yanetv2alpha1.ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v1"},
+		},
+	}
+	config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
+		NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{},
+	}
 	config.Spec.Components.Operators = []yanetv2alpha1.OperatorSpec{{
 		Name: "route",
 		Containers: []yanetv2alpha1.OperatorContainer{{
@@ -134,6 +142,7 @@ func TestReconcileSharedServicesV2AggregatesInstallationsAndPrunesOwnedOrphans(t
 		"yanet-release-controlplane-numa0",
 		"yanet-release-controlplane-numa1",
 		"yanet-release-controlplane-numa2",
+		"yanet-release-netlink-dataplane-sidecar",
 		"yanet-release-route",
 	}
 	if !reflect.DeepEqual(managedNames, wantNames) {

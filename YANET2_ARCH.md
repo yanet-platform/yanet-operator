@@ -23,7 +23,7 @@
 
 | Component | Deployment | IPC / network | Config |
 |---|---|---|---|
-| `dataplane` (`yanet-dataplane`) | One Deployment per node | `hostNetwork: true`, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet` | hostPath (`/etc/yanet2/dataplane.yaml`), as in v1 |
+| `dataplane` (`yanet-dataplane`) | One Deployment per node | Pod network by default, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet`; native sidecars share its network namespace | hostPath (`/etc/yanet2/dataplane.yaml`), as in v1 |
 | `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` (for shmem) | hostPath, inline or URL |
 | `metrics-collector` | DaemonSet (out of yanet-operator scope in Phase 4) | gRPC to gateway service | — |
 
@@ -31,12 +31,17 @@
 
 | Component | Deployment | Wiring |
 |---|---|---|
-| `bird` (BIRD2) | Standalone Deployment | hostPath config (as in v1); shared volume `/run/bird` for the unix socket |
+| `bird` (BIRD2) | Native sidecar in the dataplane Pod | hostPath config; owns `/run/bird`; shares dataplane network namespace |
+| `netlink-dataplane-sidecar` | Native sidecar in the dataplane Pod | privileged for per-interface `/proc/sys` writes, read-only `/etc/netplan`, gRPC callback Service; shares dataplane network namespace |
 | `bird-adapter` (`yanet-bird-adapter`) | Standalone Deployment | shared `/run/bird` (reads BIRD socket); gRPC → gateway service and/or route-operator service |
 
-> In the CRD, `bird` and `bird-adapter` are represented as **a single entity**:
-> bird without an adapter is useless, and the adapter without bird is useless.
-> Two distinct Deployments are kept so they can be upgraded independently.
+> BIRD and the netlink helper are fixed optional slots below
+> `spec.components.dataplane.sidecars`. A box type selects them below its
+> dataplane slot. Kubernetes renders both as restartable init containers
+> (`restartPolicy: Always`); netlink precedes BIRD so BIRD stops first.
+> During migration, stop the old operator and delete its standalone v2 BIRD
+> Deployments before enabling this sidecar. Both variants own the node-local
+> `/run/bird` control-socket directory and cannot run concurrently.
 
 ### 2.3. Operators and Agents
 
@@ -88,6 +93,7 @@ Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
 | `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>,component=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA role; exposes `grpc:8080` and `http:8081` |
+| `yanet-<boxType>-netlink-dataplane-sidecar` | `box-type=<boxType>,component=dataplane` | ClusterIP, `internalTrafficPolicy: Local` | Gateway callback endpoint for the netlink sidecar on `grpc:8080` |
 | `yanet-<boxType>-<operator>` | `box-type=<boxType>,component=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks on `grpc:8080` |
 | `yanet-<boxType>-announcer` | `box-type=<boxType>,component=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point on `grpc:8080` |
 
@@ -99,17 +105,21 @@ from `spec.hostNetworkPortRange`, while Pod-network workloads use `8080/8081`.
 
 ## 4. Dependencies
 
+- **Kubernetes 1.33+** — required so EndpointSlice resolves named Service
+  target ports exposed by restartable init-container sidecars.
 - **Node Feature Discovery (NFD)** — optional helm-chart dependency.
   - `helm install -n node-feature-discovery --create-namespace nfd oci://registry.k8s.io/nfd/charts/node-feature-discovery --version 0.19.0`
   - The label `feature.node.kubernetes.io/cpu-numa_nodes_count` is used to determine how many controlplane Deployments to generate per node.
-- Host requirements: hugepages, `hostNetwork`, `hostIPC` capability.
+- Host requirements: hugepages, `hostIPC`, DPDK devices, and netplan input.
+  `hostNetwork` remains an explicit legacy option.
 
 ## 5. Mermaid diagram
 
 > Simplified single-NUMA view (in production a node has N NUMA domains and N
 > `controlplane` Deployments). Modules live **inside** `controlplane` (bundle).
-> Operators are **separate Deployments** outside `controlplane`. The BIRD unix
-> socket (`/run/bird`) is shared **only** with `bird-adapter` and `announcer`.
+> Operators are **separate Deployments** outside `controlplane`. BIRD and the
+> netlink helper are native sidecars in the dataplane Pod. The BIRD unix socket
+> (`/run/bird`) is also mounted into `bird-adapter` and `announcer`.
 
 ```mermaid
 flowchart TB
@@ -128,6 +138,7 @@ flowchart TB
         direction LR
         EXT["External clients<br/>cli / web / metrics-collector<br/>(not deployed by operator)"]:::plan
         SVCNUMA["Service: yanet-&lt;boxType&gt;-controlplane-numa{N}<br/>internalTrafficPolicy: Local"]:::svc
+        SVCNL["Service: yanet-&lt;boxType&gt;-netlink-dataplane-sidecar<br/>internalTrafficPolicy: Local"]:::svc
         EXT -->|gRPC/HTTP| SVCNUMA
     end
 
@@ -137,7 +148,11 @@ flowchart TB
         HUGE[("hugepages<br/>/dev/hugepages/yanet")]:::host
         BIRDSOCK[("shared volume<br/>/run/bird")]:::host
 
-        DP["dataplane Deployment<br/>hostNetwork + hostIPC + hugepages"]:::dp
+        subgraph DPPOD[" dataplane Deployment / shared Pod network namespace "]
+            DP["dataplane<br/>hostIPC + hugepages"]:::dp
+            NL["netlink-dataplane-sidecar<br/>privileged"]:::op
+            BIRD["bird (BIRD2)"]:::bird
+        end
 
         subgraph CP[" controlplane Deployment (per NUMA) "]
             direction TB
@@ -163,7 +178,6 @@ flowchart TB
 
         AG_DDOS["antiddos Deployment<br/>2 containers in one Pod:<br/>operator + agent (hostIPC=true)<br/>+ Service"]:::agent
 
-        BIRD["bird (BIRD2)<br/>Deployment"]:::bird
         BADAPT["bird-adapter<br/>Deployment"]:::bird
         ANN["announcer<br/>Deployment (planned)"]:::plan
     end
@@ -171,6 +185,8 @@ flowchart TB
     %% dataplane <-> controlplane via shmem (host IPC)
     DP <-. shmem .-> BUNDLE
     DP --- HUGE
+    SVCNL -.-> NL
+    NL <-->|gRPC Register / callback| GW
 
     %% Operators register with gateway and serve callbacks
     OP_PIPE  <-->|gRPC Register / callback| GW
@@ -181,7 +197,7 @@ flowchart TB
     %% Antiddos agent container needs host IPC
     AG_DDOS -. hostIPC ns .-> HUGE
 
-    %% BIRD socket shared ONLY with bird-adapter and announcer
+    %% BIRD publishes its socket from the dataplane Pod
     BIRD   ---|unix sock rw| BIRDSOCK
     BADAPT ---|unix sock ro| BIRDSOCK
     ANN    ---|unix sock ro| BIRDSOCK
@@ -209,13 +225,15 @@ The architecture above translates into the following items in the implementation
 
 1. **Optional NFD dependency** in the helm chart; read
    `feature.node.kubernetes.io/cpu-numa_nodes_count` to determine how many controlplane Deployments to generate per node.
-2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: true`, hugepages,
-   `securityContext`, and a hostPath config.
+2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: false` by
+   default, hugepages, `securityContext`, hostPath config, and fixed optional
+   BIRD/netlink native-sidecar slots.
 3. **N controlplane Deployments per node** plus one shared
    `yanet-<boxType>-controlplane-numa{N}` Service per NUMA role. Each Service has
    `internalTrafficPolicy: Local` and exposes fixed gRPC/HTTP ports `8080/8081`.
-4. **bird + bird-adapter** — a single CRD entity producing two independent Deployments,
-   shared volume `/run/bird`, hostPath bird config.
+4. **BIRD native sidecar + standalone bird-adapter** — BIRD shares the
+   dataplane network namespace; `/run/bird` remains a node-local hostPath for
+   adapter and announcer clients.
 5. **Operators / agents — array in CRD** with fields:
    - `name` and `containers`,
    - `config: { inline | hostPath | url }` (see §7),
@@ -232,7 +250,7 @@ The architecture above translates into the following items in the implementation
 ## 7. Component Config Sources
 
 CRD `v2alpha1` introduces a unified `config` schema (shared by controlplane,
-dataplane, bird, all operators / agents / announcer):
+dataplane, dataplane native sidecars, all operators / agents / announcer):
 
 ```yaml
 config:
@@ -242,12 +260,13 @@ config:
     ...
   # variant 2 — hostPath (as in v1)
   hostPath: /etc/yanet2/dataplane.yaml
-  # variant 3 — HTTP URL; the parameter ?node=<nodeName> is appended automatically
+  # variant 3 — HTTP URL; downloader init container supplied by a patch
   url: https://config-server.example/yanet2/controlplane
 ```
 
 Exactly **one** of the variants may be specified. Validation lives in the webhook.
-For `url`, an initContainer downloads the config into an emptyDir before the main container starts.
+For `url`, the builder creates an `emptyDir`; until downloader generation is
+implemented, a strategic patch must add the init container that populates it.
 
 ## 8. Open Questions / Deferred
 

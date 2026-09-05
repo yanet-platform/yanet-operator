@@ -68,8 +68,9 @@ type YanetConfigSpec struct {
 	// +optional
 	Images ImagesSpec `json:"images,omitempty"`
 
-	// Components is the palette of available components: 5 hardcoded
-	// names plus a dynamic operators[] array.
+	// Components is the palette of available workload components plus a
+	// dynamic operators[] array. The dataplane slot describes one Pod with
+	// fixed optional native sidecars.
 	// +kubebuilder:validation:Required
 	Components ComponentsSpec `json:"components"`
 
@@ -125,18 +126,16 @@ type ImagesSpec struct {
 
 // ComponentsSpec is the palette of components the operator can render.
 //
-// The 5 hardcoded names map 1:1 to Deployments. The Operators array is
-// a dynamic list keyed by Name; each entry is rendered as one
-// Deployment with one or more containers in a single Pod.
+// Controlplane, dataplane, birdAdapter and announcer map to Deployments. The
+// dataplane Deployment may also contain fixed BIRD and netlink native
+// sidecars. The Operators array is a dynamic list keyed by Name; each entry is
+// rendered as one Deployment with one or more containers in a single Pod.
 type ComponentsSpec struct {
 	// +kubebuilder:validation:Required
 	Controlplane ControlplaneSpec `json:"controlplane"`
 
 	// +kubebuilder:validation:Required
 	Dataplane DataplaneSpec `json:"dataplane"`
-
-	// +optional
-	Bird *BirdComponent `json:"bird,omitempty"`
 
 	// BirdAdapter is a SEPARATE Deployment (not a sidecar to bird),
 	// so the adapter can be updated without restarting bird.
@@ -187,7 +186,20 @@ type ControlplaneSpec struct {
 	DisabledNuma []int32 `json:"disabledNuma,omitempty"`
 }
 
-// DataplaneSpec describes the dataplane component (DPDK + hugepages).
+const (
+	// DataplaneContainerName is the primary container in the dataplane Pod.
+	DataplaneContainerName = "dataplane"
+	// BirdSidecarContainerName is the BIRD native-sidecar container name.
+	BirdSidecarContainerName = "bird"
+	// BirdAdapterContainerName is the rendered bird-adapter container name.
+	BirdAdapterContainerName = "bird-adapter"
+	// NetlinkDataplaneSidecarContainerName is the netlink native-sidecar
+	// container name.
+	NetlinkDataplaneSidecarContainerName = "netlink-dataplane-sidecar"
+)
+
+// DataplaneSpec describes one dataplane Pod: the DPDK process, hugepages and
+// fixed optional native sidecars that share its network namespace.
 type DataplaneSpec struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
@@ -199,15 +211,37 @@ type DataplaneSpec struct {
 	// +optional
 	Hugepages *Hugepages `json:"hugepages,omitempty"`
 
-	// HostNetwork defaults to true (DPDK requirement).
+	// HostNetwork defaults to false. Set it explicitly only for legacy
+	// deployments that intentionally run the dataplane in the host network.
+	// +kubebuilder:default=false
 	// +optional
 	HostNetwork *bool `json:"hostNetwork,omitempty"`
+
+	// Sidecars is the palette of native sidecars available to box types. A
+	// sidecar runs only when the selected box type wires its corresponding slot.
+	// +optional
+	Sidecars *DataplaneSidecarsSpec `json:"sidecars,omitempty"`
 }
 
-// BirdComponent describes the BIRD2 daemon Deployment.
-type BirdComponent struct {
+// DataplaneSidecarsSpec contains the fixed native-sidecar slots supported by
+// the dataplane Pod.
+type DataplaneSidecarsSpec struct {
+	// Bird runs the BIRD2 daemon in the dataplane network namespace.
+	// +optional
+	Bird *DataplaneSidecarSpec `json:"bird,omitempty"`
+
+	// NetlinkDataplaneSidecar owns KNI/VLAN/address/route reconciliation in the
+	// dataplane network namespace.
+	// +optional
+	NetlinkDataplaneSidecar *DataplaneSidecarSpec `json:"netlinkDataplaneSidecar,omitempty"`
+}
+
+// DataplaneSidecarSpec describes an image and configuration source for one
+// fixed dataplane native sidecar.
+type DataplaneSidecarSpec struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
+
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 }
@@ -323,7 +357,7 @@ type BoxType struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 
-	// Components defines which of the 5 hardcoded components are
+	// Components defines which fixed workload components are
 	// enabled and which patches each receives.
 	// +kubebuilder:validation:Required
 	Components BoxComponents `json:"components"`
@@ -333,15 +367,14 @@ type BoxType struct {
 	Operators map[string]BoxOperator `json:"operators,omitempty"`
 }
 
-// BoxComponents lists per-hardcoded-component patch wiring. A nil
-// section means the component is disabled for this boxType.
+// BoxComponents lists per-workload patch wiring. A nil section means the
+// workload is disabled for this boxType. Dataplane native sidecars are selected
+// inside the dataplane slot because they share its Deployment.
 type BoxComponents struct {
 	// +optional
 	Controlplane *BoxComponent `json:"controlplane,omitempty"`
 	// +optional
-	Dataplane *BoxComponent `json:"dataplane,omitempty"`
-	// +optional
-	Bird *BoxComponent `json:"bird,omitempty"`
+	Dataplane *BoxDataplane `json:"dataplane,omitempty"`
 	// +optional
 	BirdAdapter *BoxComponent `json:"birdAdapter,omitempty"`
 	// +optional
@@ -354,6 +387,38 @@ type BoxComponent struct {
 	// Patches are applied in declared order.
 	// +optional
 	Patches []string `json:"patches,omitempty"`
+}
+
+// BoxDataplane is the per-box slot for the dataplane Deployment and its fixed
+// native sidecars. Patches apply to the whole Deployment, including sidecars.
+type BoxDataplane struct {
+	// Patches lists patch names from YanetConfigV2.spec.patches[]. Patches are
+	// applied to the dataplane Deployment in declared order.
+	// +optional
+	Patches []string `json:"patches,omitempty"`
+
+	// Sidecars selects native sidecars declared in
+	// YanetConfigV2.spec.components.dataplane.sidecars.
+	// +optional
+	Sidecars *BoxDataplaneSidecars `json:"sidecars,omitempty"`
+}
+
+// BoxDataplaneSidecars contains per-box enablement for fixed native sidecars.
+type BoxDataplaneSidecars struct {
+	// +optional
+	Bird *BoxDataplaneSidecar `json:"bird,omitempty"`
+
+	// +optional
+	NetlinkDataplaneSidecar *BoxDataplaneSidecar `json:"netlinkDataplaneSidecar,omitempty"`
+}
+
+// BoxDataplaneSidecar selects a sidecar for a box type. A present slot defaults
+// to enabled; enabled=false keeps the declaration explicit while omitting the
+// sidecar from the rendered Pod.
+type BoxDataplaneSidecar struct {
+	// +kubebuilder:default=true
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // BoxOperator is the per-operator slot in a boxType.

@@ -78,7 +78,7 @@ func minimalV2ConfigSpec() yanetv2alpha1.YanetConfigSpec {
 				Name: "release",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{},
-					Dataplane:    &yanetv2alpha1.BoxComponent{},
+					Dataplane:    &yanetv2alpha1.BoxDataplane{},
 				},
 			},
 		},

@@ -164,11 +164,12 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 	}
 	cfg := &yanetv2alpha1.YanetConfigV2{Spec: cfgSpec}
 
-	// FindBoxType is called purely as an existence check so we can
+	// Resolve the selected box before validating per-installation overrides and
 	// surface a distinct "BoxTypeNotFound" reason on the status (the
 	// downstream EnabledComponentsForBox would otherwise conflate
 	// missing boxType with a malformed one under "BoxTypeInvalid").
-	if _, err := helpers.FindBoxType(&cfg.Spec, yanet.Spec.BoxType); err != nil {
+	box, err := helpers.FindBoxType(&cfg.Spec, yanet.Spec.BoxType)
+	if err != nil {
 		logger.Error(err, "boxType resolution failed")
 		if r.Recorder != nil {
 			r.Recorder.Eventf(yanet, nil, corev1.EventTypeWarning, "BoxTypeNotFound", "Reconcile",
@@ -176,6 +177,30 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		}
 		if uerr := r.updateStatusV2(ctx, yanet, func(fresh *yanetv2alpha1.YanetV2) {
 			setConditionsV2Degraded(fresh, "BoxTypeNotFound", err.Error())
+		}); uerr != nil {
+			logger.Info("status update failed (continuing)", "error", uerr)
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if err := yanetv2alpha1.ValidateEffectiveYanetComponentOverrides(
+		yanet.Spec.Components,
+		&cfg.Spec.Components,
+		box,
+	); err != nil {
+		logger.Error(err, "component override validation failed")
+		if r.Recorder != nil {
+			r.Recorder.Eventf(
+				yanet,
+				nil,
+				corev1.EventTypeWarning,
+				"OverridesInvalid",
+				"Reconcile",
+				"component overrides are invalid: %v",
+				err,
+			)
+		}
+		if uerr := r.updateStatusV2(ctx, yanet, func(fresh *yanetv2alpha1.YanetV2) {
+			setConditionsV2Degraded(fresh, "OverridesInvalid", err.Error())
 		}); uerr != nil {
 			logger.Info("status update failed (continuing)", "error", uerr)
 		}
@@ -320,6 +345,11 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 					continue
 				}
 				manifests.RestoreWorkloadIdentity(d, identity)
+				if nameErr := manifests.ValidatePodContainerNames(d); nameErr != nil {
+					logger.Error(nameErr, "container name validation failed", "component", rc.Name, "deployment", d.Name)
+					reconcileErrs = append(reconcileErrs, nameErr)
+					continue
+				}
 				if listenerErr := manifests.ConfigureListeners(d, rc, listenerAssignments[node.Name][d.Name]); listenerErr != nil {
 					logger.Error(listenerErr, "listener configuration failed", "component", rc.Name, "deployment", d.Name)
 					reconcileErrs = append(reconcileErrs, listenerErr)
@@ -504,6 +534,11 @@ func preflightResourcesV2(
 					continue
 				}
 				manifests.RestoreWorkloadIdentity(deployment, identity)
+				if err := manifests.ValidatePodContainerNames(deployment); err != nil {
+					preflightErrs = append(preflightErrs,
+						fmt.Errorf("validate %s on node %s: %w", deployment.Name, node.Name, err))
+					continue
+				}
 				normalizeDeploymentReplicas(deployment, rc.Enabled, installationEnabled)
 				workloads = append(workloads, renderedWorkloadV2{deployment: deployment, component: rc})
 			}
@@ -515,13 +550,9 @@ func preflightResourcesV2(
 			continue
 		}
 		assignments[node.Name] = nodeAssignments
-		hostPorts := make(map[hostPortKey]string)
+		hostPorts := make(map[hostPortKey]hostPortOwnerV2)
 		for _, workload := range workloads {
-			if err := reserveHostPorts(
-				hostPorts,
-				workload.deployment,
-				deploymentContainerPorts(workload.deployment),
-			); err != nil {
+			if err := reserveHostPorts(hostPorts, workload.deployment); err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("node %s: %w", node.Name, err))
 			}
 		}
@@ -562,53 +593,48 @@ type hostPortKey struct {
 	protocol corev1.Protocol
 }
 
-func deploymentContainerPorts(deployment *appsv1.Deployment) []corev1.ContainerPort {
-	var ports []corev1.ContainerPort
-	for i := range deployment.Spec.Template.Spec.Containers {
-		ports = append(ports, deployment.Spec.Template.Spec.Containers[i].Ports...)
-	}
-	return ports
-}
-
 func reserveHostPorts(
-	reserved map[hostPortKey]string,
+	reserved map[hostPortKey]hostPortOwnerV2,
 	deployment *appsv1.Deployment,
-	ports []corev1.ContainerPort,
 ) error {
-	if !deployment.Spec.Template.Spec.HostNetwork ||
-		(deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0) {
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
+		return nil
+	}
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 &&
+		deployment.Spec.Template.Labels[manifests.LabelComponent] == string(helpers.KindDataplane) {
+		return fmt.Errorf(
+			"deployment %s is a node-pinned dataplane workload with %d replicas",
+			deployment.Name, *deployment.Spec.Replicas,
+		)
+	}
+	if err := validateIntraPodHostPortsV2(deployment, nil); err != nil {
+		return err
+	}
+	if !deployment.Spec.Template.Spec.HostNetwork {
 		return nil
 	}
 	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 {
 		return fmt.Errorf(
-			"Deployment %s uses hostNetwork with %d replicas pinned to one node",
+			"deployment %s uses hostNetwork with %d replicas pinned to one node",
 			deployment.Name, *deployment.Spec.Replicas,
 		)
 	}
-	unique := make(map[hostPortKey]struct{}, len(ports))
-	for i := range ports {
-		port := &ports[i]
-		if port.ContainerPort <= 0 {
-			continue
+	reserve := func(containers []corev1.Container) error {
+		for i := range containers {
+			container := &containers[i]
+			owner := hostPortOwnerV2{deployment: deployment.Name, container: container.Name}
+			for j := range container.Ports {
+				if err := reserveHostPortV2(reserved, owner, &container.Ports[j]); err != nil {
+					return err
+				}
+			}
 		}
-		protocol := port.Protocol
-		if protocol == "" {
-			protocol = corev1.ProtocolTCP
-		}
-		key := hostPortKey{port: port.ContainerPort, protocol: protocol}
-		if _, duplicate := unique[key]; duplicate {
-			continue
-		}
-		unique[key] = struct{}{}
-		if previous, conflict := reserved[key]; conflict {
-			return fmt.Errorf(
-				"Deployments %s and %s use hostNetwork with the same %s port %d",
-				previous, deployment.Name, protocol, port.ContainerPort,
-			)
-		}
-		reserved[key] = deployment.Name
+		return nil
 	}
-	return nil
+	if err := reserve(deployment.Spec.Template.Spec.Containers); err != nil {
+		return err
+	}
+	return reserve(deployment.Spec.Template.Spec.InitContainers)
 }
 
 // handleYanetV2Deletion runs cleanup on a v2 YanetV2 whose

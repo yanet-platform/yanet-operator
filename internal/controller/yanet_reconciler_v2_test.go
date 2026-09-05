@@ -95,7 +95,7 @@ func minimalConfigV2() yanetv2alpha1.YanetConfigSpec {
 			Name: "release",
 			Components: yanetv2alpha1.BoxComponents{
 				Controlplane: &yanetv2alpha1.BoxComponent{},
-				Dataplane:    &yanetv2alpha1.BoxComponent{},
+				Dataplane:    &yanetv2alpha1.BoxDataplane{},
 			},
 		}},
 	}
@@ -136,7 +136,7 @@ func TestReconcileV2_ServicePlanCollisionFailsBeforeApplyAndClearsReady(t *testi
 		t.Fatalf("expected Service plan collision, got result=%+v err=%v", result, err)
 	}
 	deployments := &appsv1.DeploymentList{}
-	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+	if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
 		t.Fatalf("list Deployments: %v", err)
 	}
 	if len(deployments.Items) != 0 {
@@ -163,6 +163,55 @@ func TestReconcileV2_ServicePlanCollisionFailsBeforeApplyAndClearsReady(t *testi
 	if condition := conditions["Ready"]; condition.Status != metav1.ConditionFalse {
 		t.Errorf("Ready must be false after preflight failure: %+v", condition)
 	}
+}
+
+func TestReconcileV2_RevalidatesComponentOverrides(t *testing.T) {
+	autoSync := true
+	disabled := false
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType:  "release",
+			AutoSync: &autoSync,
+			Components: &yanetv2alpha1.YanetComponentsOverride{
+				Dataplane: &yanetv2alpha1.YanetComponentOverride{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+						yanetv2alpha1.DataplaneContainerName: {Enabled: &disabled},
+					},
+				},
+			},
+		},
+	}
+	r, snapshot := makeReconcilerEnv(t, yanet)
+	snapshot.Config = minimalConfigV2()
+
+	result, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("invalid persisted override result=%+v err=%v", result, err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("invalid override must fail before applying Deployments: %+v", deployments.Items)
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Get(
+		context.Background(),
+		types.NamespacedName{Name: yanet.Name, Namespace: yanet.Namespace},
+		got,
+	); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	for _, condition := range got.Status.Conditions {
+		if condition.Type == "Degraded" && condition.Reason == "OverridesInvalid" {
+			return
+		}
+	}
+	t.Fatalf("OverridesInvalid condition not found: %+v", got.Status.Conditions)
 }
 
 func TestReconcileV2_InvalidPatchFailsBeforeApply(t *testing.T) {
@@ -196,6 +245,47 @@ func TestReconcileV2_InvalidPatchFailsBeforeApply(t *testing.T) {
 	}
 }
 
+func TestReconcileV2_CrossListContainerNameCollisionFailsBeforeApply(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = minimalConfigV2()
+	snapshot.Config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
+		Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+			Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
+		},
+	}
+	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
+		Name: "regular-bird", Patch: runtime.RawExtension{Raw: []byte(
+			`{"spec":{"template":{"spec":{"containers":[{"name":"bird","image":"bird:v1"}]}}}}`,
+		)},
+	}}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
+		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
+	}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"regular-bird"}
+
+	_, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "both regular and init containers") {
+		t.Fatalf("expected cross-list container name collision, got %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("container-name preflight must prevent partial rollout, got %d Deployments", len(deployments.Items))
+	}
+}
+
 func TestReconcileV2_HostNetworkListenerWithoutRangeFailsBeforeApply(t *testing.T) {
 	autoSync := true
 	yanet := &yanetv2alpha1.YanetV2{
@@ -209,9 +299,6 @@ func TestReconcileV2_HostNetworkListenerWithoutRangeFailsBeforeApply(t *testing.
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
 	r, snapshot := makeReconcilerEnv(t, yanet, node)
 	snapshot.Config = minimalConfigV2()
-	snapshot.Config.Components.Bird = &yanetv2alpha1.BirdComponent{
-		Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
-	}
 	snapshot.Config.Components.Operators = []yanetv2alpha1.OperatorSpec{{
 		Name: "route",
 		Containers: []yanetv2alpha1.OperatorContainer{{
@@ -221,7 +308,6 @@ func TestReconcileV2_HostNetworkListenerWithoutRangeFailsBeforeApply(t *testing.
 	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
 		Name: "host-network", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"hostNetwork":true}}}}`)},
 	}}
-	snapshot.Config.BoxTypes[0].Components.Bird = &yanetv2alpha1.BoxComponent{}
 	snapshot.Config.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{
 		"route": {Patches: []string{"host-network"}},
 	}

@@ -67,6 +67,15 @@ func TestAllocateHostNetworkPortsV2DeterministicallySkipsReservedPorts(t *testin
 	assertListenerPortAndEnv(t, workloads[0].deployment, "route", manifests.ListenerGRPC, manifests.EnvKubernetesGRPCPort, 20001)
 	assertListenerPortAndEnv(t, workloads[1].deployment, "controlplane", manifests.ListenerGRPC, manifests.EnvKubernetesGRPCPort, 20003)
 	assertListenerPortAndEnv(t, workloads[1].deployment, "controlplane", manifests.ListenerHTTP, manifests.EnvKubernetesHTTPPort, 20004)
+	for _, workload := range workloads {
+		if workload.deployment.Spec.Template.Spec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
+			t.Fatalf(
+				"Deployment %s DNS policy = %q, want ClusterFirstWithHostNet",
+				workload.deployment.Name,
+				workload.deployment.Spec.Template.Spec.DNSPolicy,
+			)
+		}
+	}
 
 	repeated := []renderedWorkloadV2{
 		{component: route, deployment: workloads[0].deployment.DeepCopy()},
@@ -96,6 +105,49 @@ func TestAllocateHostNetworkPortsV2UsesStablePortsOutsideHostNetwork(t *testing.
 		t.Fatalf("pod-network workload must not receive an allocation: %#v", assignments)
 	}
 	assertListenerPortAndEnv(t, deployment, "route", manifests.ListenerGRPC, manifests.EnvKubernetesGRPCPort, manifests.ServiceGRPCPort)
+}
+
+func TestAllocateHostNetworkPortsV2ConfiguresNativeSidecar(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane,
+		Name: "dataplane",
+		NativeSidecars: []helpers.ResolvedContainer{{
+			Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+		}},
+	}
+	deployment := deploymentForListenerTest("dataplane", "dataplane", true)
+	deployment.Spec.Template.Spec.InitContainers = []corev1.Container{
+		{
+			Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+			Ports: []corev1.ContainerPort{{
+				Name:          manifests.NetlinkGRPCTargetPort,
+				ContainerPort: manifests.ServiceGRPCPort,
+			}},
+		},
+		{
+			Name:  yanetv2alpha1.BirdSidecarContainerName,
+			Ports: []corev1.ContainerPort{{Name: "fixed", ContainerPort: 20000}},
+		},
+	}
+	assignments, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		&yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 20001},
+	)
+	if err != nil {
+		t.Fatalf("allocateHostNetworkPortsV2: %v", err)
+	}
+	want := listenerPortAssignmentsV2{"dataplane": {manifests.ListenerGRPC: 20001}}
+	if !reflect.DeepEqual(assignments, want) {
+		t.Fatalf("assignments = %#v, want %#v", assignments, want)
+	}
+	assertListenerPortAndEnv(
+		t,
+		deployment,
+		yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+		manifests.NetlinkGRPCTargetPort,
+		manifests.EnvKubernetesGRPCPort,
+		20001,
+	)
 }
 
 func TestAllocateHostNetworkPortsV2RequiresRange(t *testing.T) {
@@ -144,6 +196,185 @@ func TestAllocateHostNetworkPortsV2RejectsFixedPortCollision(t *testing.T) {
 	}
 }
 
+func TestAllocateHostNetworkPortsV2SkipsDisabledWorkload(t *testing.T) {
+	route := operatorComponentForListenerTest("route")
+	deployment := deploymentForListenerTest("route", "route", true)
+	zero := int32(0)
+	deployment.Spec.Replicas = &zero
+	assignments, err := allocateHostNetworkPortsV2([]renderedWorkloadV2{{
+		deployment: deployment,
+		component:  route,
+	}}, nil)
+	if err != nil {
+		t.Fatalf("disabled host-network workload must not require a range: %v", err)
+	}
+	if len(assignments) != 0 {
+		t.Fatalf("disabled workload received listener assignments: %#v", assignments)
+	}
+}
+
+func TestAllocateHostNetworkPortsV2RejectsIntraPodPortCollision(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	component := &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane"}
+	deployment := deploymentForListenerTest(
+		"dataplane",
+		"dataplane",
+		true,
+		corev1.ContainerPort{Name: "dataplane-fixed", ContainerPort: 179},
+	)
+	deployment.Spec.Template.Spec.InitContainers = []corev1.Container{{
+		Name:          yanetv2alpha1.BirdSidecarContainerName,
+		RestartPolicy: &always,
+		Ports:         []corev1.ContainerPort{{Name: "bgp", ContainerPort: 179}},
+	}}
+	_, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "same TCP port 179") {
+		t.Fatalf("expected intra-Pod fixed port collision, got %v", err)
+	}
+}
+
+func TestAllocateHostNetworkPortsV2AllowsSequentialInitPortReuse(t *testing.T) {
+	component := operatorComponentForListenerTest("route")
+	deployment := deploymentForListenerTest(
+		"route",
+		"route",
+		true,
+	)
+	deployment.Spec.Template.Spec.InitContainers = []corev1.Container{{
+		Name:  "prepare-network",
+		Ports: []corev1.ContainerPort{{Name: "temporary", ContainerPort: 20000}},
+	}}
+	assignments, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		&yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 20000},
+	)
+	if err != nil {
+		t.Fatalf("sequential init/application port reuse was rejected: %v", err)
+	}
+	if got := assignments[deployment.Name][manifests.ListenerGRPC]; got != 20000 {
+		t.Fatalf("listener port = %d, want reused port 20000", got)
+	}
+}
+
+func TestAllocateHostNetworkPortsV2IgnoresProvisionalManagedPort(t *testing.T) {
+	component := operatorComponentForListenerTest("route")
+	deployment := deploymentForListenerTest(
+		"route",
+		"route",
+		true,
+		corev1.ContainerPort{Name: manifests.ListenerGRPC, ContainerPort: manifests.ServiceGRPCPort},
+	)
+	deployment.Spec.Template.Spec.Containers = append(
+		deployment.Spec.Template.Spec.Containers,
+		corev1.Container{
+			Name:  "metrics",
+			Ports: []corev1.ContainerPort{{Name: "fixed", ContainerPort: manifests.ServiceGRPCPort}},
+		},
+	)
+	assignments, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		&yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 20000},
+	)
+	if err != nil {
+		t.Fatalf("provisional managed listener port caused a conflict: %v", err)
+	}
+	if got := assignments[deployment.Name][manifests.ListenerGRPC]; got != 20000 {
+		t.Fatalf("listener port = %d, want 20000", got)
+	}
+}
+
+func TestAllocateHostNetworkPortsV2IgnoresPodNetworkProvisionalManagedPort(t *testing.T) {
+	component := operatorComponentForListenerTest("route")
+	deployment := deploymentForListenerTest(
+		"route",
+		"route",
+		false,
+		corev1.ContainerPort{Name: manifests.ListenerGRPC, ContainerPort: 9000},
+	)
+	deployment.Spec.Template.Spec.Containers = append(
+		deployment.Spec.Template.Spec.Containers,
+		corev1.Container{
+			Name:  "metrics",
+			Ports: []corev1.ContainerPort{{Name: "fixed", ContainerPort: 9000}},
+		},
+	)
+	if _, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		nil,
+	); err != nil {
+		t.Fatalf("provisional pod-network listener port caused a conflict: %v", err)
+	}
+	assertListenerPortAndEnv(
+		t,
+		deployment,
+		"route",
+		manifests.ListenerGRPC,
+		manifests.EnvKubernetesGRPCPort,
+		manifests.ServiceGRPCPort,
+	)
+}
+
+func TestAllocateHostNetworkPortsV2RejectsPodNetworkPortCollision(t *testing.T) {
+	component := operatorComponentForListenerTest("route")
+	deployment := deploymentForListenerTest(
+		"route",
+		"route",
+		false,
+		corev1.ContainerPort{Name: manifests.ListenerGRPC, ContainerPort: manifests.ServiceGRPCPort},
+	)
+	deployment.Spec.Template.Spec.Containers = append(
+		deployment.Spec.Template.Spec.Containers,
+		corev1.Container{
+			Name:  "metrics",
+			Ports: []corev1.ContainerPort{{Name: "fixed", ContainerPort: manifests.ServiceGRPCPort}},
+		},
+	)
+	if _, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "same TCP port 8080") {
+		t.Fatalf("expected pod-network listener collision, got %v", err)
+	}
+}
+
+func TestAllocateHostNetworkPortsV2RejectsSidecarAndLaterInitPortCollision(t *testing.T) {
+	always := corev1.ContainerRestartPolicyAlways
+	component := &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane"}
+	deployment := deploymentForListenerTest("dataplane", "dataplane", true)
+	deployment.Spec.Template.Spec.InitContainers = []corev1.Container{
+		{
+			Name:          yanetv2alpha1.BirdSidecarContainerName,
+			RestartPolicy: &always,
+			Ports:         []corev1.ContainerPort{{Name: "bgp", ContainerPort: 179}},
+		},
+		{
+			Name:  "prepare-network",
+			Ports: []corev1.ContainerPort{{Name: "temporary", ContainerPort: 179}},
+		},
+	}
+	if _, err := allocateHostNetworkPortsV2(
+		[]renderedWorkloadV2{{deployment: deployment, component: component}},
+		nil,
+	); err == nil || !strings.Contains(err.Error(), "run concurrently") {
+		t.Fatalf("expected sidecar/later-init port collision, got %v", err)
+	}
+}
+
+func TestReserveHostPortsRejectsMultiplePodNetworkDataplaneReplicas(t *testing.T) {
+	deployment := deploymentForListenerTest("dataplane", "dataplane", false)
+	deployment.Spec.Template.Labels = map[string]string{manifests.LabelComponent: "dataplane"}
+	replicas := int32(2)
+	deployment.Spec.Replicas = &replicas
+
+	err := reserveHostPorts(make(map[hostPortKey]hostPortOwnerV2), deployment)
+	if err == nil || !strings.Contains(err.Error(), "node-pinned dataplane") {
+		t.Fatalf("expected multiple dataplane replicas to be rejected, got %v", err)
+	}
+}
+
 func operatorComponentForListenerTest(name string) *helpers.ResolvedComponent {
 	return &helpers.ResolvedComponent{
 		Kind: helpers.KindOperator,
@@ -186,6 +417,14 @@ func assertListenerPortAndEnv(
 		if deployment.Spec.Template.Spec.Containers[index].Name == containerName {
 			container = &deployment.Spec.Template.Spec.Containers[index]
 			break
+		}
+	}
+	if container == nil {
+		for index := range deployment.Spec.Template.Spec.InitContainers {
+			if deployment.Spec.Template.Spec.InitContainers[index].Name == containerName {
+				container = &deployment.Spec.Template.Spec.InitContainers[index]
+				break
+			}
 		}
 	}
 	if container == nil {

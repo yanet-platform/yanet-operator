@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -580,6 +581,9 @@ func TestReconcileV2_AutoSyncOn_PrunesOrphanDeployment(t *testing.T) {
 			BoxType:      "release",
 			NodeSelector: map[string]string{"role": "yanet"},
 			AutoSync:     &autoSync,
+			Components: &yanetv2alpha1.YanetComponentsOverride{
+				Operators: map[string]yanetv2alpha1.YanetComponentOverride{"removed": {}},
+			},
 		},
 	}
 	node := &corev1.Node{
@@ -603,5 +607,73 @@ func TestReconcileV2_AutoSyncOn_PrunesOrphanDeployment(t *testing.T) {
 
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y-old-component", Namespace: "yanet"}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Errorf("expected orphan Deployment deleted, got err=%v", err)
+	}
+}
+
+func TestReconcileV2_RemovesSidecarDespiteStaleOverride(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType:      "release",
+			NodeSelector: map[string]string{"role": "yanet"},
+			AutoSync:     &autoSync,
+			Components: &yanetv2alpha1.YanetComponentsOverride{
+				Dataplane: &yanetv2alpha1.YanetComponentOverride{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+						yanetv2alpha1.BirdSidecarContainerName: {Tag: "override"},
+					},
+				},
+			},
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-1", Labels: map[string]string{"role": "yanet"},
+	}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	config := minimalConfigV2()
+	config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
+		Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+			Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
+		},
+	}
+	config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
+		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
+	}
+	snapshot.Config = config
+	reconcileTwice(t, r, yanet)
+
+	getDataplane := func() *appsv1.Deployment {
+		deployments := &appsv1.DeploymentList{}
+		if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+			t.Fatalf("list Deployments: %v", err)
+		}
+		for i := range deployments.Items {
+			deployment := &deployments.Items[i]
+			if deployment.Labels[manifests.LabelComponent] == string(helpers.KindDataplane) {
+				return deployment
+			}
+		}
+		t.Fatal("dataplane Deployment not found")
+		return nil
+	}
+	hasBird := func(deployment *appsv1.Deployment) bool {
+		for i := range deployment.Spec.Template.Spec.InitContainers {
+			if deployment.Spec.Template.Spec.InitContainers[i].Name == yanetv2alpha1.BirdSidecarContainerName {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasBird(getDataplane()) {
+		t.Fatal("initial dataplane Deployment is missing BIRD sidecar")
+	}
+
+	snapshot.Config = minimalConfigV2()
+	if _, err := r.reconcileYanetV2(context.Background(), yanet); err != nil {
+		t.Fatalf("reconcile sidecar removal: %v", err)
+	}
+	if hasBird(getDataplane()) {
+		t.Fatal("stale override kept removed BIRD sidecar running")
 	}
 }

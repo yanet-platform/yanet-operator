@@ -35,9 +35,14 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 				Image:       yanetv2alpha1.ImageRef{Name: "dataplane", Tag: "v2.1"},
 				Hugepages:   &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 8},
 				HostNetwork: PtrTrue(),
-			},
-			Bird: &yanetv2alpha1.BirdComponent{
-				Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "2.15"},
+				Sidecars: &yanetv2alpha1.DataplaneSidecarsSpec{
+					Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+						Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "2.15"},
+					},
+					NetlinkDataplaneSidecar: &yanetv2alpha1.DataplaneSidecarSpec{
+						Image: yanetv2alpha1.ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v2.1"},
+					},
+				},
 			},
 			BirdAdapter: &yanetv2alpha1.BirdAdapterComp{
 				Image: yanetv2alpha1.ImageRef{Name: "bird-adapter", Tag: "v0.3"},
@@ -71,17 +76,25 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 				Name: "release",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{Patches: []string{"telegraf", "cp-resources"}},
-					Dataplane:    &yanetv2alpha1.BoxComponent{Patches: []string{"telegraf"}},
-					Bird:         &yanetv2alpha1.BoxComponent{},
-					Announcer:    &yanetv2alpha1.BoxComponent{},
+					Dataplane: &yanetv2alpha1.BoxDataplane{
+						Patches: []string{"telegraf"},
+						Sidecars: &yanetv2alpha1.BoxDataplaneSidecars{
+							Bird:                    &yanetv2alpha1.BoxDataplaneSidecar{},
+							NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{},
+						},
+					},
+					Announcer: &yanetv2alpha1.BoxComponent{},
 				},
 			},
 			{
 				Name: "firewall",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{},
-					Dataplane:    &yanetv2alpha1.BoxComponent{},
-					BirdAdapter:  &yanetv2alpha1.BoxComponent{},
+					Dataplane: &yanetv2alpha1.BoxDataplane{Sidecars: &yanetv2alpha1.BoxDataplaneSidecars{
+						Bird:                    &yanetv2alpha1.BoxDataplaneSidecar{},
+						NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{},
+					}},
+					BirdAdapter: &yanetv2alpha1.BoxComponent{},
 				},
 				Operators: map[string]yanetv2alpha1.BoxOperator{
 					"antiddos": {Patches: []string{"telegraf"}},
@@ -91,7 +104,7 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 				Name: "minimal",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{},
-					Dataplane:    &yanetv2alpha1.BoxComponent{},
+					Dataplane:    &yanetv2alpha1.BoxDataplane{},
 				},
 			},
 		},
@@ -155,6 +168,11 @@ func TestResolveBoxComponent_Hardcoded(t *testing.T) {
 		dataplane.HostNetwork == nil || !*dataplane.HostNetwork {
 		t.Fatalf("dataplane = %+v", dataplane)
 	}
+	if len(dataplane.NativeSidecars) != 2 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		dataplane.NativeSidecars[1].Name != yanetv2alpha1.BirdSidecarContainerName {
+		t.Fatalf("dataplane native sidecars = %+v", dataplane.NativeSidecars)
+	}
 	if adapter, err := ResolveBoxComponent(config, yanet, KindBirdAdapter, ""); err != nil || adapter != nil {
 		t.Fatalf("unwired adapter = (%v, %v)", adapter, err)
 	}
@@ -193,6 +211,19 @@ func TestResolveBoxComponent_Overrides(t *testing.T) {
 					},
 				},
 			},
+			Dataplane: &yanetv2alpha1.YanetComponentOverride{
+				Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+					yanetv2alpha1.BirdSidecarContainerName: {
+						Enabled: PtrFalse(),
+					},
+					yanetv2alpha1.NetlinkDataplaneSidecarContainerName: {Tag: "hotfix"},
+				},
+			},
+			BirdAdapter: &yanetv2alpha1.YanetComponentOverride{
+				Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+					yanetv2alpha1.BirdAdapterContainerName: {Tag: "hotfix"},
+				},
+			},
 			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
 				"antiddos": {Containers: map[string]yanetv2alpha1.YanetContainerOverride{
 					"operator": {Tag: "v0.5.1"},
@@ -208,12 +239,73 @@ func TestResolveBoxComponent_Overrides(t *testing.T) {
 	if controlplane.Enabled || controlplane.Image.Tag != "hotfix" {
 		t.Fatalf("controlplane override = %+v", controlplane)
 	}
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve dataplane: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 1 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		dataplane.NativeSidecars[0].Image.Tag != "hotfix" {
+		t.Fatalf("dataplane sidecar overrides = %+v", dataplane.NativeSidecars)
+	}
+	adapter, err := ResolveBoxComponent(config, yanet, KindBirdAdapter, "")
+	if err != nil {
+		t.Fatalf("resolve bird adapter: %v", err)
+	}
+	if adapter.Image.Tag != "hotfix" {
+		t.Fatalf("bird-adapter override = %+v", adapter.Image)
+	}
 	operator, err := ResolveBoxComponent(config, yanet, KindOperator, "antiddos")
 	if err != nil {
 		t.Fatalf("resolve operator: %v", err)
 	}
 	if operator.Containers[0].Image.Tag != "v0.5.1" || operator.Containers[1].Image.Tag != "v0.5.2" {
 		t.Fatalf("operator overrides = %+v", operator.Containers)
+	}
+}
+
+func TestResolveBoxComponent_DataplaneSidecarEnablement(t *testing.T) {
+	config := fixtureConfig()
+	box, err := FindBoxType(config, "release")
+	if err != nil {
+		t.Fatalf("find box: %v", err)
+	}
+	box.Components.Dataplane.Sidecars.Bird.Enabled = PtrFalse()
+	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
+
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve defaults: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 1 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("box-disabled BIRD sidecar = %+v", dataplane.NativeSidecars)
+	}
+
+	yanet.Components = &yanetv2alpha1.YanetComponentsOverride{
+		Dataplane: &yanetv2alpha1.YanetComponentOverride{
+			Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+				yanetv2alpha1.BirdSidecarContainerName: {Enabled: PtrTrue()},
+			},
+		},
+	}
+	dataplane, err = ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve override: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 2 ||
+		dataplane.NativeSidecars[1].Name != yanetv2alpha1.BirdSidecarContainerName {
+		t.Fatalf("installation-enabled BIRD sidecar = %+v", dataplane.NativeSidecars)
+	}
+
+	box.Components.Dataplane.Sidecars.Bird = nil
+	dataplane, err = ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve stale unwired override: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 1 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("stale unwired BIRD override was not ignored: %+v", dataplane.NativeSidecars)
 	}
 }
 
@@ -263,9 +355,9 @@ func TestResolveBoxComponent_Errors(t *testing.T) {
 	if _, err := ResolveBoxComponent(config, yanet, ComponentKind("bogus"), ""); err == nil {
 		t.Error("unknown component kind must fail")
 	}
-	config.Components.Bird = nil
-	if _, err := ResolveBoxComponent(config, yanet, KindBird, ""); err == nil {
-		t.Error("wired component missing from palette must fail")
+	config.Components.Dataplane.Sidecars.Bird = nil
+	if _, err := ResolveBoxComponent(config, yanet, KindDataplane, ""); err == nil {
+		t.Error("wired dataplane sidecar missing from palette must fail")
 	}
 }
 

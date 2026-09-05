@@ -22,7 +22,7 @@ spec:
 
   # ============================================================
   # 1) COMPONENTS — palette of available components.
-  #    The dataplane's privileged + hostNetwork/hostIPC + minimal host
+  #    The dataplane's privileged + hostIPC + minimal host
   #    devices, and the controlplane's hostIPC + /dev/hugepages shmem
   #    mount, are emitted by the BUILDER (see builder_v2.go). They are
   #    intrinsic to how the components run and are NOT configured here.
@@ -43,10 +43,20 @@ spec:
       hugepages:
         size: 1Gi
         count: 8
-      hostNetwork: true   # default for DPDK
+      hostNetwork: false  # default; true remains available for legacy nodes
       config:
         hostPath: /etc/yanet2
         args: [/etc/yanet2/dataplane.yaml]
+      sidecars:
+        bird:
+          image: {name: bird, tag: "2.15"}
+          config:
+            hostPath: /etc/bird
+        netlinkDataplaneSidecar:
+          image: {name: netlink-dataplane-sidecar, tag: v2.1.0}
+          config:
+            hostPath: /etc/yanet2
+            args: [-c, /etc/yanet2/netlink-dataplane-sidecar.yaml]
 
   # ============================================================
   # 2) PATCHES — named registry of strategic-merge Deployment fragments.
@@ -100,4 +110,7 @@ spec:
         controlplane:
           patches: [controlplane-listener, tolerations]
         dataplane:
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
           patches: [tolerations, dp-resources]

@@ -183,7 +183,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 						Name: boxTypeNm,
 						Components: yanetv2alpha1.BoxComponents{
 							Controlplane: &yanetv2alpha1.BoxComponent{},
-							Dataplane:    &yanetv2alpha1.BoxComponent{},
+							Dataplane:    &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
@@ -317,7 +317,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 							Controlplane: &yanetv2alpha1.BoxComponent{
 								Patches: []string{"test-patch"},
 							},
-							Dataplane: &yanetv2alpha1.BoxComponent{},
+							Dataplane: &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},

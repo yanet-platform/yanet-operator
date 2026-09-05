@@ -82,10 +82,18 @@ creates the cluster-scoped `YanetConfigV2` singleton with the fixed name
 configuration and recreate the CRD before upgrading because Kubernetes cannot
 change a CRD's scope in place. Recreate `config` manually, or let Helm create it
 by setting `yanetconfigV2`; the chart does not adopt an existing object.
+Set `spec.components.dataplane.hostNetwork: true` in exported legacy specs if
+the migration must preserve host networking; omission now selects the pod
+network. Rename a legacy `birdAdapter` container override key to the rendered
+name `bird-adapter`.
 
 Chart-managed `yanetconfigV2` requires `webhook.failurePolicy: Ignore`. Helm
 creates normal resources before the post-install/post-upgrade webhook CA job;
 with `Fail`, manage the singleton separately after the webhook is ready.
+
+Before enabling the native v2 BIRD sidecar during an upgrade, stop the old
+operator and delete its standalone v2 BIRD Deployments. Both variants own the
+node-local `/run/bird` control-socket directory and must not overlap.
 
 ## Values
 

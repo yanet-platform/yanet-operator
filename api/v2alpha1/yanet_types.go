@@ -33,7 +33,8 @@ const NFDNumaCountLabel = "feature.node.kubernetes.io/cpu-numa_nodes_count"
 //
 // No patches and no inline component specs are accepted here. The only
 // per-installation customisation knobs are typed point-overrides in
-// components.<name>.{enabled,image}.
+// components.<name>.{enabled,image}. Dataplane native sidecars can also be
+// disabled through their entries in components.dataplane.containers.
 type YanetSpec struct {
 	// BoxType selects a boxType definition from
 	// YanetConfigV2.spec.boxTypes[]. Required.
@@ -76,15 +77,13 @@ type YanetSpec struct {
 	Components *YanetComponentsOverride `json:"components,omitempty"`
 }
 
-// YanetComponentsOverride holds typed per-installation overrides for
-// the 5 hardcoded components and dynamic operators (by name).
+// YanetComponentsOverride holds typed per-installation overrides for the fixed
+// workload components and dynamic operators (by name).
 type YanetComponentsOverride struct {
 	// +optional
 	Controlplane *YanetControlplaneOverride `json:"controlplane,omitempty"`
 	// +optional
 	Dataplane *YanetComponentOverride `json:"dataplane,omitempty"`
-	// +optional
-	Bird *YanetComponentOverride `json:"bird,omitempty"`
 	// +optional
 	BirdAdapter *YanetComponentOverride `json:"birdAdapter,omitempty"`
 	// +optional
@@ -104,10 +103,9 @@ type YanetComponentOverride struct {
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// Containers overrides image.name and image.tag per container, keyed by
-	// container name. For the 5 hardcoded
-	// components (single-container) the key is the kind:
-	// "controlplane", "dataplane", "bird", "birdAdapter",
-	// "announcer". For operators the key is the
+	// container name. Single-container fixed components use their rendered
+	// container name. The dataplane accepts "dataplane", "bird" and
+	// "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
 	// YanetConfigV2.spec.components.operators[].containers[].name.
 	// Registry/prefix come from YanetConfigV2.spec.images.
 	// +optional
@@ -117,6 +115,12 @@ type YanetComponentOverride struct {
 // YanetContainerOverride is the per-installation image override for one
 // rendered container.
 type YanetContainerOverride struct {
+	// Enabled may only be set for the BIRD and netlink native sidecars of the
+	// dataplane Pod. The dataplane field itself uses the component-level Enabled
+	// switch because a Pod cannot run without its primary container.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -152,7 +156,8 @@ type YanetControlplaneOverride struct {
 // YanetConfigV2.spec.images.
 type ImageRef struct {
 	// Name is the image name without registry/prefix/tag.
-	// +optional
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name,omitempty"`
 
 	// Tag is the image tag.

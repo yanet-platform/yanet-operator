@@ -335,8 +335,9 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 ### v2alpha1 — three-tier model
 1. **`YanetConfig.spec.components`** — palette of available components:
-   five hardcoded slots (`controlplane`, `dataplane`, `bird`, `birdAdapter`,
-   `announcer`) plus a dynamic `operators[]` array.
+   four fixed workload slots (`controlplane`, `dataplane`, `birdAdapter`,
+   `announcer`), fixed BIRD/netlink native-sidecar slots below dataplane, and a
+   dynamic `operators[]` array.
 2. **`YanetConfig.spec.patches []NamedPatch`** — strategic-merge fragments of
    `appsv1.Deployment` stored as `runtime.RawExtension` (validated via dry-run
    `strategicpatch.StrategicMergePatch(skeleton, patch, appsv1.Deployment{})`
@@ -346,9 +347,10 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 `Yanet` CRs reference a `boxType` by name; per-installation overrides are
 restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-plus `enabled` and controlplane `disabledNuma`. The container key must match the rendered container
-name — the component kind for hardcoded components, the declared
-`OperatorContainer.name` for operators. No inline patches in `Yanet`.
+plus workload `enabled`, dataplane native-sidecar `enabled`, and controlplane
+`disabledNuma`. The container key must match the rendered container name;
+operators use the declared `OperatorContainer.name`. No inline patches in
+`Yanet`.
 
 Reconcile flow:
 ```
@@ -372,7 +374,8 @@ Each operator wired by a box type gets one shared `ClusterIP` Service named
 `yanet-<boxType>-<operator>`, with `internalTrafficPolicy=Local` so in-node
 callers reach the local pod. Named target ports resolve to `8080/8081` in a Pod
 network namespace or deterministic ports from `hostNetworkPortRange` after a
-patch enables host networking.
+patch enables host networking. The fixed netlink dataplane sidecar uses the same
+model under `yanet-<boxType>-netlink-dataplane-sidecar`; BIRD has no Service.
 
 ### Webhook pattern (controller-runtime ≥ 0.23)
 Use the generic typed validator:

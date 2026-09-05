@@ -377,7 +377,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 							Name: "test-box",
 							Components: yanetv2alpha1.BoxComponents{
 								Controlplane: &yanetv2alpha1.BoxComponent{},
-								Dataplane:    &yanetv2alpha1.BoxComponent{},
+								Dataplane:    &yanetv2alpha1.BoxDataplane{},
 							},
 						},
 					},
