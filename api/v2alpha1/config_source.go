@@ -28,9 +28,9 @@ package v2alpha1
 //     config file inside that directory by its own default name (e.g.
 //     controlplane.conf). This is the default for production hosts.
 //   - URL: an HTTP(S) endpoint that returns the configuration body. The
-//     operator generates an initContainer that downloads the file (with
-//     `?node=<nodeName>` appended automatically) into an emptyDir volume
-//     shared with the main container.
+//     operator creates an emptyDir shared with the component. Downloader
+//     generation is deferred; a strategic patch must currently add the init
+//     container that populates the volume.
 //
 // Args, when set, are passed to the component binary verbatim. For HostPath
 // sources the whole directory is mounted, so args can reference any file in
@@ -53,9 +53,8 @@ type ConfigSource struct {
 	HostPath string `json:"hostPath,omitempty"`
 
 	// URL is an HTTP(S) endpoint that returns the configuration body.
-	// The operator runs an initContainer that downloads the body into
-	// an emptyDir volume shared with the main container; the parameter
-	// `?node=<nodeName>` is appended automatically.
+	// The operator creates an emptyDir volume shared with the component;
+	// a strategic patch must currently add the downloader init container.
 	// +optional
 	URL string `json:"url,omitempty"`
 

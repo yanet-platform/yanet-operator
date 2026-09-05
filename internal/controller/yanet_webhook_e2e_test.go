@@ -37,12 +37,12 @@ import (
 func validBoxComponents() yanetv2alpha1.BoxComponents {
 	return yanetv2alpha1.BoxComponents{
 		Controlplane: &yanetv2alpha1.BoxComponent{},
-		Dataplane:    &yanetv2alpha1.BoxComponent{},
+		Dataplane:    &yanetv2alpha1.BoxDataplane{},
 	}
 }
 
 var _ = Describe("Webhook Validation E2E Tests", func() {
-	ctx := context.Background()
+	testContext := context.Background()
 
 	Context("V1 API - YanetConfig validation", func() {
 		It("Should reject YanetConfig with negative updateWindow", func() {
@@ -56,7 +56,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -72,10 +72,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 
@@ -92,7 +92,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, yanet)
+			err := k8sClient.Create(testContext, yanet)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -108,7 +108,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, yanet)
+			err := k8sClient.Create(testContext, yanet)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -125,10 +125,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 		})
 	})
 
@@ -136,8 +136,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		It("Should reject YanetConfigV2 with duplicate patch names", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "duplicate-patches",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -159,25 +158,23 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
-		It("Should reject YanetConfigV2 with port overlap", func() {
+		It("Should reject YanetConfigV2 with an invalid host-network port range", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "port-overlap",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
+					HostNetworkPortRange: &yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 19999},
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
-							Port:  8080, // Same port as controlplane!
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{
@@ -187,25 +184,22 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
 		It("Should accept YanetConfigV2 with valid spec", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "valid-config-v2",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
-							Port:  8081, // Different port
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{
@@ -215,10 +209,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 
@@ -227,8 +221,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			// Create valid YanetConfigV2
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-config-v2",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -245,13 +238,13 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 		})
 
 		AfterEach(func() {
 			config := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: "test-config-v2", Namespace: "default"}, config); err == nil {
-				Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			if err := k8sClient.Get(testContext, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, config); err == nil {
+				Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 			}
 		})
 
@@ -269,7 +262,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			err := k8sClient.Create(ctx, yanet)
+			err := k8sClient.Create(testContext, yanet)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -288,10 +281,10 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 		})
 	})
 
@@ -302,21 +295,21 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		BeforeEach(func() {
 			// Clean up any leftover resources from previous tests
 			oldYanet := &yanetv2alpha1.YanetV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet); err == nil {
-				_ = k8sClient.Delete(ctx, oldYanet)
+			if err := k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet); err == nil {
+				_ = k8sClient.Delete(testContext, oldYanet)
 				// Wait for deletion to complete
 				Eventually(func() bool {
-					err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet)
+					err := k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, oldYanet)
 					return err != nil
 				}, 10*time.Second, 500*time.Millisecond).Should(BeTrue())
 			}
 
 			oldConfig := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutability-config", Namespace: "default"}, oldConfig); err == nil {
-				_ = k8sClient.Delete(ctx, oldConfig)
+			if err := k8sClient.Get(testContext, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig); err == nil {
+				_ = k8sClient.Delete(testContext, oldConfig)
 				// Wait for deletion to complete
 				Eventually(func() bool {
-					err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutability-config", Namespace: "default"}, oldConfig)
+					err := k8sClient.Get(testContext, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, oldConfig)
 					return err != nil
 				}, 10*time.Second, 500*time.Millisecond).Should(BeTrue())
 			}
@@ -324,8 +317,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			// Create YanetConfigV2 with two boxTypes (both must wire CP+DP)
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "immutability-config",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -348,7 +340,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Create YanetV2 (no matching node ⇒ no deployments spawned)
 			yanet = &yanetv2alpha1.YanetV2{
@@ -364,27 +356,27 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					AutoSync: helpers.PtrBool(false),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 		})
 
 		AfterEach(func() {
 			if yanet != nil {
-				_ = k8sClient.Delete(ctx, yanet)
+				_ = k8sClient.Delete(testContext, yanet)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
 		It("Should reject update to immutable boxType field", func() {
 			// Get current yanet
 			current := &yanetv2alpha1.YanetV2{}
-			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current)).Should(Succeed())
 
 			// Try to change boxType
 			current.Spec.BoxType = "box-b"
 
-			err := k8sClient.Update(ctx, current)
+			err := k8sClient.Update(testContext, current)
 			Expect(err).Should(HaveOccurred())
 		})
 
@@ -393,7 +385,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			Eventually(func() error {
 				// Get fresh copy each time
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current); err != nil {
+				if err := k8sClient.Get(testContext, client.ObjectKey{Name: "immutable-yanet", Namespace: "default"}, current); err != nil {
 					return err
 				}
 
@@ -402,7 +394,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 					"kubernetes.io/hostname": "another-nonexistent-node",
 				}
 
-				return k8sClient.Update(ctx, current)
+				return k8sClient.Update(testContext, current)
 			}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
 		})
 	})
@@ -411,8 +403,7 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 		It("Should reject YanetConfigV2 with boxType referencing non-existent patch", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "invalid-patch-ref",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -432,21 +423,20 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 							Controlplane: &yanetv2alpha1.BoxComponent{
 								Patches: []string{"non-existent-patch"}, // Invalid reference!
 							},
-							Dataplane: &yanetv2alpha1.BoxComponent{},
+							Dataplane: &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
 			}
 
-			err := k8sClient.Create(ctx, config)
+			err := k8sClient.Create(testContext, config)
 			Expect(err).Should(HaveOccurred())
 		})
 
 		It("Should accept YanetConfigV2 with valid patch references", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "valid-patch-ref",
-					Namespace: "default",
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -471,16 +461,16 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 							Controlplane: &yanetv2alpha1.BoxComponent{
 								Patches: []string{"my-patch"}, // Valid reference
 							},
-							Dataplane: &yanetv2alpha1.BoxComponent{},
+							Dataplane: &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Cleanup
-			Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 		})
 	})
 })

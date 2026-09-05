@@ -18,6 +18,8 @@ package v2alpha1
 
 import (
 	"context"
+	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -33,11 +35,11 @@ func makePatch(name, raw string) NamedPatch {
 // validConfig returns a minimal but valid YanetConfigV2 for mutation tests.
 func validConfig() *YanetConfigV2 {
 	return &YanetConfigV2{
-		ObjectMeta: metav1.ObjectMeta{Name: "cfg", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{Name: YanetConfigName},
 		Spec: YanetConfigSpec{
 			Components: ComponentsSpec{
-				Controlplane: ControlplaneSpec{Image: ImageRef{Name: "cp", Tag: "v1"}, Port: 8080},
-				Dataplane:    DataplaneSpec{Image: ImageRef{Name: "dp", Tag: "v1"}, Port: 8081},
+				Controlplane: ControlplaneSpec{Image: ImageRef{Name: "cp", Tag: "v1"}},
+				Dataplane:    DataplaneSpec{Image: ImageRef{Name: "dp", Tag: "v1"}},
 			},
 			Patches: []NamedPatch{
 				makePatch("telegraf", `{"spec":{"template":{"metadata":{"annotations":{"k":"v"}}}}}`),
@@ -46,7 +48,7 @@ func validConfig() *YanetConfigV2 {
 				Name: "release",
 				Components: BoxComponents{
 					Controlplane: &BoxComponent{Patches: []string{"telegraf"}},
-					Dataplane:    &BoxComponent{},
+					Dataplane:    &BoxDataplane{},
 				},
 			}},
 		},
@@ -57,6 +59,15 @@ func TestYanetConfigWebhook_Valid(t *testing.T) {
 	v := &YanetConfigCustomValidator{}
 	if _, err := v.ValidateCreate(context.Background(), validConfig()); err != nil {
 		t.Errorf("valid config rejected: %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_RejectsNonCanonicalName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Name = "other"
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), `metadata.name must be "config"`) {
+		t.Fatalf("non-canonical singleton name must be rejected, got %v", err)
 	}
 }
 
@@ -72,6 +83,9 @@ func TestYanetConfigWebhook_Hugepages(t *testing.T) {
 		{name: "invalid size", size: "not-a-quantity", count: 8, wantErr: "not a valid Kubernetes quantity"},
 		{name: "zero size", size: "0", count: 8, wantErr: "must be greater than zero"},
 		{name: "zero count", size: "2Mi", count: 0, wantErr: "count must be greater than zero"},
+		{name: "fractional byte size", size: "1m", count: 8, wantErr: "whole number of bytes"},
+		{name: "size overflow", size: "10000000000000000000", count: 1, wantErr: "int64"},
+		{name: "total overflow", size: "1Ei", count: 8, wantErr: "overflows int64"},
 	}
 
 	for _, tt := range tests {
@@ -105,6 +119,10 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 			Inline:   "logging: {}",
 		}, wantErr: "exactly one"},
 		{name: "no variant", source: &ConfigSource{Args: []string{"-c", "/etc/yanet2/config.yaml"}}, wantErr: "exactly one"},
+		{name: "relative host path", source: &ConfigSource{HostPath: "etc/yanet2"}, wantErr: "absolute"},
+		{name: "https URL", source: &ConfigSource{URL: "https://config.example/controlplane"}},
+		{name: "non HTTP URL", source: &ConfigSource{URL: "file:///etc/yanet2/config"}, wantErr: "HTTP(S)"},
+		{name: "URL without host", source: &ConfigSource{URL: "https:///controlplane"}, wantErr: "HTTP(S)"},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +132,52 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("valid config source rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_DataplaneSidecarConfigSource(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Dataplane.Sidecars = &DataplaneSidecarsSpec{
+		Bird: &DataplaneSidecarSpec{
+			Image:  ImageRef{Name: "bird"},
+			Config: &ConfigSource{HostPath: "/etc/bird", Inline: "invalid"},
+		},
+	}
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
+		Bird: &BoxDataplaneSidecar{},
+	}
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "spec.components.dataplane.sidecars.bird.config") {
+		t.Fatalf("invalid BIRD sidecar config source must be rejected, got %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_HostNetworkPortRange(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   *HostNetworkPortRange
+		wantErr string
+	}{
+		{name: "omitted"},
+		{name: "single port", value: &HostNetworkPortRange{Start: 20000, End: 20000}},
+		{name: "range", value: &HostNetworkPortRange{Start: 20000, End: 20100}},
+		{name: "zero start", value: &HostNetworkPortRange{Start: 0, End: 20100}, wantErr: "start"},
+		{name: "end too large", value: &HostNetworkPortRange{Start: 20000, End: 65536}, wantErr: "end"},
+		{name: "reversed", value: &HostNetworkPortRange{Start: 20100, End: 20000}, wantErr: "must not exceed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.HostNetworkPortRange = tt.value
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid host-network range rejected: %v", err)
 			}
 			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
@@ -142,6 +206,29 @@ func TestYanetConfigWebhook_DuplicateOperatorName(t *testing.T) {
 	_, err := v.ValidateCreate(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "duplicated") {
 		t.Errorf("expected duplicated operator error, got %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_ReservedOperatorName(t *testing.T) {
+	for _, name := range []string{
+		"controlplane",
+		"dataplane",
+		"bird",
+		"bird-adapter",
+		"netlink-dataplane-sidecar",
+		"announcer",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Operators = []OperatorSpec{{
+				Name:       name,
+				Containers: []OperatorContainer{{Name: "main", Image: ImageRef{Name: "operator"}}},
+			}}
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if err == nil || !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("reserved operator name %q must be rejected, got %v", name, err)
+			}
+		})
 	}
 }
 
@@ -214,6 +301,17 @@ func TestYanetConfigWebhook_UnknownPatchRef(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_UndeclaredDataplaneSidecar(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
+		NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+	}
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "netlinkDataplaneSidecar") {
+		t.Fatalf("undeclared dataplane sidecar must be rejected, got %v", err)
+	}
+}
+
 func TestYanetConfigWebhook_UnknownOperatorRef(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"ghost": {}}
@@ -221,6 +319,49 @@ func TestYanetConfigWebhook_UnknownOperatorRef(t *testing.T) {
 	_, err := v.ValidateCreate(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "ghost") {
 		t.Errorf("expected unknown operator ref, got %v", err)
+	}
+}
+
+func TestYanetConfigWebhook_OptionalComponentRequiresPaletteDeclaration(t *testing.T) {
+	tests := []struct {
+		name string
+		wire func(*BoxComponents)
+		want string
+	}{
+		{
+			name: "bird adapter",
+			wire: func(components *BoxComponents) { components.BirdAdapter = &BoxComponent{} },
+			want: "birdAdapter",
+		},
+		{
+			name: "announcer",
+			wire: func(components *BoxComponents) { components.Announcer = &BoxComponent{} },
+			want: "announcer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.wire(&cfg.Spec.BoxTypes[0].Components)
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("undeclared optional component must be rejected, got %v", err)
+			}
+		})
+	}
+}
+
+func TestYanetConfigWebhook_ComponentImageNameRequired(t *testing.T) {
+	cfg := validConfig()
+	cfg.Spec.Components.Dataplane.Sidecars = &DataplaneSidecarsSpec{
+		NetlinkDataplaneSidecar: &DataplaneSidecarSpec{},
+	}
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
+		NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+	}
+	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+	if err == nil || !strings.Contains(err.Error(), "netlinkDataplaneSidecar.image.name is required") {
+		t.Fatalf("empty sidecar image name must be rejected, got %v", err)
 	}
 }
 
@@ -300,6 +441,18 @@ func TestYanetConfigWebhook_PositiveUpdateWindow_OK(t *testing.T) {
 	}
 }
 
+func TestYanetConfigWebhook_UpdateWindowOverflow(t *testing.T) {
+	for _, seconds := range []int{9223372036, 9223372037} {
+		cfg := validConfig()
+		cfg.Spec.UpdateWindow = seconds
+		_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+		wantErr := seconds > 9223372036
+		if (err != nil) != wantErr {
+			t.Errorf("updateWindow %d: error = %v, want error %t", seconds, err, wantErr)
+		}
+	}
+}
+
 // --- disabledNuma -----------------------------------------------------------
 
 func TestYanetConfigWebhook_DisabledNuma_Accepted(t *testing.T) {
@@ -349,104 +502,129 @@ func TestYanetConfigWebhook_DisabledNuma_AutoDetectionNotRejected(t *testing.T) 
 
 func ptrInt32(v int32) *int32 { return &v }
 
-func TestYanetConfigWebhook_PortOverlap_CPRangeAndDataplane(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 8080
-	cfg.Spec.Components.Controlplane.PortRange = 4 // 8080..8083
-	cfg.Spec.Components.Dataplane.Port = 8082      // overlaps
-	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected port overlap error, got %v", err)
+func TestYanetConfigWebhook_OperatorShape(t *testing.T) {
+	tests := []struct {
+		name      string
+		operator  string
+		container string
+		count     int
+		wantErr   string
+	}{
+		{name: "boundary names", operator: strings.Repeat("a", 63), container: strings.Repeat("b", 63), count: 1},
+		{name: "operator too long", operator: strings.Repeat("a", 64), container: "main", count: 1, wantErr: "name"},
+		{name: "container too long", operator: "test", container: strings.Repeat("b", 64), count: 1, wantErr: "containers[0].name"},
+		{name: "invalid operator name", operator: "not_an_operator", container: "main", count: 1, wantErr: "name"},
+		{name: "invalid container name", operator: "test", container: "not.a.container", count: 1, wantErr: "containers[0].name"},
+		{name: "no containers", operator: "test", count: 0, wantErr: "between 1 and 8"},
+		{name: "too many containers", operator: "test", count: 9, wantErr: "between 1 and 8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			containers := make([]OperatorContainer, tt.count)
+			for i := range containers {
+				containers[i] = OperatorContainer{Name: tt.container, Image: ImageRef{Name: "test"}}
+			}
+			cfg.Spec.Components.Operators = []OperatorSpec{{Name: tt.operator, Containers: containers}}
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid operator rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
-func TestYanetConfigWebhook_PortOverlap_DuplicateSinglePorts(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 8080
-	cfg.Spec.Components.Dataplane.Port = 8080 // exact duplicate
-	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected port overlap error, got %v", err)
+func TestYanetConfigWebhook_Numa(t *testing.T) {
+	tests := []struct {
+		name     string
+		count    int32
+		disabled []int32
+		wantErr  bool
+	}{
+		{name: "zero", count: 0, wantErr: true},
+		{name: "negative", count: -1, wantErr: true},
+		{name: "single domain", count: 1},
+		{name: "duplicate and out of range exclusions", count: 2, disabled: []int32{1, 1, 99}},
+		{name: "large count with sparse exclusions", count: math.MaxInt32, disabled: []int32{1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Controlplane.Numa = ptrInt32(tt.count)
+			cfg.Spec.Components.Controlplane.DisabledNuma = tt.disabled
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validation error = %v, want error %t", err, tt.wantErr)
+			}
+		})
 	}
 }
 
-func TestYanetConfigWebhook_PortOverlap_OperatorVsControlplaneRange(t *testing.T) {
+func TestYanetConfigWebhook_EmptyBoxTypes(t *testing.T) {
 	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 9000
-	cfg.Spec.Components.Controlplane.PortRange = 8 // 9000..9007
-	cfg.Spec.Components.Operators = []OperatorSpec{{
-		Name:       "x",
-		Port:       9005, // inside CP range
-		Containers: []OperatorContainer{{Name: "x", Image: ImageRef{Name: "x"}}},
-	}}
-	cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"x": {}}
-	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "overlap") {
-		t.Errorf("expected port overlap error, got %v", err)
+	cfg.Spec.BoxTypes = nil
+	if _, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg); err == nil {
+		t.Fatal("an empty box palette must be rejected")
 	}
 }
 
-func TestYanetConfigWebhook_PortRanges_Adjacent_OK(t *testing.T) {
-	// CP range ends exactly one before the next port — no overlap.
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 8080
-	cfg.Spec.Components.Controlplane.PortRange = 4 // 8080..8083
-	cfg.Spec.Components.Dataplane.Port = 8084
-	v := &YanetConfigCustomValidator{}
-	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
-		t.Errorf("adjacent port ranges must be accepted: %v", err)
+func TestYanetConfigWebhook_DryRun_TypedPatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   string
+		wantErr bool
+	}{
+		{name: "null is not a fragment", patch: `null`, wantErr: true},
+		{name: "array is not a fragment", patch: `[]`, wantErr: true},
+		{name: "wrong replica type", patch: `{"spec":{"replicas":"many"}}`, wantErr: true},
+		{name: "replica integer overflow", patch: `{"spec":{"replicas":2147483648}}`, wantErr: true},
+		{name: "wrong pod field type", patch: `{"spec":{"template":{"spec":{"hostNetwork":"yes"}}}}`, wantErr: true},
+		{name: "wrong annotation type", patch: `{"spec":{"template":{"metadata":{"annotations":{"test":true}}}}}`, wantErr: true},
+		{name: "native sidecar", patch: `{"spec":{"template":{"spec":{"initContainers":[{"name":"helper","image":"test","restartPolicy":"Always"}]}}}}`},
+		{name: "delete container", patch: `{"spec":{"template":{"spec":{"containers":[{"name":"helper","$patch":"delete"}]}}}}`},
+		{name: "replace container list", patch: `{"spec":{"template":{"spec":{"containers":[{"$patch":"replace"},{"name":"main","image":"test"}]}}}}`},
+		{name: "delete optional field", patch: `{"spec":{"template":{"spec":{"securityContext":null}}}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Patches[0].Patch.Raw = []byte(tt.patch)
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validation error = %v, want error %t", err, tt.wantErr)
+			}
+		})
 	}
 }
 
-func TestYanetConfigWebhook_PortRange_Negative_Rejected(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.PortRange = -1
-	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "portRange") {
-		t.Errorf("expected portRange error, got %v", err)
+func TestImageRef_LocationJSONAndDeepCopy(t *testing.T) {
+	empty := ""
+	image := ImageRef{Name: "test", Registry: &empty, Prefix: &empty}
+	raw, err := json.Marshal(image)
+	if err != nil {
+		t.Fatalf("marshal image: %v", err)
 	}
-}
-
-func TestYanetConfigWebhook_PortRange_ExceedsMax_Rejected(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 65530
-	cfg.Spec.Components.Controlplane.PortRange = 100 // would extend past 65535
-	v := &YanetConfigCustomValidator{}
-	_, err := v.ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "exceeds 65535") {
-		t.Errorf("expected port range overflow error, got %v", err)
+	var decoded ImageRef
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal image: %v", err)
 	}
-}
-
-func TestYanetConfigWebhook_PortZero_Skipped(t *testing.T) {
-	// Port=0 means "no listener"; should not be considered for
-	// overlap checks even if multiple components are zero.
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 0
-	cfg.Spec.Components.Dataplane.Port = 0
-	v := &YanetConfigCustomValidator{}
-	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
-		t.Errorf("zero ports must be accepted: %v", err)
+	if decoded.Registry == nil || decoded.Prefix == nil || *decoded.Registry != "" || *decoded.Prefix != "" {
+		t.Fatalf("explicit empty location was lost: %s", raw)
 	}
-}
-
-func TestYanetConfigWebhook_AllComponents_DistinctPorts_OK(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Port = 8080
-	cfg.Spec.Components.Controlplane.PortRange = 2 // 8080..8081
-	cfg.Spec.Components.Dataplane.Port = 8090
-	cfg.Spec.Components.Bird = &BirdComponent{Image: ImageRef{Name: "bird"}, Port: 179}
-	cfg.Spec.Components.BirdAdapter = &BirdAdapterComp{Image: ImageRef{Name: "ba"}, Port: 8100}
-	cfg.Spec.Components.Announcer = &AnnouncerComp{Image: ImageRef{Name: "an"}, Port: 8110}
-	cfg.Spec.BoxTypes[0].Components.Bird = &BoxComponent{}
-	cfg.Spec.BoxTypes[0].Components.BirdAdapter = &BoxComponent{}
-	cfg.Spec.BoxTypes[0].Components.Announcer = &BoxComponent{}
-	v := &YanetConfigCustomValidator{}
-	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
-		t.Errorf("distinct ports must be accepted: %v", err)
+	copied := decoded.DeepCopy()
+	*copied.Registry = "other.example/test"
+	*copied.Prefix = "other"
+	if *decoded.Registry != "" || *decoded.Prefix != "" {
+		t.Fatal("DeepCopy aliased an image location pointer; regenerate the deepcopy methods")
+	}
+	image = ImageRef{}
+	if err := json.Unmarshal([]byte(`{"name":"test"}`), &image); err != nil {
+		t.Fatalf("decode inherited image: %v", err)
+	}
+	if image.Registry != nil || image.Prefix != nil {
+		t.Fatal("omitted image locations must inherit the global defaults")
 	}
 }

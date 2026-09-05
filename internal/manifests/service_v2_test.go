@@ -17,202 +17,249 @@ limitations under the License.
 package manifests
 
 import (
-	"strings"
+	"fmt"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestBuildServices_Controlplane_ThreeCategories(t *testing.T) {
-	ctx := ctxV2()
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindControlplane, Name: "controlplane",
-		Port: 8080, Numa: 2,
+func serviceContextV2() BuildContextV2 {
+	return BuildContextV2{BoxType: "firewall", NumaCount: 2}
+}
+
+func TestBuildServices_ListenerMatrix(t *testing.T) {
+	tests := []struct {
+		name      string
+		component *helpers.ResolvedComponent
+		wantPorts []ServicePortPlan
+		wantCount int
+	}{
+		{
+			name: "dataplane netlink sidecar",
+			component: &helpers.ResolvedComponent{
+				Kind: helpers.KindDataplane,
+				Name: "dataplane",
+				NativeSidecars: []helpers.ResolvedContainer{{
+					Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				}},
+			},
+			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: NetlinkGRPCTargetPort}},
+			wantCount: 1,
+		},
+		{
+			name:      "controlplane",
+			component: &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane"},
+			wantPorts: []ServicePortPlan{
+				{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC},
+				{Name: ListenerHTTP, Port: ServiceHTTPPort, TargetPortName: ListenerHTTP},
+			},
+			wantCount: 2,
+		},
+		{
+			name:      "bird adapter",
+			component: &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "birdAdapter"},
+			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC}},
+			wantCount: 1,
+		},
+		{
+			name:      "announcer",
+			component: &helpers.ResolvedComponent{Kind: helpers.KindAnnouncer, Name: "announcer"},
+			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC}},
+			wantCount: 1,
+		},
+		{
+			name:      "generic operator",
+			component: &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "mirror"},
+			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC}},
+			wantCount: 1,
+		},
+		{
+			name:      "metrics operator",
+			component: &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "metrics"},
+			wantPorts: []ServicePortPlan{{Name: ListenerHTTP, Port: ServiceHTTPPort, TargetPortName: ListenerHTTP}},
+			wantCount: 1,
+		},
+		{name: "dataplane without sidecar", component: &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane"}},
 	}
-	plans := BuildServices(ctx, c)
-	// per-NUMA: 2 nodeLocal + 2 cluster + 1 -all = 5 plans.
-	if len(plans) != 5 {
-		t.Fatalf("plans = %d: %+v", len(plans), plans)
-	}
-	var perNode, cluster, all int
-	for _, p := range plans {
-		switch {
-		case strings.HasSuffix(p.Name, "-all"):
-			all++
-			if p.Local {
-				t.Errorf("-all plan must NOT be Local")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := ctxV2()
+			ctx.NumaCount = 2
+			tt.component.Image = helpers.ResolvedImage{Name: "component", Tag: "v2"}
+			if tt.component.Kind == helpers.KindOperator {
+				tt.component.Containers = []helpers.ResolvedContainer{{
+					Name: "operator", Image: tt.component.Image,
+				}}
 			}
-		case strings.HasSuffix(p.Name, "-cluster"):
-			cluster++
-			if p.Local {
-				t.Errorf("-cluster plan must NOT be Local")
+			deployments, err := BuildDeployments(ctx, tt.component)
+			if err != nil {
+				t.Fatalf("BuildDeployments: %v", err)
 			}
-		case p.PerNode:
-			perNode++
-			if !p.Local {
-				t.Errorf("per-node plan must be Local")
+			plans := BuildServices(ctx, tt.component)
+			if len(plans) != tt.wantCount {
+				t.Fatalf("plans = %+v, want count %d", plans, tt.wantCount)
 			}
-			if p.Selector[labelNode] != "node-1" {
-				t.Errorf("per-node selector missing node label: %v", p.Selector)
+			for index := range plans {
+				plan := plans[index]
+				if err := plan.Validate(); err != nil {
+					t.Fatalf("generated Service plan is invalid: %v", err)
+				}
+				if diff := cmp.Diff(tt.wantPorts, plan.Ports); diff != "" {
+					t.Fatalf("ports mismatch (-want +got):\n%s", diff)
+				}
+				if index >= len(deployments) {
+					t.Fatalf("Service %s has no matching Deployment", plan.Name)
+				}
+				pod := &deployments[index].Spec.Template
+				for key, value := range plan.Selector {
+					if key == labelYanet || key == labelNode {
+						t.Errorf("shared Service selector contains installation identity: %v", plan.Selector)
+					}
+					if pod.Labels[key] != value {
+						t.Errorf("Service %s selector %s=%s does not match Pod labels: %v", plan.Name, key, value, pod.Labels)
+					}
+				}
+				for _, target := range plan.Ports {
+					found := false
+					for _, containers := range [][]corev1.Container{pod.Spec.Containers, pod.Spec.InitContainers} {
+						for _, container := range containers {
+							for _, port := range container.Ports {
+								if port.Name == target.TargetPortName && port.ContainerPort == target.Port &&
+									port.Protocol == corev1.ProtocolTCP {
+									found = true
+								}
+							}
+						}
+					}
+					if !found {
+						t.Errorf("Service %s target %q:%d has no Pod listener", plan.Name, target.TargetPortName, target.Port)
+					}
+				}
 			}
-		}
-	}
-	if perNode != 2 || cluster != 2 || all != 1 {
-		t.Errorf("category counts perNode=%d cluster=%d all=%d", perNode, cluster, all)
+		})
 	}
 }
 
-func TestBuildServices_Controlplane_PortFanout(t *testing.T) {
-	ctx := ctxV2()
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindControlplane, Name: "controlplane",
-		Port: 8080, Numa: 2,
+func TestBuildServices_DataplaneNetlinkSidecar(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane,
+		Name: "dataplane",
+		NativeSidecars: []helpers.ResolvedContainer{{
+			Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+		}},
 	}
-	plans := BuildServices(ctx, c)
-	have := map[int32]bool{}
-	for _, p := range plans {
-		have[p.Port] = true
-	}
-	if !have[8080] || !have[8081] {
-		t.Errorf("expected ports 8080 and 8081 across plans: %v", have)
-	}
-}
-
-// TestBuildServices_Controlplane_DisabledNuma verifies that a disabled NUMA
-// domain gets neither a per-node nor a cluster-wide Service, so no Service is
-// left behind that could never receive an endpoint. The shared "-all" entry
-// point survives.
-func TestBuildServices_Controlplane_DisabledNuma(t *testing.T) {
-	ctx := ctxV2()
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindControlplane, Name: "controlplane",
-		Port: 8080, Numa: 2, DisabledNuma: []int32{1},
-	}
-	plans := BuildServices(ctx, c)
-	// only NUMA 0 survives: 1 nodeLocal + 1 cluster + 1 -all = 3 plans.
-	if len(plans) != 3 {
-		t.Fatalf("plans = %d: %+v", len(plans), plans)
-	}
-	for _, p := range plans {
-		if strings.HasSuffix(p.Name, "-all") {
-			continue
-		}
-		if p.Selector[labelNuma] == "1" {
-			t.Errorf("plan %q targets the disabled NUMA 1", p.Name)
-		}
-		if p.Port == 8081 {
-			t.Errorf("plan %q still exposes the disabled NUMA port 8081", p.Name)
-		}
-	}
-}
-
-func TestBuildServices_Controlplane_NoPort_NoPlans(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane"}
-	if plans := BuildServices(ctxV2(), c); len(plans) != 0 {
-		t.Errorf("no port → no plans, got %v", plans)
-	}
-}
-
-func TestBuildServices_Simple_BirdLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindBird, Name: "bird", Port: 179}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 || !plans[0].Local {
-		t.Fatalf("bird single plan with Local=true expected: %+v", plans)
-	}
-}
-
-func TestBuildServices_Simple_BirdAdapterLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Port: 9700}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 || !plans[0].Local {
-		t.Fatalf("birdAdapter single plan with Local=true expected: %+v", plans)
-	}
-}
-
-func TestBuildServices_Simple_AnnouncerNotLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindAnnouncer, Name: "announcer", Port: 9090}
-	plans := BuildServices(ctxV2(), c)
+	plans := BuildServices(serviceContextV2(), component)
 	if len(plans) != 1 {
-		t.Fatalf("plans = %d", len(plans))
+		t.Fatalf("plans = %+v, want one netlink sidecar Service", plans)
 	}
-	if plans[0].Local {
-		t.Errorf("announcer must NOT be Local")
+	plan := plans[0]
+	if plan.Name != "yanet-firewall-netlink-dataplane-sidecar" ||
+		plan.Component != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("dataplane sidecar Service identity = %+v", plan)
 	}
-}
-
-func TestBuildServices_Dataplane_NotLocal(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane", Port: 8081}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 || plans[0].Local {
-		t.Errorf("dataplane: 1 plan, not Local: %+v", plans)
+	if plan.Selector[LabelComponent] != "dataplane" || !plan.Local {
+		t.Fatalf("dataplane sidecar Service selector/locality = %+v", plan)
 	}
 }
 
-func TestBuildServices_Operator_LocalAndNamedAfterOperator(t *testing.T) {
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindOperator, Name: "antiddos", Port: 9001,
+func TestBuildServices_ControlplaneSharedPerNuma(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind:         helpers.KindControlplane,
+		Name:         "controlplane",
+		Numa:         2,
+		Enabled:      false,
+		DisabledNuma: []int32{1},
 	}
-	plans := BuildServices(ctxV2(), c)
-	if len(plans) != 1 {
-		t.Fatalf("operator plans = %d", len(plans))
+	plans := BuildServices(serviceContextV2(), component)
+	if len(plans) != 2 {
+		t.Fatalf("plans = %+v, want one for every NUMA role regardless of enablement", plans)
 	}
-	p := plans[0]
-	if !p.Local {
-		t.Errorf("operator Service must be Local")
-	}
-	if p.Name != "antiddos" {
-		t.Errorf("operator Service name should equal operator name: %q", p.Name)
-	}
-}
-
-func TestBuildServices_Operator_NoPort_NoService(t *testing.T) {
-	c := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "x"}
-	if plans := BuildServices(ctxV2(), c); len(plans) != 0 {
-		t.Errorf("no port → no operator service, got %v", plans)
-	}
-}
-
-func TestBuildServices_NilComponent(t *testing.T) {
-	if got := BuildServices(ctxV2(), nil); got != nil {
-		t.Errorf("nil → nil, got %v", got)
-	}
-}
-
-// --- ToService -------------------------------------------------------------
-
-func TestServicePlan_ToService_LocalSetsTrafficPolicy(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80, Local: true}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.InternalTrafficPolicy == nil || *svc.Spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal {
-		t.Errorf("Local=true: internalTrafficPolicy must be Local: %+v", svc.Spec.InternalTrafficPolicy)
-	}
-	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
-		t.Errorf("Type = %q, want ClusterIP", svc.Spec.Type)
+	for index := range plans {
+		plan := &plans[index]
+		wantName := fmt.Sprintf("yanet-firewall-controlplane-numa%d", index)
+		if plan.Name != wantName {
+			t.Errorf("name = %q, want %q", plan.Name, wantName)
+		}
+		if plan.Selector[LabelBoxType] != "firewall" ||
+			plan.Selector[LabelComponent] != "controlplane" ||
+			plan.Selector[labelNuma] != fmt.Sprintf("%d", index) {
+			t.Errorf("selector = %v", plan.Selector)
+		}
+		if _, present := plan.Selector[labelYanet]; present {
+			t.Errorf("shared selector must not contain Yanet identity: %v", plan.Selector)
+		}
+		if _, present := plan.Selector[labelNode]; present {
+			t.Errorf("shared selector must not contain node identity: %v", plan.Selector)
+		}
 	}
 }
 
-func TestServicePlan_ToService_NotLocalNoPolicy(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.InternalTrafficPolicy != nil {
-		t.Errorf("non-Local plan must omit policy: %+v", svc.Spec.InternalTrafficPolicy)
+func TestBuildServices_OperatorIsUnconditional(t *testing.T) {
+	component := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "route", Enabled: false}
+	plans := BuildServices(serviceContextV2(), component)
+	if len(plans) != 1 || plans[0].Name != "yanet-firewall-route" || !plans[0].Local {
+		t.Fatalf("plans = %+v", plans)
 	}
 }
 
-func TestServicePlan_ToService_TargetPortDefaultsToPort(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.Ports[0].TargetPort.IntVal != 80 {
-		t.Errorf("TargetPort default to Port: %+v", svc.Spec.Ports[0].TargetPort)
+func TestServicePlan_ToService(t *testing.T) {
+	owner := metav1.OwnerReference{
+		APIVersion: "yanet.yanet-platform.io/v2alpha1",
+		Kind:       "YanetConfigV2",
+		Name:       "config",
+	}
+	plan := ServicePlan{
+		Name:     "yanet-firewall-controlplane-numa0",
+		Selector: map[string]string{LabelBoxType: "firewall", labelNuma: "0"},
+		Ports: []ServicePortPlan{
+			{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC},
+			{Name: ListenerHTTP, Port: ServiceHTTPPort, TargetPortName: ListenerHTTP},
+		},
+		Local: true,
+	}
+	service := plan.ToService("yanet", owner)
+	if service.Spec.Type != corev1.ServiceTypeClusterIP ||
+		service.Spec.InternalTrafficPolicy == nil ||
+		*service.Spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal {
+		t.Fatalf("service policy = %+v", service.Spec)
+	}
+	if service.Spec.Ports[0].TargetPort.StrVal != ListenerGRPC ||
+		service.Spec.Ports[1].TargetPort.StrVal != ListenerHTTP {
+		t.Fatalf("target ports = %+v", service.Spec.Ports)
+	}
+	if service.Labels[LabelSharedService] != "true" || len(service.OwnerReferences) != 1 ||
+		service.OwnerReferences[0].Name != "config" {
+		t.Fatalf("metadata = %+v", service.ObjectMeta)
 	}
 }
 
-func TestServicePlan_ToService_TargetPortName(t *testing.T) {
-	p := ServicePlan{Name: "x", Selector: map[string]string{"a": "b"}, Port: 80, TargetPortName: "grpc"}
-	svc := p.ToService("yanet", metav1.OwnerReference{Name: "yanet"})
-	if svc.Spec.Ports[0].TargetPort.StrVal != "grpc" {
-		t.Errorf("TargetPort by name: %+v", svc.Spec.Ports[0].TargetPort)
+func TestServicePlan_Validate(t *testing.T) {
+	tests := []ServicePlan{
+		{
+			Name:      "invalid.name",
+			BoxType:   "firewall",
+			Component: "route",
+			Selector:  map[string]string{"app": "x"},
+			Ports:     []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort}},
+		},
+		{
+			Name:      "valid-name",
+			BoxType:   "firewall",
+			Component: "route",
+			Selector:  map[string]string{"app": "x"},
+			Ports: []ServicePortPlan{
+				{Name: ListenerGRPC, Port: ServiceGRPCPort},
+				{Name: ListenerHTTP, Port: ServiceGRPCPort},
+			},
+		},
+	}
+	for _, plan := range tests {
+		if err := plan.Validate(); err == nil {
+			t.Fatalf("invalid plan accepted: %+v", plan)
+		}
 	}
 }

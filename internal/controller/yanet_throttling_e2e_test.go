@@ -57,7 +57,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			nodeName2      = "throttle-node-2"
 		)
 
-		ctx := context.Background()
+		testContext := context.Background()
 		configName := types.NamespacedName{Name: "throttle-v1-config", Namespace: yanetNamespace}
 
 		BeforeEach(func() {
@@ -73,7 +73,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 						},
 					},
 				}
-				Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+				Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 			}
 
 			By("Creating YanetConfig with 5s updateWindow and initial resource limits")
@@ -119,12 +119,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			By("Waiting for YanetConfig to be reconciled and available")
 			Eventually(func() bool {
 				cfg := &yanetv1alpha1.YanetConfig{}
-				if err := k8sClient.Get(ctx, configName, cfg); err != nil {
+				if err := k8sClient.Get(testContext, configName, cfg); err != nil {
 					return false
 				}
 				return cfg.UID != ""
@@ -139,15 +139,15 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			// Delete Yanets FIRST
 			for _, name := range []string{yanetName1, yanetName2} {
 				yanet := &yanetv1alpha1.Yanet{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet); err == nil {
-					Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet); err == nil {
+					Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 				}
 			}
 
 			// Wait for Yanets to be deleted before removing config
 			Eventually(func() int {
 				yanetList := &yanetv1alpha1.YanetList{}
-				if err := k8sClient.List(ctx, yanetList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, yanetList, client.InNamespace(yanetNamespace)); err != nil {
 					return -1
 				}
 				count := 0
@@ -161,15 +161,15 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 
 			// Delete YanetConfig AFTER Yanets are gone
 			config := &yanetv1alpha1.YanetConfig{}
-			if err := k8sClient.Get(ctx, configName, config); err == nil {
-				Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			if err := k8sClient.Get(testContext, configName, config); err == nil {
+				Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 			}
 
 			// Delete Nodes
 			for _, name := range []string{nodeName1, nodeName2} {
 				node := &corev1.Node{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, node); err == nil {
-					Expect(k8sClient.Delete(ctx, node)).Should(Succeed())
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: name}, node); err == nil {
+					Expect(k8sClient.Delete(testContext, node)).Should(Succeed())
 				}
 			}
 		})
@@ -198,12 +198,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 					// Bird and Announcer disabled - testing throttling on dataplane+controlplane is sufficient
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet1)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet1)).Should(Succeed())
 
 			By("Verifying deployments are created for all enabled components")
 			Eventually(func() bool {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return false
 				}
 				// Expect 4 deployments: dataplane, controlplane, bird, announcer
@@ -241,12 +241,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet2)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet2)).Should(Succeed())
 
 			By("Verifying deployments exist for both nodes")
 			Eventually(func() int {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return 0
 				}
 				return len(depList.Items)
@@ -255,9 +255,9 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			By("Triggering reconciliation by updating Yanet Tag to 2.0.0")
 			for _, name := range []string{yanetName1, yanetName2} {
 				yanet := &yanetv1alpha1.Yanet{}
-				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet)).Should(Succeed())
+				Expect(k8sClient.Get(testContext, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet)).Should(Succeed())
 				yanet.Spec.Tag = "2.0.0"
-				Expect(k8sClient.Update(ctx, yanet)).Should(Succeed())
+				Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 			}
 
 			By("Observing throttling behavior")
@@ -266,7 +266,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			// Wait for at least one deployment to update to 2.0.0
 			Eventually(func() int {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return 0
 				}
 				updatedCount := 0
@@ -284,7 +284,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			By("Waiting for all 4 deployments to eventually be updated")
 			Eventually(func() bool {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return false
 				}
 				if len(depList.Items) != 4 {
@@ -327,8 +327,8 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			nodeName2      = "throttle-v2-node-2"
 		)
 
-		ctx := context.Background()
-		configName := types.NamespacedName{Name: "throttle-v2-config", Namespace: yanetNamespace}
+		testContext := context.Background()
+		configName := types.NamespacedName{Name: yanetv2alpha1.YanetConfigName}
 
 		BeforeEach(func() {
 			By("Creating test nodes for V2")
@@ -347,14 +347,13 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 						},
 					},
 				}
-				Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+				Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 			}
 
 			By("Creating YanetConfigV2 with 5s updateWindow")
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      configName.Name,
-					Namespace: configName.Namespace,
+					Name: configName.Name,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Stop:         false,
@@ -365,14 +364,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 								Name: "yanet-controlplane",
 								Tag:  "1.0.0",
 							},
-							Port: 8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{
 								Name: "yanet-dataplane",
 								Tag:  "1.0.0",
 							},
-							Port: 8081,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{
@@ -380,18 +377,18 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 							Name: "test-box",
 							Components: yanetv2alpha1.BoxComponents{
 								Controlplane: &yanetv2alpha1.BoxComponent{},
-								Dataplane:    &yanetv2alpha1.BoxComponent{},
+								Dataplane:    &yanetv2alpha1.BoxDataplane{},
 							},
 						},
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			By("Waiting for YanetConfigV2 to be reconciled and available")
 			Eventually(func() bool {
 				cfg := &yanetv2alpha1.YanetConfigV2{}
-				if err := k8sClient.Get(ctx, configName, cfg); err != nil {
+				if err := k8sClient.Get(testContext, configName, cfg); err != nil {
 					return false
 				}
 				return cfg.UID != ""
@@ -406,16 +403,19 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			// Delete YanetsV2 FIRST
 			for _, name := range []string{yanetName1, yanetName2} {
 				yanet := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet); err == nil {
-					Expect(k8sClient.Delete(ctx, yanet)).Should(Succeed())
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet); err == nil {
+					Expect(k8sClient.Delete(testContext, yanet)).Should(Succeed())
 				}
 			}
+
+			// envtest has no garbage collector to finish foreground deletion.
+			cleanupYanetV2(testContext, yanetNamespace)
 
 			// Wait for YanetsV2 to be fully deleted before removing config
 			// This prevents race where config snapshot is cleared while YanetV2 reconcile is still running
 			Eventually(func() int {
 				yanetList := &yanetv2alpha1.YanetV2List{}
-				if err := k8sClient.List(ctx, yanetList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, yanetList, client.InNamespace(yanetNamespace)); err != nil {
 					return -1
 				}
 				count := 0
@@ -429,15 +429,15 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 
 			// Delete YanetConfigV2 AFTER YanetsV2 are gone
 			config := &yanetv2alpha1.YanetConfigV2{}
-			if err := k8sClient.Get(ctx, configName, config); err == nil {
-				Expect(k8sClient.Delete(ctx, config)).Should(Succeed())
+			if err := k8sClient.Get(testContext, configName, config); err == nil {
+				Expect(k8sClient.Delete(testContext, config)).Should(Succeed())
 			}
 
 			// Delete Nodes
 			for _, name := range []string{nodeName1, nodeName2} {
 				node := &corev1.Node{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, node); err == nil {
-					Expect(k8sClient.Delete(ctx, node)).Should(Succeed())
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: name}, node); err == nil {
+					Expect(k8sClient.Delete(testContext, node)).Should(Succeed())
 				}
 			}
 		})
@@ -458,12 +458,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 					Enabled:  helpers.PtrBool(true), // enabled to test throttling
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet1)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet1)).Should(Succeed())
 
 			By("Verifying deployments are created for first node")
 			Eventually(func() bool {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return false
 				}
 				// For V2, expect at least controlplane + dataplane deployments
@@ -485,12 +485,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 					Enabled:  helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet2)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet2)).Should(Succeed())
 
 			By("Verifying total deployments exist for both nodes")
 			Eventually(func() int {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return 0
 				}
 				return len(depList.Items)
@@ -498,12 +498,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 
 			By("Updating YanetConfigV2 image tag to trigger diff in all deployments")
 			config := &yanetv2alpha1.YanetConfigV2{}
-			Expect(k8sClient.Get(ctx, configName, config)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, configName, config)).Should(Succeed())
 
 			// Change image tag to trigger update
 			config.Spec.Components.Controlplane.Image.Tag = "2.0.0"
 			config.Spec.Components.Dataplane.Image.Tag = "2.0.0"
-			Expect(k8sClient.Update(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Update(testContext, config)).Should(Succeed())
 
 			By("Waiting for YanetConfigV2 to be reconciled with new values")
 			time.Sleep(2000 * time.Millisecond) // Give config reconciler time to update snapshot
@@ -512,12 +512,12 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			By("Triggering reconciliation of YanetV2 CRs by adding annotation")
 			for _, name := range []string{yanetName1, yanetName2} {
 				yanet := &yanetv2alpha1.YanetV2{}
-				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet)).Should(Succeed())
+				Expect(k8sClient.Get(testContext, types.NamespacedName{Name: name, Namespace: yanetNamespace}, yanet)).Should(Succeed())
 				if yanet.Annotations == nil {
 					yanet.Annotations = make(map[string]string)
 				}
 				yanet.Annotations["test.yanet.io/trigger"] = time.Now().Format(time.RFC3339Nano)
-				Expect(k8sClient.Update(ctx, yanet)).Should(Succeed())
+				Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 			}
 
 			By("Recording first update timestamp")
@@ -526,7 +526,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			By("Waiting for first deployment to be updated")
 			Eventually(func() bool {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					return false
 				}
 				// Check if at least one deployment has new image tag
@@ -545,7 +545,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			time.Sleep(2 * time.Second)
 
 			depList := &appsv1.DeploymentList{}
-			Expect(k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace))).Should(Succeed())
+			Expect(k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace))).Should(Succeed())
 
 			updatedCount := 0
 			totalCount := len(depList.Items)
@@ -567,7 +567,7 @@ var _ = PDescribe("Yanet Throttling E2E Tests", func() {
 			By("Waiting for all deployments to eventually be updated")
 			Eventually(func() bool {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(yanetNamespace)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(yanetNamespace)); err != nil {
 					GinkgoWriter.Printf("Error listing deployments: %v\n", err)
 					return false
 				}

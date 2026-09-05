@@ -17,7 +17,8 @@ spec:
       enabled: false
     dataplane:
       enabled: false
-    bird:
-      enabled: false
+      containers:
+        bird:
+          enabled: false
     announcer:
       enabled: false

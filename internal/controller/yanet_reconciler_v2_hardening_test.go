@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-logr/logr"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -43,14 +44,14 @@ func silentLogger() logr.Logger {
 // also re-fetches the YanetV2 so callers always see the latest copy.
 func reconcileTwice(t *testing.T, r *YanetV2Reconciler, yanet *yanetv2alpha1.YanetV2) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	testContext := context.Background()
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("finalizer install: %v", err)
 	}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: yanet.Name, Namespace: yanet.Namespace}, yanet); err != nil {
+	if err := r.Client.Get(testContext, types.NamespacedName{Name: yanet.Name, Namespace: yanet.Namespace}, yanet); err != nil {
 		t.Fatalf("re-get: %v", err)
 	}
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 }
@@ -102,7 +103,8 @@ func TestReconcileV2_DeletionTimestamp_RunsCleanupAndRemovesFinalizer(t *testing
 			AutoSync:     &autoSync,
 		},
 	}
-	// Pre-existing Deployment/Service/ConfigMap labelled as ours.
+	// Pre-existing Deployment/Service/ConfigMap labelled as ours. The Service is
+	// owned by YanetConfigV2 and is outside YanetV2 finalizer cleanup.
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "y-cp-old",
@@ -125,19 +127,21 @@ func TestReconcileV2_DeletionTimestamp_RunsCleanupAndRemovesFinalizer(t *testing
 			Labels:    map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	dep.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	cm.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, dep, svc, cm)
 
 	if _, err := r.reconcileYanetV2(context.Background(), yanet); err != nil {
 		t.Fatalf("delete reconcile: %v", err)
 	}
-	// All managed resources gone.
+	// All YanetV2-managed resources are gone.
 	gotDep := &appsv1.Deployment{}
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y-cp-old", Namespace: "yanet"}, gotDep); !apierrors.IsNotFound(err) {
 		t.Errorf("expected Deployment deleted, got err=%v", err)
 	}
 	gotSvc := &corev1.Service{}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y-svc-old", Namespace: "yanet"}, gotSvc); !apierrors.IsNotFound(err) {
-		t.Errorf("expected Service deleted, got err=%v", err)
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y-svc-old", Namespace: "yanet"}, gotSvc); err != nil {
+		t.Errorf("Service must be left for YanetConfigV2 reconciliation, got err=%v", err)
 	}
 	gotCM := &corev1.ConfigMap{}
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y-cm-old", Namespace: "yanet"}, gotCM); !apierrors.IsNotFound(err) {
@@ -161,7 +165,7 @@ func TestReconcileV2_DeletionTimestamp_RunsCleanupAndRemovesFinalizer(t *testing
 // H2: prune orphans
 // ---------------------------------------------------------------------------
 
-func TestPruneOrphans_DeletesUnknownDeploymentsServicesConfigMaps(t *testing.T) {
+func TestPruneOrphans_DeletesUnknownDeployments(t *testing.T) {
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
 	}
@@ -183,6 +187,8 @@ func TestPruneOrphans_DeletesUnknownDeploymentsServicesConfigMaps(t *testing.T) 
 			Labels: map[string]string{manifests.LabelYanet: "another-yanet"},
 		},
 	}
+	keep.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	drop.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, keep, drop, other)
 
 	desired := newDesiredSet()
@@ -243,6 +249,8 @@ func TestPruneOrphans_DeletesStaleInlineConfigMap(t *testing.T) {
 			Labels: map[string]string{manifests.LabelYanet: "another-yanet"},
 		},
 	}
+	stale.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	fresh.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, stale, fresh, foreign)
 
 	desired := newDesiredSet()
@@ -280,6 +288,7 @@ func TestPruneOrphans_AutoSyncFalse_DoesNotDelete(t *testing.T) {
 			Labels: map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	drop.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, drop)
 
 	count, err := r.pruneOrphans(context.Background(), yanet, newDesiredSet(), false, silentLogger())
@@ -299,14 +308,27 @@ func TestPruneOrphans_AutoSyncFalse_DoesNotDelete(t *testing.T) {
 // H3: UpdateWindow throttle for the v2 path
 // ---------------------------------------------------------------------------
 
+func yanetV2OwnerReferenceForTest() metav1.OwnerReference {
+	controller := true
+	return metav1.OwnerReference{
+		APIVersion: "yanet.yanet-platform.io/v2alpha1",
+		Kind:       "YanetV2",
+		Name:       "y",
+		UID:        "owner",
+		Controller: &controller,
+	}
+}
+
 func TestApplyDeploymentV2_UpdateWindowThrottlesCrossHostUpdate(t *testing.T) {
 	// Pre-create a Deployment on node-A so the second call sees a
 	// drift to apply; record a recent update on node-A so node-B
 	// gets throttled.
 	desired := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "cp", Namespace: "yanet",
-			Labels: map[string]string{"v": "new"},
+			Name:            "cp",
+			Namespace:       "yanet",
+			Labels:          map[string]string{"v": "new"},
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
 		},
 	}
 	existing := desired.DeepCopy()
@@ -319,7 +341,7 @@ func TestApplyDeploymentV2_UpdateWindowThrottlesCrossHostUpdate(t *testing.T) {
 	r.lastUpdateHost = "node-A"
 	r.lock.Unlock()
 
-	state, requeue := r.applyDeploymentV2(
+	state, requeue, err := r.applyDeploymentV2(
 		context.Background(),
 		desired.DeepCopy(),
 		true,           // autoSync
@@ -327,6 +349,9 @@ func TestApplyDeploymentV2_UpdateWindowThrottlesCrossHostUpdate(t *testing.T) {
 		"node-B",       // different host triggers throttle
 		silentLogger(), // logger
 	)
+	if err != nil {
+		t.Fatalf("applyDeploymentV2: %v", err)
+	}
 	if state != "sync-waiting" {
 		t.Errorf("expected sync-waiting on cross-host throttle, got %q", state)
 	}
@@ -345,17 +370,23 @@ func TestApplyDeploymentV2_UpdateWindowThrottlesCrossHostUpdate(t *testing.T) {
 
 func TestApplyDeploymentV2_UpdateWindowZero_AlwaysApplies(t *testing.T) {
 	existing := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "cp", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "cp",
+			Namespace:       "yanet",
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
+		},
 	}
 	desired := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "cp", Namespace: "yanet",
-			Labels: map[string]string{"v": "new"},
+			Name:            "cp",
+			Namespace:       "yanet",
+			Labels:          map[string]string{"v": "new"},
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
 		},
 	}
 	r, _ := makeReconcilerEnv(t, existing)
 
-	state, requeue := r.applyDeploymentV2(
+	state, requeue, err := r.applyDeploymentV2(
 		context.Background(),
 		desired.DeepCopy(),
 		true, // autoSync
@@ -363,8 +394,32 @@ func TestApplyDeploymentV2_UpdateWindowZero_AlwaysApplies(t *testing.T) {
 		"node-B",
 		silentLogger(),
 	)
+	if err != nil {
+		t.Fatalf("applyDeploymentV2: %v", err)
+	}
 	if state != "synced" {
 		t.Errorf("expected synced when updateWindow=0, got %q (requeue=%v)", state, requeue)
+	}
+}
+
+func TestApplyDeploymentV2_RejectsForeignOwner(t *testing.T) {
+	existingOwner := yanetV2OwnerReferenceForTest()
+	existingOwner.Name = "other"
+	existing := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name:            "cp",
+		Namespace:       "yanet",
+		OwnerReferences: []metav1.OwnerReference{existingOwner},
+	}}
+	desired := existing.DeepCopy()
+	desired.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	desired.Labels = map[string]string{"v": "new"}
+	r, _ := makeReconcilerEnv(t, existing)
+
+	state, _, err := r.applyDeploymentV2(
+		context.Background(), desired, true, 0, "node-B", silentLogger(),
+	)
+	if err == nil || state != "error" {
+		t.Fatalf("foreign Deployment owner must be rejected, state=%q err=%v", state, err)
 	}
 }
 
@@ -461,15 +516,21 @@ func TestComputeConditionsV2_PreservesLastTransitionTime(t *testing.T) {
 	}
 }
 
-func TestSetConditionsV2Degraded_OnlyTouchesDegraded(t *testing.T) {
+func TestSetConditionsV2Degraded_ClearsReady(t *testing.T) {
 	y := &yanetv2alpha1.YanetV2{}
 	setConditionsV2Degraded(y, "ConfigNotLoaded", "snap empty")
-	if len(y.Status.Conditions) != 1 {
-		t.Fatalf("expected 1 condition, got %d", len(y.Status.Conditions))
+	if len(y.Status.Conditions) != 2 {
+		t.Fatalf("expected Degraded and Ready conditions, got %d", len(y.Status.Conditions))
 	}
-	c := y.Status.Conditions[0]
-	if c.Type != "Degraded" || c.Status != metav1.ConditionTrue || c.Reason != "ConfigNotLoaded" {
-		t.Errorf("unexpected condition: %+v", c)
+	conditions := make(map[string]metav1.Condition, len(y.Status.Conditions))
+	for _, condition := range y.Status.Conditions {
+		conditions[condition.Type] = condition
+	}
+	if condition := conditions["Degraded"]; condition.Status != metav1.ConditionTrue || condition.Reason != "ConfigNotLoaded" {
+		t.Errorf("unexpected Degraded condition: %+v", condition)
+	}
+	if condition := conditions["Ready"]; condition.Status != metav1.ConditionFalse {
+		t.Errorf("Ready must be false on an early reconcile error: %+v", condition)
 	}
 }
 
@@ -505,7 +566,10 @@ func TestCollectPodsV2_GroupsByPhase(t *testing.T) {
 		},
 	}
 	r, _ := makeReconcilerEnv(t, append(pods, yanet)...)
-	out := collectPodsV2(context.Background(), r.Client, yanet, silentLogger())
+	out, err := collectPodsV2(context.Background(), r.Client, yanet)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := out[corev1.PodRunning]; len(got) != 1 || got[0] != "p-running" {
 		t.Errorf("Running bucket: got %v want [p-running]", got)
@@ -527,6 +591,9 @@ func TestReconcileV2_AutoSyncOn_PrunesOrphanDeployment(t *testing.T) {
 			BoxType:      "release",
 			NodeSelector: map[string]string{"role": "yanet"},
 			AutoSync:     &autoSync,
+			Components: &yanetv2alpha1.YanetComponentsOverride{
+				Operators: map[string]yanetv2alpha1.YanetComponentOverride{"removed": {}},
+			},
 		},
 	}
 	node := &corev1.Node{
@@ -543,6 +610,7 @@ func TestReconcileV2_AutoSyncOn_PrunesOrphanDeployment(t *testing.T) {
 			Labels:    map[string]string{manifests.LabelYanet: "y"},
 		},
 	}
+	orphan.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, snap := makeReconcilerEnv(t, yanet, node, orphan)
 	snap.Config = minimalConfigV2()
 
@@ -550,5 +618,73 @@ func TestReconcileV2_AutoSyncOn_PrunesOrphanDeployment(t *testing.T) {
 
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y-old-component", Namespace: "yanet"}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Errorf("expected orphan Deployment deleted, got err=%v", err)
+	}
+}
+
+func TestReconcileV2_RemovesSidecarDespiteStaleOverride(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType:      "release",
+			NodeSelector: map[string]string{"role": "yanet"},
+			AutoSync:     &autoSync,
+			Components: &yanetv2alpha1.YanetComponentsOverride{
+				Dataplane: &yanetv2alpha1.YanetComponentOverride{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+						yanetv2alpha1.BirdSidecarContainerName: {Tag: "override"},
+					},
+				},
+			},
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name: "node-1", Labels: map[string]string{"role": "yanet"},
+	}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	config := minimalConfigV2()
+	config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
+		Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+			Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
+		},
+	}
+	config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
+		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
+	}
+	snapshot.Config = config
+	reconcileTwice(t, r, yanet)
+
+	getDataplane := func() *appsv1.Deployment {
+		deployments := &appsv1.DeploymentList{}
+		if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+			t.Fatalf("list Deployments: %v", err)
+		}
+		for i := range deployments.Items {
+			deployment := &deployments.Items[i]
+			if deployment.Labels[manifests.LabelComponent] == string(helpers.KindDataplane) {
+				return deployment
+			}
+		}
+		t.Fatal("dataplane Deployment not found")
+		return nil
+	}
+	hasBird := func(deployment *appsv1.Deployment) bool {
+		for i := range deployment.Spec.Template.Spec.InitContainers {
+			if deployment.Spec.Template.Spec.InitContainers[i].Name == yanetv2alpha1.BirdSidecarContainerName {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasBird(getDataplane()) {
+		t.Fatal("initial dataplane Deployment is missing BIRD sidecar")
+	}
+
+	snapshot.Config = minimalConfigV2()
+	if _, err := r.reconcileYanetV2(context.Background(), yanet); err != nil {
+		t.Fatalf("reconcile sidecar removal: %v", err)
+	}
+	if hasBird(getDataplane()) {
+		t.Fatal("stale override kept removed BIRD sidecar running")
 	}
 }

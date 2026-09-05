@@ -17,12 +17,13 @@ limitations under the License.
 // Package manifests builds Kubernetes resources for the v2alpha1 path.
 //
 // The v2 builder is intentionally minimal: it produces base
-// Deployment skeletons (NUMA fan-out for controlplane, hugepages for
-// dataplane, ConfigSource volumes for everything). It also emits the
-// intrinsic security/mount baseline a component cannot run without —
-// the dataplane's privileged + hostNetwork/hostIPC + minimal host
-// devices (applyDataplaneSecurity) and the controlplane's hostIPC +
-// shmem-arena mount (applyControlplaneShmem). Everything optional
+// Deployment skeletons (NUMA fan-out for controlplane, hugepages and native
+// sidecars for dataplane, ConfigSource volumes for everything). It also emits
+// the intrinsic security/mount baseline a component cannot run without — the
+// dataplane's privileged + hostIPC + minimal host devices
+// (applyDataplaneSecurity), the netlink sidecar's privileged + netplan access,
+// and the controlplane's hostIPC + shmem-arena mount
+// (applyControlplaneShmem). Everything optional
 // beyond that — annotations, postStart hooks, resource requests, init
 // containers, extra hostIPC/privileged for operators — lives in
 // YanetConfigV2.spec.patches[] and is layered on top by ApplyPatches
@@ -48,6 +49,8 @@ type BuildContextV2 struct {
 	YanetName string
 	// Namespace where Deployments will be created.
 	Namespace string
+	// BoxType is the shared service and endpoint identity selected by YanetV2.
+	BoxType string
 	// NodeName the Deployment is pinned to (via nodeSelector).
 	// May be empty for cluster-wide operator placement; when empty
 	// the builder falls back to YanetSpec.NodeSelector and skips
@@ -83,25 +86,29 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 		}
 	}
 
+	var deployments []*appsv1.Deployment
 	switch c.Kind {
 	case helpers.KindControlplane:
-		return buildControlplaneFanout(ctx, c)
+		deployments = buildControlplaneFanout(ctx, c)
 	case helpers.KindOperator:
-		return []*appsv1.Deployment{buildOperator(ctx, c)}, nil
+		deployments = []*appsv1.Deployment{buildOperator(ctx, c)}
 	default:
-		return []*appsv1.Deployment{buildSingle(ctx, c)}, nil
+		deployments = []*appsv1.Deployment{buildSingle(ctx, c)}
 	}
+	for _, deployment := range deployments {
+		if err := ConfigureListeners(deployment, c, nil); err != nil {
+			return nil, fmt.Errorf("buildDeployments: component %q: %w", c.Name, err)
+		}
+	}
+	return deployments, nil
 }
 
 // buildControlplaneFanout renders one Deployment per NUMA domain.
-// Each instance listens on Port + numa_index and reads its own
-// per-NUMA config file.
 //
-// NUMA indices listed in DisabledNuma are skipped entirely: no
-// Deployment, no Service (see BuildServices). The usual reason is a
-// NUMA domain without a NIC, where the dataplane runs no instance and
-// a controlplane would have no peer to attach to.
-func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*appsv1.Deployment, error) {
+// NUMA indices listed in DisabledNuma are skipped for Deployments. Shared
+// Services remain unconditional so their DNS names do not appear and disappear
+// as installations are scaled or temporarily disabled.
+func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) []*appsv1.Deployment {
 	numa := effectiveNuma(ctx, c)
 	disabled := disabledNumaSet(c)
 	out := make([]*appsv1.Deployment, 0, numa)
@@ -115,25 +122,15 @@ func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		d.Labels[labelNuma] = fmt.Sprintf("%d", i)
 		d.Spec.Selector.MatchLabels[labelNuma] = fmt.Sprintf("%d", i)
 		d.Spec.Template.Labels[labelNuma] = fmt.Sprintf("%d", i)
-		// Per-instance listen port (Port + i). The base Service
-		// load-balances across all instances by Port (round-robin).
-		cont := &d.Spec.Template.Spec.Containers[0]
-		if c.Port > 0 {
-			port := c.Port + i
-			cont.Ports = []corev1.ContainerPort{{
-				Name:          "grpc",
-				ContainerPort: port,
-				Protocol:      corev1.ProtocolTCP,
-			}}
-		}
 		// Each instance gets its own config file: the controlplane
 		// reads gateway.instance_id and all endpoints from the file
 		// and accepts only `-c <path>`, so a shared file would make
 		// every instance serve dataplane instance 0.
+		cont := &d.Spec.Template.Spec.Containers[0]
 		cont.Args = numaConfigArgs(cont.Args, i)
 		out = append(out, d)
 	}
-	return out, nil
+	return out
 }
 
 // disabledNumaSet indexes ResolvedComponent.DisabledNuma for O(1)
@@ -150,22 +147,26 @@ func disabledNumaSet(c *helpers.ResolvedComponent) map[int32]struct{} {
 	return out
 }
 
-// numaConfigArgs rewrites the config path inside the component args so
-// that each per-NUMA instance reads its own file. The NUMA index is
-// appended to the file base name, keeping the directory and extension:
+// numaConfigArgs substitutes {numa} in explicit per-NUMA arguments, for example
+// /etc/yanet2/controlplane.d/numa{numa}.yaml. Arguments without a placeholder
+// retain the legacy config-path convention: append the NUMA index to the file
+// base name, keeping the directory and extension:
 //
 //	/etc/yanet2/controlplane.yaml → /etc/yanet2/controlplane-0.yaml
 //
-// Only arguments that look like a config file path (a *.yaml / *.yml
-// element) are touched, so flags such as `-c` and subcommands are
-// preserved verbatim. Args without any such element are returned
-// unchanged — the caller stays responsible for a sane args list.
+// Without a placeholder, only *.yaml / *.yml elements are touched. Flags such
+// as `-c` and subcommands are preserved verbatim. The index is the physical
+// fan-out index, not the position among enabled NUMA domains.
 func numaConfigArgs(args []string, numa int32) []string {
 	if len(args) == 0 {
 		return args
 	}
 	out := append([]string(nil), args...)
 	for i, a := range out {
+		if strings.Contains(a, "{numa}") {
+			out[i] = strings.ReplaceAll(a, "{numa}", fmt.Sprint(numa))
+			continue
+		}
 		ext := filepath.Ext(a)
 		if ext != ".yaml" && ext != ".yml" {
 			continue
@@ -197,12 +198,12 @@ func numaDeploymentName(ctx BuildContextV2, c *helpers.ResolvedComponent, numa i
 	return fmt.Sprintf("%s-%s-numa%d", ctx.YanetName, toLowerKebab(c.Name), numa)
 }
 
-// buildSingle renders the base single-Deployment skeleton for the
-// hardcoded components (dataplane, bird, birdAdapter, announcer)
-// AND for one controlplane NUMA instance (the caller will rename it
-// after this).
+// buildSingle renders the base single-Deployment skeleton for the fixed
+// workload components and for one controlplane NUMA instance (the caller
+// renames it afterwards).
 func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
-	labels := baseLabels(ctx, c)
+	selectorLabels := baseLabels(ctx, c)
+	labels := workloadLabels(ctx, selectorLabels)
 	volumes, volumeMounts, configMapName, configArgs := buildConfigVolumes(ctx, c)
 
 	container := corev1.Container{
@@ -212,13 +213,6 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		VolumeMounts:    volumeMounts,
 	}
 	container.Args = configArgs
-	if c.Port > 0 {
-		container.Ports = []corev1.ContainerPort{{
-			Name:          defaultPortName(c.Kind),
-			ContainerPort: c.Port,
-			Protocol:      corev1.ProtocolTCP,
-		}}
-	}
 	// Hugepages on dataplane.
 	if c.Hugepages != nil {
 		applyHugepages(&container, &volumes, c.Hugepages)
@@ -232,9 +226,6 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		applyDataplaneSecurity(&container, &volumes)
 	case helpers.KindControlplane:
 		applyControlplaneShmem(&container, &volumes)
-	case helpers.KindBird:
-		// bird owns the control socket → read-write.
-		applyBirdSocket(&container, &volumes, false)
 	case helpers.KindBirdAdapter, helpers.KindAnnouncer:
 		// bird-adapter and announcer only connect as clients → read-only.
 		applyBirdSocket(&container, &volumes, true)
@@ -248,17 +239,16 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 	}
 	switch c.Kind {
 	case helpers.KindDataplane:
-		// DPDK needs host NIC access and shared-memory IPC with the
-		// controlplane/CLI.
-		pod.HostNetwork = helpers.BoolValue(c.HostNetwork, true)
+		// The target topology gives the dataplane an isolated Pod network
+		// namespace shared with its native sidecars. Legacy deployments may
+		// opt back into the host network explicitly.
+		pod.HostNetwork = helpers.BoolValue(c.HostNetwork, false)
 		pod.HostIPC = true
+		applyDataplaneNativeSidecars(ctx, c, &pod)
 	case helpers.KindControlplane:
 		// Modules in the controlplane attach to the dataplane shmem
 		// arena (/dev/hugepages/yanet) over the host IPC namespace.
 		pod.HostIPC = true
-	case helpers.KindBird:
-		// BIRD peers BGP with external routers over the host network.
-		pod.HostNetwork = true
 	}
 
 	d := &appsv1.Deployment{
@@ -274,7 +264,8 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicasFor(c),
-			Selector: &metav1.LabelSelector{MatchLabels: copyMap(labels)},
+			Selector: &metav1.LabelSelector{MatchLabels: copyMap(selectorLabels)},
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: copyMap(labels)},
 				Spec:       pod,
@@ -298,7 +289,8 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 // treated as a shmem peer (agent): it gets the dataplane shmem arena
 // mounted at /dev/hugepages, like the controlplane.
 func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
-	labels := baseLabels(ctx, c)
+	selectorLabels := baseLabels(ctx, c)
+	labels := workloadLabels(ctx, selectorLabels)
 	pod := corev1.PodSpec{
 		ImagePullSecrets: ctx.PullSecrets,
 		NodeSelector:     nodeSelector(ctx),
@@ -314,13 +306,6 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 			VolumeMounts:    mounts,
 		}
 		container.Args = configArgs
-		if i == 0 && c.Port > 0 {
-			container.Ports = []corev1.ContainerPort{{
-				Name:          "grpc",
-				ContainerPort: c.Port,
-				Protocol:      corev1.ProtocolTCP,
-			}}
-		}
 		// A hostIPC container is a shmem peer (agent) → give it the arena.
 		if rc.HostIPC {
 			container.VolumeMounts = append(container.VolumeMounts, shmemMount())
@@ -347,7 +332,8 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicasFor(c),
-			Selector: &metav1.LabelSelector{MatchLabels: copyMap(labels)},
+			Selector: &metav1.LabelSelector{MatchLabels: copyMap(selectorLabels)},
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: copyMap(labels)},
 				Spec:       pod,
@@ -368,24 +354,48 @@ func singleDeploymentName(ctx BuildContextV2, c *helpers.ResolvedComponent) stri
 	return fmt.Sprintf("%s-%s", ctx.YanetName, toLowerKebab(c.Name))
 }
 
-func defaultPortName(kind helpers.ComponentKind) string {
-	switch kind {
-	case helpers.KindBird:
-		return "bgp"
-	case helpers.KindControlplane, helpers.KindBirdAdapter, helpers.KindAnnouncer:
-		return "grpc"
-	default:
-		return "main"
+func birdContainerPorts() []corev1.ContainerPort {
+	return []corev1.ContainerPort{
+		{Name: "bgp", ContainerPort: 179, Protocol: corev1.ProtocolTCP},
+		{Name: "bfd", ContainerPort: 3784, Protocol: corev1.ProtocolUDP},
+		{Name: "bfd-multihop", ContainerPort: 4784, Protocol: corev1.ProtocolUDP},
+	}
+}
+
+func applyDataplaneNativeSidecars(ctx BuildContextV2, c *helpers.ResolvedComponent, pod *corev1.PodSpec) {
+	always := corev1.ContainerRestartPolicyAlways
+	for i := range c.NativeSidecars {
+		sidecar := &c.NativeSidecars[i]
+		volumes, mounts, args := buildConfigVolumesForNativeSidecar(ctx, c, sidecar)
+		pod.Volumes = append(pod.Volumes, volumes...)
+		container := corev1.Container{
+			Name:            sidecar.Name,
+			Image:           sidecar.Image.FullPath(),
+			ImagePullPolicy: ctx.PullPolicy,
+			Args:            args,
+			VolumeMounts:    mounts,
+			RestartPolicy:   &always,
+		}
+		switch sidecar.Name {
+		case yanetv2alpha1.NetlinkDataplaneSidecarContainerName:
+			applyNetlinkDataplaneSecurity(&container, &pod.Volumes)
+		case yanetv2alpha1.BirdSidecarContainerName:
+			container.Ports = birdContainerPorts()
+			applyBirdSocket(&container, &pod.Volumes, false)
+		}
+		pod.InitContainers = append(pod.InitContainers, container)
 	}
 }
 
 // -- labels -------------------------------------------------------------------
 
 const (
-	labelYanet     = "yanet.yanet-platform.io/yanet"
-	labelComponent = "yanet.yanet-platform.io/component"
-	labelNuma      = "yanet.yanet-platform.io/numa"
-	labelNode      = "yanet.yanet-platform.io/node"
+	labelYanet         = "yanet.yanet-platform.io/yanet"
+	labelBoxType       = "yanet.yanet-platform.io/box-type"
+	labelComponent     = "yanet.yanet-platform.io/component"
+	labelNuma          = "yanet.yanet-platform.io/numa"
+	labelNode          = "yanet.yanet-platform.io/node"
+	labelSharedService = "yanet.yanet-platform.io/shared-service"
 
 	annotationConfigMap = "yanet.yanet-platform.io/configmap"
 
@@ -405,6 +415,14 @@ func baseLabels(ctx BuildContextV2, c *helpers.ResolvedComponent) map[string]str
 	}
 	if ctx.NodeName != "" {
 		out[labelNode] = ctx.NodeName
+	}
+	return out
+}
+
+func workloadLabels(ctx BuildContextV2, selectorLabels map[string]string) map[string]string {
+	out := copyMap(selectorLabels)
+	if ctx.BoxType != "" {
+		out[labelBoxType] = ctx.BoxType
 	}
 	return out
 }
@@ -444,7 +462,7 @@ func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 	if cs.IsZero() {
 		return nil, nil, "", nil
 	}
-	mountPath := defaultConfigMountPath(c.Kind)
+	mountPath := defaultConfigMountPath
 	switch {
 	case cs.HostPath != "":
 		volumes = []corev1.Volume{{
@@ -492,7 +510,7 @@ func buildConfigVolumesForContainer(
 		return nil, nil, "", nil
 	}
 	volName := fmt.Sprintf("config-%d", idx)
-	mountPath := defaultConfigMountPath(c.Kind)
+	mountPath := defaultConfigMountPath
 	switch {
 	case rc.Config.HostPath != "":
 		volumes = []corev1.Volume{{
@@ -522,17 +540,51 @@ func buildConfigVolumesForContainer(
 	return volumes, mounts, configMapName, append([]string(nil), rc.Config.Args...)
 }
 
-// defaultConfigMountPath gives a sensible per-component mount
-// directory. Patches can override the actual file path inside the
-// container if needed.
-func defaultConfigMountPath(kind helpers.ComponentKind) string {
-	switch kind {
-	case helpers.KindBird:
-		return "/etc/bird"
-	default:
-		return "/etc/yanet2"
+func buildConfigVolumesForNativeSidecar(
+	ctx BuildContextV2,
+	c *helpers.ResolvedComponent,
+	rc *helpers.ResolvedContainer,
+) (volumes []corev1.Volume, mounts []corev1.VolumeMount, configArgs []string) {
+	if rc.Config.IsZero() {
+		return nil, nil, nil
 	}
+	volName := "config-" + rc.Name
+	mountPath := defaultConfigMountPath
+	if rc.Name == yanetv2alpha1.BirdSidecarContainerName {
+		mountPath = "/etc/bird"
+	}
+	switch {
+	case rc.Config.HostPath != "":
+		volumes = []corev1.Volume{{
+			Name: volName,
+			VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: rc.Config.HostPath},
+			},
+		}}
+		mounts = []corev1.VolumeMount{{Name: volName, MountPath: mountPath, ReadOnly: true}}
+	case rc.Config.Inline != "":
+		configMapName := inlineNativeSidecarConfigMapName(ctx, c, rc.Name, rc.Config.Inline)
+		cmVol := corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
+		}
+		volumes = []corev1.Volume{{
+			Name:         volName,
+			VolumeSource: corev1.VolumeSource{ConfigMap: &cmVol},
+		}}
+		mounts = []corev1.VolumeMount{{Name: volName, MountPath: mountPath, ReadOnly: true}}
+	case rc.Config.URL != "":
+		volumes = []corev1.Volume{{
+			Name:         volName,
+			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}}
+		mounts = []corev1.VolumeMount{{Name: volName, MountPath: mountPath}}
+	}
+	return volumes, mounts, append([]string(nil), rc.Config.Args...)
 }
+
+// defaultConfigMountPath is shared by workload and netlink configuration.
+// The BIRD native sidecar uses /etc/bird instead.
+const defaultConfigMountPath = "/etc/yanet2"
 
 // toLowerKebab converts a camelCase or mixed-case string to a lowercase
 // kebab-case string safe for use in Kubernetes resource names (RFC 1123).
@@ -575,6 +627,19 @@ func inlineContainerConfigMapName(ctx BuildContextV2, c *helpers.ResolvedCompone
 	)
 }
 
+func inlineNativeSidecarConfigMapName(
+	ctx BuildContextV2,
+	c *helpers.ResolvedComponent,
+	containerName string,
+	content string,
+) string {
+	return fmt.Sprintf("%s-%s-cfg-%s",
+		singleDeploymentName(ctx, c),
+		containerName,
+		shortHashStr(content),
+	)
+}
+
 // InlineConfigMaps returns the {name → content} map of every inline
 // ConfigMap that the resolved component requires. The reconciler
 // iterates this map to CreateOrUpdate the corresponding objects
@@ -593,6 +658,13 @@ func InlineConfigMaps(ctx BuildContextV2, c *helpers.ResolvedComponent) map[stri
 	}
 	if !c.Config.IsZero() && c.Config.Inline != "" {
 		out[inlineConfigMapName(ctx, c, c.Config.Inline)] = c.Config.Inline
+	}
+	for i := range c.NativeSidecars {
+		sidecar := &c.NativeSidecars[i]
+		if !sidecar.Config.IsZero() && sidecar.Config.Inline != "" {
+			name := inlineNativeSidecarConfigMapName(ctx, c, sidecar.Name, sidecar.Config.Inline)
+			out[name] = sidecar.Config.Inline
+		}
 	}
 	return out
 }
@@ -644,6 +716,27 @@ func applyDataplaneSecurity(c *corev1.Container, volumes *[]corev1.Volume) {
 	)
 }
 
+func applyNetlinkDataplaneSecurity(c *corev1.Container, volumes *[]corev1.Volume) {
+	// The sidecar writes per-interface IPv6 settings under /proc/sys. A
+	// non-privileged container gets a read-only procfs there, while an Unmasked
+	// proc mount is rejected for this hostIPC pod because hostUsers is enabled.
+	privileged := true
+	c.SecurityContext = &corev1.SecurityContext{Privileged: &privileged}
+	dir := corev1.HostPathDirectory
+	const volumeName = "host-netplan"
+	c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+		Name:      volumeName,
+		MountPath: "/etc/netplan",
+		ReadOnly:  true,
+	})
+	*volumes = append(*volumes, corev1.Volume{
+		Name: volumeName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{Path: "/etc/netplan", Type: &dir},
+		},
+	})
+}
+
 // shmemVolName / shmemDir identify the hugepages-backed shmem arena that
 // the dataplane publishes (files under /dev/hugepages/yanet) and that
 // every shmem peer mmaps: the controlplane and any hostIPC operator/agent.
@@ -676,12 +769,10 @@ func applyControlplaneShmem(c *corev1.Container, volumes *[]corev1.Volume) {
 	*volumes = append(*volumes, shmemVolume())
 }
 
-// birdSocketDir is the host directory holding the BIRD control socket
-// (e.g. /run/bird/bird.sock). bird publishes it; bird-adapter and
-// announcer read it. The three components are SEPARATE Deployments (so
-// the adapter can roll without restarting bird), hence separate Pods
-// pinned to the same node — they share the socket via a hostPath rather
-// than an in-Pod emptyDir. The socket is shared only with these three.
+// birdSocketDir is the host directory holding the BIRD control socket (e.g.
+// /run/bird/bird.sock). BIRD publishes it from the dataplane Pod;
+// bird-adapter and announcer read it from their separate Pods. A node-local
+// hostPath keeps the socket available across those workloads.
 const birdSocketDir = "/run/bird"
 
 // applyBirdSocket mounts the shared BIRD control-socket directory. bird

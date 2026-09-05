@@ -29,274 +29,377 @@ import (
 
 func newScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
-	s := runtime.NewScheme()
-	if err := AddToScheme(s); err != nil {
+	scheme := runtime.NewScheme()
+	if err := AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme: %v", err)
 	}
-	return s
+	return scheme
 }
 
-func newClientWith(t *testing.T, objs ...client.Object) client.Client {
+func newClientWith(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
-	return fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).Build()
+	return fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objects...).Build()
 }
 
-func clusterConfig(name, namespace string, boxTypes ...string) *YanetConfigV2 {
-	cfg := &YanetConfigV2{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+func clusterConfig(boxTypes ...string) *YanetConfigV2 {
+	config := &YanetConfigV2{
+		ObjectMeta: metav1.ObjectMeta{Name: YanetConfigName},
 		Spec: YanetConfigSpec{
 			Components: ComponentsSpec{
 				Controlplane: ControlplaneSpec{Image: ImageRef{Name: "cp", Tag: "v1"}},
-				Dataplane:    DataplaneSpec{Image: ImageRef{Name: "dp", Tag: "v1"}},
-				Operators: []OperatorSpec{
-					{Name: "antiddos", Containers: []OperatorContainer{
+				Dataplane: DataplaneSpec{
+					Image: ImageRef{Name: "dp", Tag: "v1"},
+					Sidecars: &DataplaneSidecarsSpec{
+						Bird: &DataplaneSidecarSpec{Image: ImageRef{Name: "bird", Tag: "v1"}},
+						NetlinkDataplaneSidecar: &DataplaneSidecarSpec{
+							Image: ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v1"},
+						},
+					},
+				},
+				Operators: []OperatorSpec{{
+					Name: "antiddos",
+					Containers: []OperatorContainer{
 						{Name: "operator", Image: ImageRef{Name: "x"}},
 						{Name: "agent", Image: ImageRef{Name: "y"}},
-					}},
-				},
+					},
+				}},
 			},
 		},
 	}
-	for _, bt := range boxTypes {
-		cfg.Spec.BoxTypes = append(cfg.Spec.BoxTypes, BoxType{
-			Name: bt,
+	for _, boxType := range boxTypes {
+		config.Spec.BoxTypes = append(config.Spec.BoxTypes, BoxType{
+			Name: boxType,
 			Components: BoxComponents{
 				Controlplane: &BoxComponent{},
-				Dataplane:    &BoxComponent{},
+				Dataplane: &BoxDataplane{Sidecars: &BoxDataplaneSidecars{
+					Bird:                    &BoxDataplaneSidecar{},
+					NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+				}},
 			},
+			Operators: map[string]BoxOperator{"antiddos": {}},
 		})
 	}
-	return cfg
+	return config
 }
 
-func makeYanet(name, ns, boxType string) *YanetV2 {
+func makeYanet(name, namespace, boxType string) *YanetV2 {
 	return &YanetV2{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       YanetSpec{BoxType: boxType},
 	}
 }
 
-func TestYanetWebhook_BoxTypeRequired(t *testing.T) {
-	v := &YanetCustomValidator{Client: newClientWith(t)}
-	y := makeYanet("y", "yanet", "")
-	if _, err := v.ValidateCreate(context.Background(), y); err == nil ||
-		!strings.Contains(err.Error(), "boxType is required") {
-		t.Errorf("expected boxType required error, got %v", err)
+func TestYanetWebhook_BoxTypeValidation(t *testing.T) {
+	config := clusterConfig("release")
+	tests := []struct {
+		name    string
+		client  client.Client
+		boxType string
+		wantErr string
+		warning bool
+	}{
+		{name: "required", client: newClientWith(t, config), wantErr: "required"},
+		{name: "not found", client: newClientWith(t, config), boxType: "ghost", wantErr: "not defined"},
+		{name: "found", client: newClientWith(t, config), boxType: "release"},
+		{name: "config unavailable", client: newClientWith(t), boxType: "release", warning: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validator := &YanetCustomValidator{Client: tt.client}
+			warnings, err := validator.ValidateCreate(
+				context.Background(),
+				makeYanet("edge", "yanet", tt.boxType),
+			)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("ValidateCreate: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+			if tt.warning != (len(warnings) > 0) {
+				t.Fatalf("warnings = %v, want warning %t", warnings, tt.warning)
+			}
+		})
 	}
 }
 
-func TestYanetWebhook_BoxTypeNotFoundInCluster(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "ghost")
-	_, err := v.ValidateCreate(context.Background(), y)
-	if err == nil || !strings.Contains(err.Error(), "not defined") {
-		t.Errorf("expected boxType not defined error, got %v", err)
+func TestYanetWebhook_InvalidOverrideRejectedWithoutConfig(t *testing.T) {
+	yanet := makeYanet("edge", "yanet", "release")
+	yanet.Spec.Components = &YanetComponentsOverride{
+		Dataplane: &YanetComponentOverride{Containers: map[string]YanetContainerOverride{
+			DataplaneContainerName: {Enabled: boolPointer(false)},
+		}},
+	}
+	warnings, err := (&YanetCustomValidator{Client: newClientWith(t)}).ValidateCreate(
+		context.Background(),
+		yanet,
+	)
+	if err == nil || !strings.Contains(err.Error(), "spec.components.dataplane.enabled") {
+		t.Fatalf("invalid local override shape must be rejected, got warnings=%v err=%v", warnings, err)
 	}
 }
 
-func TestYanetWebhook_BoxTypeFoundInNamespace(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
-		t.Errorf("namespace-local boxType should pass: %v", err)
-	}
-}
-
-func TestYanetWebhook_BoxTypeFoundClusterWide(t *testing.T) {
-	// YanetV2 lives in ns="yanet" but the only YanetConfigV2 is in
-	// ns="cluster-defaults". Validator should fall back.
-	cfg := clusterConfig("c", "cluster-defaults", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
-		t.Errorf("cluster-wide fallback failed: %v", err)
-	}
-}
-
-func TestYanetWebhook_NoConfigDegrades(t *testing.T) {
-	v := &YanetCustomValidator{Client: newClientWith(t)}
-	y := makeYanet("y", "yanet", "release")
-	warns, err := v.ValidateCreate(context.Background(), y)
-	if err != nil {
-		t.Errorf("no config: should NOT error, got %v", err)
-	}
-	if len(warns) == 0 {
-		t.Errorf("expected a warning when no config is reachable")
-	}
-}
-
-func TestYanetWebhook_OperatorOverrideMustBeDeclared(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Operators: map[string]YanetComponentOverride{
-			"ghost": {},
+func TestYanetWebhook_Overrides(t *testing.T) {
+	config := clusterConfig("release")
+	validator := &YanetCustomValidator{Client: newClientWith(t, config)}
+	tests := []struct {
+		name       string
+		components *YanetComponentsOverride
+		wantErr    string
+	}{
+		{
+			name: "declared operator and containers",
+			components: &YanetComponentsOverride{Operators: map[string]YanetComponentOverride{
+				"antiddos": {Containers: map[string]YanetContainerOverride{
+					"operator": {Tag: "v2"},
+					"agent":    {Tag: "v2"},
+				}},
+			}},
 		},
-	}
-	_, err := v.ValidateCreate(context.Background(), y)
-	if err == nil || !strings.Contains(err.Error(), "ghost") {
-		t.Errorf("expected unknown operator override error, got %v", err)
-	}
-}
-
-func TestYanetWebhook_OperatorOverrideDeclared_OK(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Operators: map[string]YanetComponentOverride{
-			"antiddos": {},
+		{
+			name: "unknown operator",
+			components: &YanetComponentsOverride{Operators: map[string]YanetComponentOverride{
+				"ghost": {},
+			}},
+			wantErr: "ghost",
 		},
-	}
-	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
-		t.Errorf("declared operator override should pass: %v", err)
-	}
-}
-
-func TestYanetWebhook_HardcodedContainerOverride_OK(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Controlplane: &YanetControlplaneOverride{
-			YanetComponentOverride: YanetComponentOverride{
-				Containers: map[string]ImageRef{"controlplane": {Tag: "v2"}},
-			},
+		{
+			name: "unknown operator container",
+			components: &YanetComponentsOverride{Operators: map[string]YanetComponentOverride{
+				"antiddos": {Containers: map[string]YanetContainerOverride{"ghost": {Tag: "v2"}}},
+			}},
+			wantErr: "ghost",
 		},
-	}
-	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
-		t.Errorf("hardcoded controlplane override should pass: %v", err)
-	}
-}
-
-func TestYanetWebhook_ControlplaneDisabledNuma_OK(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Controlplane: &YanetControlplaneOverride{
-			DisabledNuma: []int32{1},
+		{
+			name: "hardcoded container",
+			components: &YanetComponentsOverride{Controlplane: &YanetControlplaneOverride{
+				YanetComponentOverride: YanetComponentOverride{Containers: map[string]YanetContainerOverride{
+					"controlplane": {Tag: "v2"},
+				}},
+			}},
 		},
-	}
-	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
-		t.Errorf("per-installation disabledNuma should pass: %v", err)
-	}
-}
-
-func TestYanetWebhook_ControlplaneDisabledNuma_Negative(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Controlplane: &YanetControlplaneOverride{
-			DisabledNuma: []int32{-2},
-		},
-	}
-	_, err := v.ValidateCreate(context.Background(), y)
-	if err == nil || !strings.Contains(err.Error(), "non-negative") {
-		t.Errorf("expected non-negative index error, got %v", err)
-	}
-}
-
-func TestYanetWebhook_HardcodedContainerOverride_WrongKey(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Controlplane: &YanetControlplaneOverride{
-			YanetComponentOverride: YanetComponentOverride{
-				Containers: map[string]ImageRef{"main": {Tag: "v2"}}, // wrong: must be "controlplane"
-			},
-		},
-	}
-	_, err := v.ValidateCreate(context.Background(), y)
-	if err == nil || !strings.Contains(err.Error(), "controlplane") {
-		t.Errorf("expected hardcoded key validation error, got %v", err)
-	}
-}
-
-func TestYanetWebhook_OperatorContainerOverride_OK(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Operators: map[string]YanetComponentOverride{
-			"antiddos": {
-				Containers: map[string]ImageRef{
-					"operator": {Tag: "v0.5.1"},
-					"agent":    {Tag: "v0.5.2"},
+		{
+			name: "dataplane sidecar disable and image",
+			components: &YanetComponentsOverride{Dataplane: &YanetComponentOverride{
+				Containers: map[string]YanetContainerOverride{
+					BirdSidecarContainerName: {
+						Enabled: boolPointer(false),
+					},
+					NetlinkDataplaneSidecarContainerName: {Tag: "v2"},
 				},
-			},
+			}},
+		},
+		{
+			name: "unknown dataplane container",
+			components: &YanetComponentsOverride{Dataplane: &YanetComponentOverride{
+				Containers: map[string]YanetContainerOverride{"ghost": {Tag: "v2"}},
+			}},
+			wantErr: "ghost",
+		},
+		{
+			name: "primary dataplane container enable",
+			components: &YanetComponentsOverride{Dataplane: &YanetComponentOverride{
+				Containers: map[string]YanetContainerOverride{
+					DataplaneContainerName: {Enabled: boolPointer(false)},
+				},
+			}},
+			wantErr: "spec.components.dataplane.enabled",
+		},
+		{
+			name: "wrong hardcoded container",
+			components: &YanetComponentsOverride{Controlplane: &YanetControlplaneOverride{
+				YanetComponentOverride: YanetComponentOverride{Containers: map[string]YanetContainerOverride{
+					"main": {Tag: "v2"},
+				}},
+			}},
+			wantErr: "controlplane",
+		},
+		{
+			name: "negative disabled numa",
+			components: &YanetComponentsOverride{Controlplane: &YanetControlplaneOverride{
+				DisabledNuma: []int32{-1},
+			}},
+			wantErr: "non-negative",
 		},
 	}
-	if _, err := v.ValidateCreate(context.Background(), y); err != nil {
-		t.Errorf("declared operator container overrides should pass: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			yanet := makeYanet("edge", "yanet", "release")
+			yanet.Spec.Components = tt.components
+			_, err := validator.ValidateCreate(context.Background(), yanet)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("ValidateCreate: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
-func TestYanetWebhook_OperatorContainerOverride_UnknownContainer(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	y := makeYanet("y", "yanet", "release")
-	y.Spec.Components = &YanetComponentsOverride{
-		Operators: map[string]YanetComponentOverride{
-			"antiddos": {
-				Containers: map[string]ImageRef{"ghost": {Tag: "v1"}},
+func TestYanetWebhook_DataplaneSidecarOverrideRequiresBoxWiring(t *testing.T) {
+	config := clusterConfig("release")
+	config.Spec.BoxTypes[0].Components.Dataplane.Sidecars.Bird = nil
+	validator := &YanetCustomValidator{Client: newClientWith(t, config)}
+	yanet := makeYanet("edge", "yanet", "release")
+	yanet.Spec.Components = &YanetComponentsOverride{
+		Dataplane: &YanetComponentOverride{
+			Containers: map[string]YanetContainerOverride{
+				BirdSidecarContainerName: {Enabled: boolPointer(true)},
 			},
 		},
 	}
-	_, err := v.ValidateCreate(context.Background(), y)
-	if err == nil || !strings.Contains(err.Error(), "ghost") {
-		t.Errorf("expected unknown container override error, got %v", err)
+	_, err := validator.ValidateCreate(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "is not wired") {
+		t.Fatalf("unwired sidecar override must be rejected, got %v", err)
 	}
+}
+
+func TestYanetWebhook_OptionalComponentOverrideRequiresBoxWiring(t *testing.T) {
+	config := clusterConfig("release")
+	config.Spec.Components.BirdAdapter = &BirdAdapterComp{Image: ImageRef{Name: "bird-adapter"}}
+	validator := &YanetCustomValidator{Client: newClientWith(t, config)}
+	yanet := makeYanet("edge", "yanet", "release")
+	yanet.Spec.Components = &YanetComponentsOverride{
+		BirdAdapter: &YanetComponentOverride{Containers: map[string]YanetContainerOverride{
+			BirdAdapterContainerName: {Tag: "v2"},
+		}},
+	}
+	_, err := validator.ValidateCreate(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "is not wired") {
+		t.Fatalf("unwired optional component override must be rejected, got %v", err)
+	}
+}
+
+func TestYanetWebhook_OperatorOverrideRequiresBoxWiring(t *testing.T) {
+	config := clusterConfig("release")
+	delete(config.Spec.BoxTypes[0].Operators, "antiddos")
+	validator := &YanetCustomValidator{Client: newClientWith(t, config)}
+	yanet := makeYanet("edge", "yanet", "release")
+	yanet.Spec.Components = &YanetComponentsOverride{
+		Operators: map[string]YanetComponentOverride{"antiddos": {}},
+	}
+	_, err := validator.ValidateCreate(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "is not wired") {
+		t.Fatalf("unwired operator override must be rejected, got %v", err)
+	}
+}
+
+func TestValidateEffectiveYanetComponentOverridesIgnoresUnwiredOverrides(t *testing.T) {
+	config := clusterConfig("release")
+	delete(config.Spec.BoxTypes[0].Operators, "antiddos")
+	overrides := &YanetComponentsOverride{
+		Operators: map[string]YanetComponentOverride{"antiddos": {}},
+	}
+
+	if err := ValidateEffectiveYanetComponentOverrides(
+		overrides,
+		&config.Spec.Components,
+		&config.Spec.BoxTypes[0],
+	); err != nil {
+		t.Fatalf("stale unwired override must not block reconciliation: %v", err)
+	}
+	if err := ValidateYanetComponentOverrides(
+		overrides,
+		&config.Spec.Components,
+		&config.Spec.BoxTypes[0],
+	); err == nil {
+		t.Fatal("admission validation must still reject an unwired override")
+	}
+}
+
+func TestYanetWebhook_BirdAdapterUsesRenderedContainerName(t *testing.T) {
+	config := clusterConfig("release")
+	config.Spec.Components.BirdAdapter = &BirdAdapterComp{Image: ImageRef{Name: "bird-adapter"}}
+	config.Spec.BoxTypes[0].Components.BirdAdapter = &BoxComponent{}
+	validator := &YanetCustomValidator{Client: newClientWith(t, config)}
+	yanet := makeYanet("edge", "yanet", "release")
+	yanet.Spec.Components = &YanetComponentsOverride{
+		BirdAdapter: &YanetComponentOverride{Containers: map[string]YanetContainerOverride{
+			BirdAdapterContainerName: {Tag: "v2"},
+		}},
+	}
+	if _, err := validator.ValidateCreate(context.Background(), yanet); err != nil {
+		t.Fatalf("rendered bird-adapter container name rejected: %v", err)
+	}
+
+	yanet.Spec.Components.BirdAdapter.Containers = map[string]YanetContainerOverride{
+		"birdAdapter": {Tag: "v2"},
+	}
+	_, err := validator.ValidateCreate(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), BirdAdapterContainerName) {
+		t.Fatalf("camelCase birdAdapter container name must be rejected, got %v", err)
+	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func TestYanetWebhook_BoxTypeImmutable(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release", "balancer")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	oldY := makeYanet("y", "yanet", "release")
-	newY := makeYanet("y", "yanet", "balancer")
-	_, err := v.ValidateUpdate(context.Background(), oldY, newY)
-	if err == nil || !strings.Contains(err.Error(), "immutable") {
-		t.Errorf("expected immutable boxType error, got %v", err)
-	}
-}
-
-func TestYanetWebhook_UpdateSameBoxType_OK(t *testing.T) {
-	cfg := clusterConfig("c", "yanet", "release")
-	v := &YanetCustomValidator{Client: newClientWith(t, cfg)}
-	oldY := makeYanet("y", "yanet", "release")
-	newY := makeYanet("y", "yanet", "release")
-	if _, err := v.ValidateUpdate(context.Background(), oldY, newY); err != nil {
-		t.Errorf("same boxType update should pass: %v", err)
+	validator := &YanetCustomValidator{Client: newClientWith(t, clusterConfig("release", "balancer"))}
+	oldYanet := makeYanet("edge", "yanet", "release")
+	newYanet := oldYanet.DeepCopy()
+	newYanet.Spec.BoxType = "balancer"
+	if _, err := validator.ValidateUpdate(context.Background(), oldYanet, newYanet); err == nil ||
+		!strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("boxType change must be rejected, got %v", err)
 	}
 }
 
 func TestYanetWebhook_DeleteAlwaysAllowed(t *testing.T) {
-	v := &YanetCustomValidator{Client: newClientWith(t)}
-	if _, err := v.ValidateDelete(context.Background(), makeYanet("y", "yanet", "")); err != nil {
-		t.Errorf("delete must always pass: %v", err)
+	validator := &YanetCustomValidator{Client: newClientWith(t)}
+	if _, err := validator.ValidateDelete(context.Background(), makeYanet("edge", "yanet", "release")); err != nil {
+		t.Fatalf("ValidateDelete: %v", err)
 	}
 }
 
-func TestYanetWebhook_UpdateSkipsValidationWhenDeleting(t *testing.T) {
-	// Simulate the finalizer-removal update that the controller issues when
-	// DeletionTimestamp is set. At that point spec may be empty (no boxType),
-	// so validation must be skipped to avoid blocking the deletion.
-	v := &YanetCustomValidator{Client: newClientWith(t)}
-	oldY := makeYanet("test-node", "yanet", "firewall")
-	oldY.Finalizers = []string{"yanet.yanet-platform.io/finalizer"}
+func TestYanetWebhook_LocalNamesWithoutConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		yanetName string
+		boxType   string
+		wantErr   string
+	}{
+		{name: "label length boundary", yanetName: strings.Repeat("a", 63), boxType: strings.Repeat("b", 63)},
+		{name: "name too long for workload label", yanetName: strings.Repeat("a", 64), boxType: "release", wantErr: "metadata.name"},
+		{name: "box type too long", yanetName: "edge", boxType: strings.Repeat("b", 64), wantErr: "spec.boxType"},
+		{name: "invalid box type", yanetName: "edge", boxType: "not_a_box", wantErr: "spec.boxType"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validator := &YanetCustomValidator{Client: newClientWith(t)}
+			_, err := validator.ValidateCreate(context.Background(), makeYanet(tt.yanetName, "yanet", tt.boxType))
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("valid local shape rejected: %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
 
-	newY := makeYanet("test-node", "yanet", "firewall")
-	newY.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
-	newY.Finalizers = []string{}
-	// spec is intentionally cleared (as the API server may return it)
-	newY.Spec = YanetSpec{}
-
-	if _, err := v.ValidateUpdate(context.Background(), oldY, newY); err != nil {
-		t.Errorf("finalizer removal during deletion must not be blocked: %v", err)
+func TestValidateEffectiveYanetComponentOverrides_RemovedOperatorContainer(t *testing.T) {
+	config := clusterConfig("release")
+	config.Spec.Components.Operators[0].Containers = config.Spec.Components.Operators[0].Containers[:1]
+	overrides := &YanetComponentsOverride{Operators: map[string]YanetComponentOverride{
+		"antiddos": {Containers: map[string]YanetContainerOverride{
+			"operator": {Tag: "v2"},
+			"agent":    {Tag: "v2"},
+		}},
+	}}
+	if err := ValidateEffectiveYanetComponentOverrides(overrides, &config.Spec.Components, &config.Spec.BoxTypes[0]); err != nil {
+		t.Fatalf("removed container override must not block its rollout: %v", err)
+	}
+	if len(overrides.Operators["antiddos"].Containers) != 2 {
+		t.Fatal("effective validation mutated the installation overrides")
+	}
+	if err := ValidateYanetComponentOverrides(overrides, &config.Spec.Components, &config.Spec.BoxTypes[0]); err == nil {
+		t.Fatal("admission must still reject a new override for an undeclared container")
+	}
+	overrides.Operators["antiddos"].Containers["operator"] = YanetContainerOverride{Enabled: boolPointer(false)}
+	if err := ValidateEffectiveYanetComponentOverrides(overrides, &config.Spec.Components, &config.Spec.BoxTypes[0]); err == nil {
+		t.Fatal("effective validation must still reject an invalid override for a rendered container")
 	}
 }

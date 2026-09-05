@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -32,11 +33,20 @@ func ctxV2() BuildContextV2 {
 	return BuildContextV2{
 		YanetName:   "edge",
 		Namespace:   "yanet",
+		BoxType:     "firewall",
 		NodeName:    "node-1",
 		PullPolicy:  corev1.PullIfNotPresent,
 		PullSecrets: []corev1.LocalObjectReference{{Name: "cr-secret"}},
 		OwnerRef:    metav1.OwnerReference{APIVersion: "v2alpha1", Kind: "YanetV2", Name: "edge", UID: "1"},
 	}
+}
+
+func envValues(env []corev1.EnvVar) map[string]string {
+	out := make(map[string]string, len(env))
+	for i := range env {
+		out[env[i].Name] = env[i].Value
+	}
+	return out
 }
 
 // --- controlplane fan-out ---------------------------------------------------
@@ -48,7 +58,6 @@ func TestBuildDeployments_Controlplane_NUMAFanout(t *testing.T) {
 		Name:    "controlplane",
 		Enabled: true,
 		Image:   helpers.ResolvedImage{Registry: "cr.io", Name: "cp", Tag: "v2"},
-		Port:    8080,
 		Numa:    3,
 	}
 	deps, err := BuildDeployments(ctx, c)
@@ -62,10 +71,13 @@ func TestBuildDeployments_Controlplane_NUMAFanout(t *testing.T) {
 		if !strings.Contains(d.Name, "numa") {
 			t.Errorf("d[%d].Name=%q lacks numa suffix", i, d.Name)
 		}
-		port := d.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort
-		want := int32(8080 + i)
-		if port != want {
-			t.Errorf("d[%d] container port = %d, want %d", i, port, want)
+		if d.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+			t.Errorf("d[%d] strategy=%q, want Recreate", i, d.Spec.Strategy.Type)
+		}
+		ports := d.Spec.Template.Spec.Containers[0].Ports
+		if len(ports) != 2 || ports[0].ContainerPort != ServiceGRPCPort ||
+			ports[1].ContainerPort != ServiceHTTPPort {
+			t.Errorf("d[%d] container ports = %+v", i, ports)
 		}
 		if v := d.Spec.Template.Labels[labelNuma]; v == "" {
 			t.Errorf("d[%d] missing numa label", i)
@@ -76,12 +88,39 @@ func TestBuildDeployments_Controlplane_NUMAFanout(t *testing.T) {
 	}
 }
 
+func TestBuildDeployments_Controlplane_ManagedListeners(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
+		Numa:  2,
+	}
+	deployments, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if len(deployments) != 2 {
+		t.Fatalf("deployments = %d, want 2", len(deployments))
+	}
+	for i := range deployments {
+		container := &deployments[i].Spec.Template.Spec.Containers[0]
+		if len(container.Ports) != 2 ||
+			container.Ports[0].Name != "grpc" || container.Ports[0].ContainerPort != 8080 ||
+			container.Ports[1].Name != "http" || container.Ports[1].ContainerPort != 8081 {
+			t.Errorf("deployment[%d] ports = %+v", i, container.Ports)
+		}
+		env := envValues(container.Env)
+		if env[EnvKubernetesGRPCPort] != "8080" || env[EnvKubernetesHTTPPort] != "8081" {
+			t.Errorf("deployment[%d] managed listener env = %v", i, env)
+		}
+	}
+}
+
 func TestBuildDeployments_Controlplane_NoNumaFallsBackToContext(t *testing.T) {
 	ctx := ctxV2()
 	ctx.NumaCount = 2
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
-		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"}, Port: 8080,
+		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
 	}
 	deps, _ := BuildDeployments(ctx, c)
 	if len(deps) != 2 {
@@ -93,7 +132,7 @@ func TestBuildDeployments_Controlplane_DefaultsToOne(t *testing.T) {
 	ctx := ctxV2()
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
-		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"}, Port: 8080,
+		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
 	}
 	deps, _ := BuildDeployments(ctx, c)
 	if len(deps) != 1 {
@@ -103,11 +142,10 @@ func TestBuildDeployments_Controlplane_DefaultsToOne(t *testing.T) {
 
 // --- dataplane / hugepages --------------------------------------------------
 
-func TestBuildDeployments_Dataplane_Hugepages_HostNetwork(t *testing.T) {
+func TestBuildDeployments_Dataplane_Hugepages_PodNetwork(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
 		Image:     helpers.ResolvedImage{Name: "dp", Tag: "v2"},
-		Port:      8081,
 		Hugepages: &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 8},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
@@ -115,8 +153,8 @@ func TestBuildDeployments_Dataplane_Hugepages_HostNetwork(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	d := deps[0]
-	if !d.Spec.Template.Spec.HostNetwork {
-		t.Errorf("dataplane defaults to hostNetwork=true")
+	if d.Spec.Template.Spec.HostNetwork {
+		t.Errorf("dataplane must default to an isolated Pod network namespace")
 	}
 	cont := d.Spec.Template.Spec.Containers[0]
 	if cont.Resources.Limits.Name("hugepages-1Gi", "Gi").String() != "8Gi" {
@@ -218,7 +256,6 @@ func TestBuildDeployments_Dataplane_SecurityBaseline(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
 		Image:     helpers.ResolvedImage{Name: "dp", Tag: "v2"},
-		Port:      8090,
 		Hugepages: &yanetv2alpha1.Hugepages{Size: "2Mi", Count: 4096},
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
@@ -238,8 +275,8 @@ func TestBuildDeployments_Dataplane_SecurityBaseline(t *testing.T) {
 	if !pod.HostIPC {
 		t.Errorf("dataplane must set hostIPC")
 	}
-	if !pod.HostNetwork {
-		t.Errorf("dataplane must set hostNetwork")
+	if pod.HostNetwork {
+		t.Errorf("dataplane must default to hostNetwork=false")
 	}
 	// Minimal host devices.
 	for _, p := range []string{"/dev/vfio", "/dev/vhost-net", "/dev/net"} {
@@ -270,6 +307,150 @@ func TestBuildDeployments_Dataplane_SecurityBaseline(t *testing.T) {
 	}
 }
 
+func TestBuildDeployments_Dataplane_NativeSidecars(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
+		NativeSidecars: []helpers.ResolvedContainer{
+			{
+				Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				Image: helpers.ResolvedImage{
+					Registry: "ghcr.io/yanet-platform/yanet2",
+					Name:     "netlink-dataplane-sidecar",
+					Tag:      "v2",
+				},
+				Config: &yanetv2alpha1.ConfigSource{
+					HostPath: "/etc/yanet2",
+					Args:     []string{"-c", "/etc/yanet2/netlink.yaml"},
+				},
+			},
+			{
+				Name:   yanetv2alpha1.BirdSidecarContainerName,
+				Image:  helpers.ResolvedImage{Name: "bird", Tag: "v2"},
+				Config: &yanetv2alpha1.ConfigSource{Inline: "router id 192.0.2.1;"},
+			},
+		},
+	}
+	deployments, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	pod := deployments[0].Spec.Template.Spec
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != yanetv2alpha1.DataplaneContainerName {
+		t.Fatalf("primary containers = %+v", pod.Containers)
+	}
+	if len(pod.InitContainers) != 2 {
+		t.Fatalf("native sidecars = %+v", pod.InitContainers)
+	}
+	netlink := &pod.InitContainers[0]
+	if netlink.Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("first native sidecar = %q, want netlink", netlink.Name)
+	}
+	if netlink.RestartPolicy == nil || *netlink.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("netlink restartPolicy = %v, want Always", netlink.RestartPolicy)
+	}
+	if diff := cmp.Diff([]string{"-c", "/etc/yanet2/netlink.yaml"}, netlink.Args); diff != "" {
+		t.Fatalf("netlink args mismatch (-want +got):\n%s", diff)
+	}
+	if netlink.SecurityContext == nil || netlink.SecurityContext.Privileged == nil ||
+		!*netlink.SecurityContext.Privileged {
+		t.Fatalf("netlink security context = %+v, want privileged", netlink.SecurityContext)
+	}
+	if netlink.SecurityContext.ProcMount != nil {
+		t.Fatalf("netlink procMount = %q, want runtime default", *netlink.SecurityContext.ProcMount)
+	}
+	if !hasMount(netlink.VolumeMounts, "/etc/netplan", true) {
+		t.Fatalf("netlink sidecar must mount /etc/netplan read-only: %+v", netlink.VolumeMounts)
+	}
+	if len(netlink.Ports) != 1 || netlink.Ports[0].Name != NetlinkGRPCTargetPort ||
+		netlink.Ports[0].ContainerPort != ServiceGRPCPort {
+		t.Fatalf("netlink listener = %+v", netlink.Ports)
+	}
+	if envValues(netlink.Env)[EnvKubernetesGRPCPort] != "8080" {
+		t.Fatalf("netlink listener env = %+v", netlink.Env)
+	}
+	if len(netlink.Env) < 3 || netlink.Env[0].Name != EnvKubernetesGRPCPort {
+		t.Fatalf("managed listener env must precede endpoint expansion: %+v", netlink.Env)
+	}
+	if envValues(netlink.Env)[envNetlinkServerEndpoint] != "[::]:$(YANET_KUBERNETES_GRPC_PORT)" ||
+		envValues(netlink.Env)[envNetlinkServerAdvertiseEndpoint] !=
+			"yanet-firewall-netlink-dataplane-sidecar:8080" {
+		t.Fatalf("netlink server env = %+v", netlink.Env)
+	}
+
+	bird := &pod.InitContainers[1]
+	if bird.Name != yanetv2alpha1.BirdSidecarContainerName {
+		t.Fatalf("second native sidecar = %q, want BIRD", bird.Name)
+	}
+	if bird.RestartPolicy == nil || *bird.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("BIRD restartPolicy = %v, want Always", bird.RestartPolicy)
+	}
+	if bird.SecurityContext != nil && bird.SecurityContext.Capabilities != nil &&
+		len(bird.SecurityContext.Capabilities.Add) != 0 {
+		t.Fatalf("BIRD must not receive capabilities: %+v", bird.SecurityContext)
+	}
+	if !hasMount(bird.VolumeMounts, "/run/bird", false) {
+		t.Fatalf("BIRD socket mount = %+v", bird.VolumeMounts)
+	}
+	if len(bird.Ports) != 3 {
+		t.Fatalf("BIRD protocol ports = %+v", bird.Ports)
+	}
+	if pod.HostNetwork {
+		t.Fatal("native sidecars must share the default dataplane Pod network")
+	}
+	configMaps := InlineConfigMaps(ctxV2(), c)
+	if len(configMaps) != 1 {
+		t.Fatalf("native sidecar inline ConfigMaps = %+v", configMaps)
+	}
+}
+
+func TestConfigureListenersRejectsTargetPortNameCollision(t *testing.T) {
+	component := &helpers.ResolvedComponent{
+		Kind:  helpers.KindDataplane,
+		Name:  "dataplane",
+		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
+		NativeSidecars: []helpers.ResolvedContainer{{
+			Name:  yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+			Image: helpers.ResolvedImage{Name: "netlink", Tag: "v2"},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), component)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	deployment := deployments[0]
+	deployment.Spec.Template.Spec.Containers[0].Ports = []corev1.ContainerPort{{
+		Name:          NetlinkGRPCTargetPort,
+		ContainerPort: 9000,
+	}}
+	if err := ConfigureListeners(deployment, component, nil); err == nil {
+		t.Fatal("duplicate netlink target port name must be rejected")
+	}
+}
+
+func TestBuildDeployments_Dataplane_NativeSidecarHostNetwork(t *testing.T) {
+	hostNetwork := true
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image:       helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
+		HostNetwork: &hostNetwork,
+		NativeSidecars: []helpers.ResolvedContainer{{
+			Name:  yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+			Image: helpers.ResolvedImage{Name: "netlink-dataplane-sidecar", Tag: "v2"},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	if !deployments[0].Spec.Template.Spec.HostNetwork {
+		t.Fatal("explicit hostNetwork=true must be preserved")
+	}
+	if deployments[0].Spec.Template.Spec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
+		t.Fatalf("host-network DNS policy = %q, want ClusterFirstWithHostNet", deployments[0].Spec.Template.Spec.DNSPolicy)
+	}
+}
+
 // TestBuildDeployments_Controlplane_ShmemBaseline pins the shmem-arena
 // mount + hostIPC the controlplane needs, and asserts it is NOT privileged
 // and gets no device nodes.
@@ -277,7 +458,6 @@ func TestBuildDeployments_Controlplane_ShmemBaseline(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:  8080,
 		Numa:  1,
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
@@ -307,16 +487,14 @@ func TestBuildDeployments_Controlplane_ShmemBaseline(t *testing.T) {
 	}
 }
 
-// TestBuildDeployments_BirdSocketMounts checks that bird gets the shared
-// /run/bird socket dir read-write, while bird-adapter and announcer get it
-// read-only — all as a hostPath so the separate Pods share the socket.
+// TestBuildDeployments_BirdSocketMounts checks that bird-adapter and announcer
+// get the node-local BIRD socket read-only.
 func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 	cases := []struct {
 		kind   helpers.ComponentKind
 		name   string
 		wantRO bool
 	}{
-		{helpers.KindBird, "bird", false},
 		{helpers.KindBirdAdapter, "birdAdapter", true},
 		{helpers.KindAnnouncer, "announcer", true},
 	}
@@ -346,13 +524,11 @@ func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 				t.Errorf("%s: run-bird must be a hostPath /run/bird: %+v", tc.name, pod.Volumes)
 			}
 			// Config mount must survive alongside the socket mount.
-			if !hasMount(pod.Containers[0].VolumeMounts, defaultConfigMountPath(tc.kind), true) {
+			if !hasMount(pod.Containers[0].VolumeMounts, defaultConfigMountPath, true) {
 				t.Errorf("%s: config mount missing", tc.name)
 			}
-			// Only bird peers BGP over the host network.
-			wantHostNet := tc.kind == helpers.KindBird
-			if pod.HostNetwork != wantHostNet {
-				t.Errorf("%s: hostNetwork = %v, want %v", tc.name, pod.HostNetwork, wantHostNet)
+			if pod.HostNetwork {
+				t.Errorf("%s: hostNetwork must be false", tc.name)
 			}
 		})
 	}
@@ -362,8 +538,8 @@ func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 
 func TestBuildDeployments_DisabledHasZeroReplicas(t *testing.T) {
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindBird, Name: "bird", Enabled: false,
-		Image: helpers.ResolvedImage{Name: "bird", Tag: "x"}, Port: 179,
+		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: false,
+		Image: helpers.ResolvedImage{Name: "announcer", Tag: "x"},
 	}
 	deps, _ := BuildDeployments(ctxV2(), c)
 	if r := deps[0].Spec.Replicas; r == nil || *r != 0 {
@@ -377,7 +553,6 @@ func TestBuildDeployments_Operator_MultiContainerHostIPC(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindOperator, Name: "antiddos", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "antiddos-op", Tag: "v0.5"},
-		Port:  9001,
 		Containers: []helpers.ResolvedContainer{
 			{Name: "operator", Image: helpers.ResolvedImage{Name: "antiddos-op", Tag: "v0.5"}},
 			{Name: "agent", Image: helpers.ResolvedImage{Name: "antiddos-agent", Tag: "v0.5"}, HostIPC: true},
@@ -429,7 +604,6 @@ func TestBuildDeployments_Operator_NoHostIPC_NoShmem(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindOperator, Name: "route", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "route-op", Tag: "v0.4"},
-		Port:  9001,
 		Containers: []helpers.ResolvedContainer{
 			{Name: "route", Image: helpers.ResolvedImage{Name: "route-op", Tag: "v0.4"}},
 		},
@@ -447,23 +621,46 @@ func TestBuildDeployments_Operator_NoHostIPC_NoShmem(t *testing.T) {
 	}
 }
 
+func TestBuildDeployments_Operator_ManagedListener(t *testing.T) {
+	c := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "route", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "route-op", Tag: "v1"},
+		Containers: []helpers.ResolvedContainer{{
+			Name: "route", Image: helpers.ResolvedImage{Name: "route-op", Tag: "v1"},
+		}},
+	}
+	deployments, err := BuildDeployments(ctxV2(), c)
+	if err != nil {
+		t.Fatalf("BuildDeployments: %v", err)
+	}
+	container := &deployments[0].Spec.Template.Spec.Containers[0]
+	if len(container.Ports) != 1 || container.Ports[0].Name != ListenerGRPC ||
+		container.Ports[0].ContainerPort != ServiceGRPCPort {
+		t.Fatalf("listener ports = %+v", container.Ports)
+	}
+	if envValues(container.Env)[EnvKubernetesGRPCPort] != "8080" {
+		t.Fatalf("listener env = %+v", container.Env)
+	}
+}
+
 // --- ConfigSource branches --------------------------------------------------
 
 func TestBuildDeployments_Config_HostPath(t *testing.T) {
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindBird, Name: "bird", Enabled: true,
-		Image:  helpers.ResolvedImage{Name: "bird", Tag: "x"},
-		Port:   179,
-		Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/bird"},
+		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "x"},
+		NativeSidecars: []helpers.ResolvedContainer{{
+			Name:   yanetv2alpha1.BirdSidecarContainerName,
+			Image:  helpers.ResolvedImage{Name: "bird", Tag: "x"},
+			Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/bird"},
+		}},
 	}
 	deps, _ := BuildDeployments(ctxV2(), c)
 	pod := deps[0].Spec.Template.Spec
-	// The config volume is built first; bird also gets the shared
-	// /run/bird socket volume (see TestBuildDeployments_BirdSocketMounts).
-	if pod.Volumes[0].HostPath == nil || pod.Volumes[0].HostPath.Path != "/etc/bird" {
+	if pod.Volumes[4].HostPath == nil || pod.Volumes[4].HostPath.Path != "/etc/bird" {
 		t.Errorf("hostPath config volume not set: %+v", pod.Volumes)
 	}
-	if mp := pod.Containers[0].VolumeMounts[0].MountPath; mp != "/etc/bird" {
+	if mp := pod.InitContainers[0].VolumeMounts[0].MountPath; mp != "/etc/bird" {
 		t.Errorf("bird mount path = %q, want /etc/bird", mp)
 	}
 }
@@ -472,7 +669,6 @@ func TestBuildDeployments_Config_Inline_GeneratesConfigMap(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
 		Image:  helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:   8080,
 		Config: &yanetv2alpha1.ConfigSource{Inline: "foo: bar"},
 		Numa:   1,
 	}
@@ -499,7 +695,6 @@ func TestBuildDeployments_Config_URL_EmptyDir(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: true,
 		Image:  helpers.ResolvedImage{Name: "an", Tag: "x"},
-		Port:   9090,
 		Config: &yanetv2alpha1.ConfigSource{URL: "https://x/y"},
 	}
 	deps, _ := BuildDeployments(ctxV2(), c)
@@ -535,8 +730,8 @@ func TestBuildDeployments_NoNodeName_NoNodeSelector(t *testing.T) {
 	ctx := ctxV2()
 	ctx.NodeName = ""
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindBird, Name: "bird", Enabled: true,
-		Image: helpers.ResolvedImage{Name: "bird", Tag: "x"}, Port: 179,
+		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: true,
+		Image: helpers.ResolvedImage{Name: "announcer", Tag: "x"},
 	}
 	deps, _ := BuildDeployments(ctx, c)
 	if deps[0].Spec.Template.Spec.NodeSelector != nil {
@@ -576,7 +771,6 @@ func TestSingleDeploymentName_LowerKebab(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "bird-adapter", Tag: "v0.3"},
-		Port:  50052,
 	}
 	name := singleDeploymentName(ctx, c)
 	for _, ch := range name {
@@ -593,7 +787,6 @@ func TestBuildDeployments_BirdAdapter_ContainerNameIsRFC1123(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "bird-adapter", Tag: "v0.3"},
-		Port:  50052,
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
 	if err != nil {
@@ -695,7 +888,6 @@ func TestBuildDeployments_Controlplane_PerNumaConfigArgs(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:  8080,
 		Numa:  3,
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
@@ -715,6 +907,79 @@ func TestBuildDeployments_Controlplane_PerNumaConfigArgs(t *testing.T) {
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("d[%d] args mismatch (-want +got):\n%s", i, diff)
 		}
+	}
+}
+
+func TestBuildDeployments_Controlplane_NumaPlaceholderKeepsPhysicalIndices(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		wantFormat string
+	}{
+		{
+			name:       "target config layout",
+			path:       "/etc/yanet2/controlplane.d/numa{numa}.yaml",
+			wantFormat: "/etc/yanet2/controlplane.d/numa%d.yaml",
+		},
+		{
+			name:       "yml placeholder",
+			path:       "/etc/yanet2/controlplane.d/numa{numa}.yml",
+			wantFormat: "/etc/yanet2/controlplane.d/numa%d.yml",
+		},
+		{
+			name:       "repeated placeholder without yaml extension",
+			path:       "/etc/yanet2/numa{numa}/config-{numa}",
+			wantFormat: "/etc/yanet2/numa%[1]d/config-%[1]d",
+		},
+		{
+			name:       "legacy literal path",
+			path:       "/etc/yanet2/controlplane.yaml",
+			wantFormat: "/etc/yanet2/controlplane-%d.yaml",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := ctxV2()
+			ctx.NumaCount = 4
+			component := &helpers.ResolvedComponent{
+				Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+				Image:        helpers.ResolvedImage{Name: "controlplane", Tag: "v2"},
+				DisabledNuma: []int32{0, 2},
+				Config: &yanetv2alpha1.ConfigSource{
+					HostPath: "/etc/yanet2",
+					Args:     []string{"-c", tt.path},
+				},
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				deployments, err := BuildDeployments(ctx, component)
+				if err != nil {
+					t.Fatalf("BuildDeployments: %v", err)
+				}
+				if len(deployments) != 2 {
+					t.Fatalf("deployments = %d, want physical NUMA domains 1 and 3", len(deployments))
+				}
+				for i, numa := range []int{1, 3} {
+					deployment := deployments[i]
+					want := []string{"-c", fmt.Sprintf(tt.wantFormat, numa)}
+					if diff := cmp.Diff(want, deployment.Spec.Template.Spec.Containers[0].Args); diff != "" {
+						t.Errorf("NUMA %d args mismatch (-want +got):\n%s", numa, diff)
+					}
+					if !strings.HasSuffix(deployment.Name, fmt.Sprintf("-numa%d", numa)) {
+						t.Errorf("deployment name %q lost physical NUMA index %d", deployment.Name, numa)
+					}
+					for _, labels := range []map[string]string{
+						deployment.Labels, deployment.Spec.Selector.MatchLabels, deployment.Spec.Template.Labels,
+					} {
+						if labels[labelNuma] != fmt.Sprint(numa) {
+							t.Errorf("labels lost physical NUMA index %d: %v", numa, labels)
+						}
+					}
+				}
+				if diff := cmp.Diff([]string{"-c", tt.path}, component.Config.Args); diff != "" {
+					t.Fatalf("shared ConfigSource args were mutated (-want +got):\n%s", diff)
+				}
+			}
+		})
 	}
 }
 
@@ -777,7 +1042,6 @@ func TestBuildDeployments_Controlplane_DisabledNuma(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
 		Image:        helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:         8080,
 		Numa:         2,
 		DisabledNuma: []int32{1},
 		Config: &yanetv2alpha1.ConfigSource{
@@ -808,12 +1072,11 @@ func TestBuildDeployments_Controlplane_DisabledNuma(t *testing.T) {
 
 // TestBuildDeployments_Controlplane_DisabledNumaKeepsIndices verifies that
 // disabling a LOW index does not shift the remaining instances: NUMA 1 keeps
-// index 1, its own config file and port 8080+1.
+// index 1 and its own config file.
 func TestBuildDeployments_Controlplane_DisabledNumaKeepsIndices(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
 		Image:        helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:         8080,
 		Numa:         2,
 		DisabledNuma: []int32{0},
 		Config: &yanetv2alpha1.ConfigSource{
@@ -839,8 +1102,8 @@ func TestBuildDeployments_Controlplane_DisabledNumaKeepsIndices(t *testing.T) {
 	if diff := cmp.Diff(want, d.Spec.Template.Spec.Containers[0].Args); diff != "" {
 		t.Errorf("args mismatch (-want +got):\n%s", diff)
 	}
-	if port := d.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort; port != 8081 {
-		t.Errorf("container port = %d, want 8081", port)
+	if port := d.Spec.Template.Spec.Containers[0].Ports[0].ContainerPort; port != ServiceGRPCPort {
+		t.Errorf("container port = %d, want %d", port, ServiceGRPCPort)
 	}
 }
 
@@ -850,7 +1113,6 @@ func TestBuildDeployments_Controlplane_DisabledNumaOutOfRange(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
 		Image:        helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-		Port:         8080,
 		Numa:         2,
 		DisabledNuma: []int32{7, 7, -1},
 	}

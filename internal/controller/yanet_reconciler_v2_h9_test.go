@@ -326,7 +326,7 @@ func TestMergeManagedMeta_DeterministicTrackerOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// F23: applyDeploymentV2 / applyServiceV2 RetryOnConflict + label merge (R9+R10)
+// F23: Deployment and shared Service apply safety (R9+R10)
 // ---------------------------------------------------------------------------
 
 // TestApplyDeploymentV2_RetriesConflictAndMergesLabels: the first
@@ -335,7 +335,10 @@ func TestMergeManagedMeta_DeterministicTrackerOrder(t *testing.T) {
 func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 	existing := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "cp", Namespace: "yanet", ResourceVersion: "10",
+			Name:            "cp",
+			Namespace:       "yanet",
+			ResourceVersion: "10",
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
 			Labels: map[string]string{
 				"sidecar.istio.io/inject": "true",
 				manifests.LabelYanet:      "y",
@@ -345,7 +348,9 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 	}
 	desired := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "cp", Namespace: "yanet",
+			Name:            "cp",
+			Namespace:       "yanet",
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
 			Labels: map[string]string{
 				manifests.LabelYanet: "y",
 				"v":                  "new",
@@ -373,7 +378,7 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 		Build()
 	r := &YanetV2Reconciler{Client: cl, Scheme: s}
 
-	state, requeue := r.applyDeploymentV2(
+	state, requeue, err := r.applyDeploymentV2(
 		context.Background(),
 		desired.DeepCopy(),
 		true, // autoSync
@@ -381,6 +386,9 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 		"node-A",
 		silentLogger(),
 	)
+	if err != nil {
+		t.Fatalf("applyDeploymentV2: %v", err)
+	}
 	if state != "synced" {
 		t.Errorf("state=%q want synced (requeue=%v)", state, requeue)
 	}
@@ -399,10 +407,108 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 	}
 }
 
-// TestApplyServiceV2_RefusesEmptyPorts ensures the R15 guard prevents
+func TestApplyDeploymentV2_RevalidatesOwnershipInsideRetry(t *testing.T) {
+	existing := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name:            "cp",
+		Namespace:       "yanet",
+		OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
+		Labels:          map[string]string{"v": "old"},
+	}}
+	desired := existing.DeepCopy()
+	desired.Labels = map[string]string{"v": "new"}
+	s := newSchemeForTest(t)
+	var gets int32
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := c.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+				if atomic.AddInt32(&gets, 1) == 2 {
+					deployment := obj.(*appsv1.Deployment)
+					foreign := yanetV2OwnerReferenceForTest()
+					foreign.Name = "other"
+					deployment.OwnerReferences = []metav1.OwnerReference{foreign}
+				}
+				return nil
+			},
+		}).
+		Build()
+	r := &YanetV2Reconciler{Client: cl, Scheme: s}
+
+	state, _, err := r.applyDeploymentV2(
+		context.Background(), desired, true, 0, "node-A", silentLogger(),
+	)
+	if err == nil || state != "error" {
+		t.Fatalf("ownership change during retry must abort update, state=%q err=%v", state, err)
+	}
+}
+
+func TestReconcileYanetV2_PruneFailureReturnsErrorAndDegrades(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", AutoSync: &autoSync,
+		},
+	}
+	orphan := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "orphan", Namespace: "yanet",
+			Labels:          map[string]string{manifests.LabelYanet: yanet.Name},
+			OwnerReferences: []metav1.OwnerReference{yanetV2OwnerReferenceForTest()},
+		},
+	}
+	s := newSchemeForTest(t)
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(yanet, orphan).
+		WithStatusSubresource(&yanetv2alpha1.YanetV2{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == orphan.Name {
+					return errConflict("transient delete failure")
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &YanetV2Reconciler{
+		Client: cl,
+		Scheme: s,
+		GlobalConfigV2: &yanetv2alpha1.MutexYanetConfigSpec{
+			Config: minimalConfigV2(),
+		},
+	}
+
+	result, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "prune orphans") {
+		t.Fatalf("prune failure must be returned, got result=%+v err=%v", result, err)
+	}
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("prune failure must request a retry, got %+v", result)
+	}
+
+	got := &yanetv2alpha1.YanetV2{}
+	if err := cl.Get(context.Background(), client.ObjectKey{Name: yanet.Name, Namespace: yanet.Namespace}, got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	for _, condition := range got.Status.Conditions {
+		if condition.Type == "Degraded" && condition.Status == metav1.ConditionTrue && condition.Reason == "ReconcileFailed" {
+			return
+		}
+	}
+	t.Fatalf("prune failure was not reflected in status: %+v", got.Status.Conditions)
+}
+
+// TestApplySharedServiceV2_RefusesEmptyPorts ensures the R15 guard prevents
 // wiping ports of an existing Service when the builder accidentally
 // returns an empty Ports slice.
-func TestApplyServiceV2_RefusesEmptyPorts(t *testing.T) {
+func TestApplySharedServiceV2_RefusesEmptyPorts(t *testing.T) {
 	existing := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet"},
 		Spec: corev1.ServiceSpec{
@@ -422,11 +528,10 @@ func TestApplyServiceV2_RefusesEmptyPorts(t *testing.T) {
 	}
 	s := newSchemeForTest(t)
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
-	rec := events.NewFakeRecorder(8)
-	r := &YanetV2Reconciler{Client: cl, Scheme: s, Recorder: rec}
+	r := &YanetConfigReconcilerV2{Client: cl, Scheme: s}
 
-	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err != nil {
-		t.Fatalf("applyServiceV2 must not bubble error: %v", err)
+	if err := r.applySharedServiceV2(context.Background(), desired); err == nil {
+		t.Fatal("applySharedServiceV2 must report an empty-ports builder error")
 	}
 	got := &corev1.Service{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, got); err != nil {
@@ -435,20 +540,11 @@ func TestApplyServiceV2_RefusesEmptyPorts(t *testing.T) {
 	if len(got.Spec.Ports) != 2 {
 		t.Errorf("existing Service must keep its 2 Ports, got %d (%+v)", len(got.Spec.Ports), got.Spec.Ports)
 	}
-	// Confirm a Warning event was emitted.
-	select {
-	case e := <-rec.Events:
-		if !strings.Contains(e, "ServiceInvalid") {
-			t.Errorf("expected ServiceInvalid event, got %q", e)
-		}
-	default:
-		t.Errorf("expected at least one event")
-	}
 }
 
-// TestApplyServiceV2_RefusesEmptySelector mirrors the above but for
+// TestApplySharedServiceV2_RefusesEmptySelector mirrors the above but for
 // the Selector guard.
-func TestApplyServiceV2_RefusesEmptySelector(t *testing.T) {
+func TestApplySharedServiceV2_RefusesEmptySelector(t *testing.T) {
 	existing := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet"},
 		Spec: corev1.ServiceSpec{
@@ -465,11 +561,10 @@ func TestApplyServiceV2_RefusesEmptySelector(t *testing.T) {
 	}
 	s := newSchemeForTest(t)
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
-	rec := events.NewFakeRecorder(8)
-	r := &YanetV2Reconciler{Client: cl, Scheme: s, Recorder: rec}
+	r := &YanetConfigReconcilerV2{Client: cl, Scheme: s}
 
-	if err := r.applyServiceV2(context.Background(), desired, true, silentLogger()); err != nil {
-		t.Fatalf("applyServiceV2 must not bubble error: %v", err)
+	if err := r.applySharedServiceV2(context.Background(), desired); err == nil {
+		t.Fatal("applySharedServiceV2 must report an empty-selector builder error")
 	}
 	got := &corev1.Service{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, got); err != nil {
@@ -477,6 +572,44 @@ func TestApplyServiceV2_RefusesEmptySelector(t *testing.T) {
 	}
 	if len(got.Spec.Selector) != 1 {
 		t.Errorf("existing Selector must remain, got %v", got.Spec.Selector)
+	}
+}
+
+func TestApplySharedServiceV2_RefusesForeignService(t *testing.T) {
+	existing := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared", Namespace: "yanet"},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "foreign"},
+			Ports:    []corev1.ServicePort{{Name: "grpc", Port: 9000}},
+		},
+	}
+	controller := true
+	desired := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "shared", Namespace: "yanet",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "yanet.yanet-platform.io/v2alpha1", Kind: "YanetConfigV2",
+				Name: yanetv2alpha1.YanetConfigName, UID: "config-uid", Controller: &controller,
+			}},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": "route"},
+			Ports:    []corev1.ServicePort{{Name: "grpc", Port: 9000}},
+		},
+	}
+	s := newSchemeForTest(t)
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+	r := &YanetConfigReconcilerV2{Client: cl, Scheme: s}
+
+	if err := r.applySharedServiceV2(context.Background(), desired); err == nil {
+		t.Fatal("a Service without the YanetConfigV2 owner must not be taken over")
+	}
+	got := &corev1.Service{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "shared", Namespace: "yanet"}, got); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.Selector["app"] != "foreign" {
+		t.Fatalf("foreign Service was overwritten: %+v", got.Spec.Selector)
 	}
 }
 

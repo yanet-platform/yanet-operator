@@ -34,7 +34,7 @@ import (
 )
 
 var _ = Describe("Status Reporting E2E Tests", func() {
-	ctx := context.Background()
+	testContext := context.Background()
 
 	Context("V1 API - Status reporting", func() {
 		const (
@@ -45,7 +45,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 		var node *corev1.Node
 
 		BeforeEach(func() {
-			ensureNamespace(ctx, ns)
+			ensureNamespace(testContext, ns)
 
 			config = &yanetv1alpha1.YanetConfig{
 				ObjectMeta: metav1.ObjectMeta{
@@ -57,7 +57,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					Stop:         false,
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconciler time to update GlobalConfig snapshot
 			time.Sleep(2000 * time.Millisecond)
@@ -70,17 +70,17 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 		})
 
 		AfterEach(func() {
-			cleanupYanetV1(ctx, ns)
-			cleanupDeployments(ctx, ns)
+			cleanupYanetV1(testContext, ns)
+			cleanupDeployments(testContext, ns)
 			if node != nil {
-				_ = k8sClient.Delete(ctx, node)
+				_ = k8sClient.Delete(testContext, node)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
@@ -93,12 +93,12 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync: true,
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Wait for deployments to be created first
 			Eventually(func() int {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(ns)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(ns)); err != nil {
 					return 0
 				}
 				return len(depList.Items)
@@ -108,7 +108,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 			// Now check that status is updated
 			Eventually(func() int {
 				current := &yanetv1alpha1.Yanet{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-synced-v1", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-synced-v1", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Sync.Synced) + len(current.Status.Sync.Disabled)
@@ -133,11 +133,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
 				current := &yanetv1alpha1.Yanet{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-disabled-v1", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-disabled-v1", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Sync.Disabled)
@@ -158,34 +158,31 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 		var node *corev1.Node
 
 		BeforeEach(func() {
-			ensureNamespace(ctx, ns)
+			ensureNamespace(testContext, ns)
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "status-config-v2",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/dp", Tag: "v1"},
-							Port:  8081,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{
 						Name: boxTypeNm,
 						Components: yanetv2alpha1.BoxComponents{
 							Controlplane: &yanetv2alpha1.BoxComponent{},
-							Dataplane:    &yanetv2alpha1.BoxComponent{},
+							Dataplane:    &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconcilerV2 time to update GlobalConfigV2 snapshot
 			time.Sleep(1000 * time.Millisecond)
@@ -201,18 +198,18 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 		})
 
 		AfterEach(func() {
-			cleanupYanetV2(ctx, ns)
-			cleanupDeployments(ctx, ns)
-			cleanupServices(ctx, ns)
+			cleanupYanetV2(testContext, ns)
+			cleanupDeployments(testContext, ns)
+			cleanupServices(testContext, ns)
 			if node != nil {
-				_ = k8sClient.Delete(ctx, node)
+				_ = k8sClient.Delete(testContext, node)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
@@ -225,11 +222,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-synced-v2", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-synced-v2", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Sync.Synced)
@@ -246,11 +243,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() bool {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-nodes-v2", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-nodes-v2", Namespace: ns}, current); err != nil {
 					return false
 				}
 				_, ok := current.Status.NodesStatus[nodeName]
@@ -268,11 +265,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-services-v2", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-services-v2", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Services)
@@ -289,11 +286,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(false), // do not create; report drift
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-outofsync-v2", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-outofsync-v2", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Sync.OutOfSync)
@@ -301,7 +298,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 				"missing deployments must be reported as OutOfSync when autoSync=false")
 
 			// And no deployments should actually be created.
-			Expect(countDeployments(ctx, ns)).Should(Equal(0))
+			Expect(countDeployments(testContext, ns)).Should(Equal(0))
 		})
 
 		It("Should update Status when toggling autoSync false->true", func() {
@@ -313,25 +310,25 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(false),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Initially OutOfSync (nothing created).
 			Eventually(func() int {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-toggle-v2", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-toggle-v2", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Sync.OutOfSync)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0))
 
 			// Toggle to true.
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "status-toggle-v2", Namespace: ns}, yanet)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, types.NamespacedName{Name: "status-toggle-v2", Namespace: ns}, yanet)).Should(Succeed())
 			yanet.Spec.AutoSync = helpers.PtrBool(true)
-			Expect(k8sClient.Update(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "status-toggle-v2", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "status-toggle-v2", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.Sync.Synced)
@@ -353,12 +350,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 		var n1, n2 *corev1.Node
 
 		BeforeEach(func() {
-			ensureNamespace(ctx, ns)
+			ensureNamespace(testContext, ns)
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "multinode-config",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -373,12 +369,12 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 						Name: boxTypeNm,
 						Components: yanetv2alpha1.BoxComponents{
 							Controlplane: &yanetv2alpha1.BoxComponent{},
-							Dataplane:    &yanetv2alpha1.BoxComponent{},
+							Dataplane:    &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconcilerV2 time to update GlobalConfigV2 snapshot
 			time.Sleep(1000 * time.Millisecond)
@@ -389,7 +385,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					Capacity: corev1.ResourceList{"hugepages-1Gi": resourceMustParse("10Gi")},
 				},
 			}
-			Expect(k8sClient.Create(ctx, n1)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, n1)).Should(Succeed())
 
 			n2 = &corev1.Node{
 				ObjectMeta: metav1.ObjectMeta{Name: node2, Labels: map[string]string{selKey: selVal}},
@@ -397,21 +393,21 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					Capacity: corev1.ResourceList{"hugepages-1Gi": resourceMustParse("10Gi")},
 				},
 			}
-			Expect(k8sClient.Create(ctx, n2)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, n2)).Should(Succeed())
 		})
 
 		AfterEach(func() {
-			cleanupYanetV2(ctx, ns)
-			cleanupDeployments(ctx, ns)
-			cleanupServices(ctx, ns)
+			cleanupYanetV2(testContext, ns)
+			cleanupDeployments(testContext, ns)
+			cleanupServices(testContext, ns)
 			if n1 != nil {
-				_ = k8sClient.Delete(ctx, n1)
+				_ = k8sClient.Delete(testContext, n1)
 			}
 			if n2 != nil {
-				_ = k8sClient.Delete(ctx, n2)
+				_ = k8sClient.Delete(testContext, n2)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
@@ -424,11 +420,11 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
 				current := &yanetv2alpha1.YanetV2{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "multinode-yanet", Namespace: ns}, current); err != nil {
+				if err := k8sClient.Get(testContext, types.NamespacedName{Name: "multinode-yanet", Namespace: ns}, current); err != nil {
 					return 0
 				}
 				return len(current.Status.NodesStatus)
@@ -436,7 +432,7 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 				"Status.NodesStatus should track both nodes")
 
 			current := &yanetv2alpha1.YanetV2{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "multinode-yanet", Namespace: ns}, current)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, types.NamespacedName{Name: "multinode-yanet", Namespace: ns}, current)).Should(Succeed())
 			Expect(current.Status.NodesStatus).Should(HaveKey(node1))
 			Expect(current.Status.NodesStatus).Should(HaveKey(node2))
 		})

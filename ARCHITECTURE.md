@@ -23,7 +23,7 @@ so the API server never converts between them and never prunes fields.
 | `v1alpha1` | `yanets.yanet-platform.io`           | `Yanet`         | Legacy single-node CR (backward-compatible, untouched).   |
 | `v1alpha1` | `yanetconfigs.yanet-platform.io`     | `YanetConfig`   | Legacy global config + AutoDiscovery.                     |
 | `v2alpha1` | `yanetsv2.yanet-platform.io`        | `YanetV2`       | Component-based CR (boxType + nodeSelector + overrides).  |
-| `v2alpha1` | `yanetconfigsv2.yanet-platform.io`   | `YanetConfigV2` | Component palette + named patches + `boxTypes` registry.  |
+| `v2alpha1` | `yanetconfigsv2.yanet-platform.io`   | `YanetConfigV2` | Cluster-scoped singleton named `config`: component palette + patches + `boxTypes`. |
 
 The operator does not migrate v1 CRs to v2; the two surfaces are handled by
 two independent controllers (see below) and reconcile fully independently.
@@ -118,9 +118,9 @@ The v2alpha1 design separates three independent axes of configuration:
 │ YanetConfig (cluster-wide, in-memory snapshot)                  │
 │                                                                 │
 │  spec.components       — palette of available components        │
-│    ├─ controlplane     — 5 hardcoded slots                      │
+│    ├─ controlplane     — 4 fixed workload slots                 │
 │    ├─ dataplane                                                 │
-│    ├─ bird                                                      │
+│    │    └─ sidecars    — bird + netlink-dataplane-sidecar       │
 │    ├─ birdAdapter                                               │
 │    ├─ announcer                                                 │
 │    └─ operators[]      — dynamic, by name                       │
@@ -151,21 +151,27 @@ The v2alpha1 design separates three independent axes of configuration:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-Per-installation customisation is intentionally narrow: only per-container
-`image.{name,tag}` (under `containers.<name>`) and `enabled` are accepted on
-the Yanet CR. The intrinsic security/mount baseline each component cannot run
-without is emitted by the builder itself (the dataplane's privileged +
-hostNetwork/hostIPC + minimal host devices, and the controlplane's hostIPC +
-`/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
+Per-installation customisation is intentionally narrow: per-container
+`image.{name,tag}` (under `containers.<name>`), workload `enabled`, dataplane
+native-sidecar `enabled`, and controlplane `disabledNuma` are accepted on the
+Yanet CR. The intrinsic security/mount baseline each component cannot run
+without is emitted by the builder itself (the dataplane's privileged + hostIPC
++ minimal host devices, the netlink sidecar's privileged + read-only netplan,
+and the controlplane's hostIPC + `/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
 `applyControlplaneShmem` in `builder_v2.go`). Everything optional beyond that
 (annotations, postStart, extra hostIPC/privileged for operators, resources)
 belongs in a NamedPatch.
 
-The container key inside `containers` must match the rendered container name
-— for the 5 hardcoded components it equals the component kind itself
-(`controlplane`, `dataplane`, `bird`, `birdAdapter`, `announcer`); for
-operators it equals the `OperatorContainer.name` declared in YanetConfig
-(which is mandatory).
+The container key inside `containers` must match the rendered container name.
+Fixed workloads use their own names; dataplane also accepts the native-sidecar
+names `bird` and `netlink-dataplane-sidecar`. Operators use the mandatory
+`OperatorContainer.name` declared in YanetConfigV2.
+
+Each palette `image` may set `registry` and `prefix` independently. An omitted
+field inherits the corresponding `spec.images` value; an explicit empty string
+clears that part of the image path. These fields are not accepted in
+`YanetV2` container overrides, which remain limited to `name`, `tag`, and native
+sidecar `enabled`.
 
 ### CR shape
 
@@ -175,20 +181,37 @@ operators it equals the `OperatorContainer.name` declared in YanetConfig
 spec:
   stop: false
   updateWindow: 0
+  hostNetworkPortRange: { start: 20000, end: 20100 }
   images: { registry: ..., prefix: ..., pullPolicy: IfNotPresent }
   components:
-    controlplane: { image: {...}, port: 8080, portRange: 4, numa: 2 }
-    dataplane:    { image: {...}, port: 8081, hugepages: { size: 1Gi, count: 8 } }
-    bird:         { image: {...}, port: 179 }
+    controlplane:
+      image: {...}
+      numa: 2
+    dataplane:
+      image: {...}
+      hugepages: { size: 1Gi, count: 8 }
+      hostNetwork: false
+      sidecars:
+        bird: { image: {...} }
+        netlinkDataplaneSidecar: { image: {...} }
     birdAdapter:  { image: {...} }
-    announcer:    { image: {...}, port: 9090 }
+    announcer:    { image: {...} }
     operators:
       - name: antiddos
-        port: 9001
         containers:
           - { name: operator, image: {...} }
           - { name: agent,    image: {...}, hostIPC: true }
   patches:
+    - name: controlplane-listener
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  env:
+                    - name: YANET_GATEWAY_ENDPOINT
+                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
     - name: telegraf
       patch:
         spec: { template: { metadata: { annotations: { telegraf...: "8080" } } } }
@@ -197,9 +220,12 @@ spec:
   boxTypes:
     - name: release
       components:
-        controlplane: { patches: [telegraf, cp-resources-release] }
-        dataplane:    { patches: [telegraf, dp-resources] }
-        bird:         { patches: [telegraf] }
+        controlplane: { patches: [controlplane-listener, telegraf, cp-resources-release] }
+        dataplane:
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
+          patches: [telegraf, dp-resources]
       operators:
         antiddos:     { patches: [telegraf] }
 ```
@@ -223,7 +249,7 @@ spec:
 Yanet CR change ────┐
 Node change      ───┼─►  YanetReconciler.Reconcile
 Pod change       ───┤        │
-YanetConfigV2    ───┘        │  (read-only via in-memory snapshot)
+YanetConfigV2    ───┘        │  (event refreshes the in-memory snapshot first)
 snapshot                     ▼
                     reconcileYanetV2(yanet)
                              │
@@ -240,20 +266,39 @@ snapshot                     ▼
                              │      BuildDeployments   → []Deployment skeletons
                              │      ApplyPatches       → strategic merge in order
                              │      applyDeploymentV2  → CreateOrUpdate (or status only)
-                             │      BuildServices      → ServicePlan[]
+                             │      ConfigureListeners → named ports + effective port env
                              │
-                             ├─ deduplicate ServicePlans across nodes
-                             ├─ applyServiceV2 each
+                             ├─ preflight ServicePlans for Status.Services
                              └─ Status.Sync buckets + per-node summaries
+
+YanetConfigV2 / YanetV2 / Node / owned Service change
+                             │
+                             ▼
+                 YanetConfigReconcilerV2
+                             ├─ aggregate namespace × boxType roles
+                             ├─ apply shared Services owned by config
+                             └─ prune obsolete shared Services
 ```
+
+`YanetConfigV2.spec.stop=true` is checked before finalizer, status, apply, or
+deletion work, so it freezes all v2 resources exactly as they are. A node may be
+claimed by only one `YanetV2`: an existing workload owner wins, otherwise the
+oldest CR (with namespace/name as a stable tie-breaker) wins. A deleting CR keeps
+its claim until finalizer cleanup and object removal complete.
+
+Finalizer cleanup requests foreground deletion of owned Deployments and waits
+for their removal before releasing the finalizer. A successful delete request
+alone does not release the node claim; `spec.stop=true` also pauses this cleanup.
 
 Key files:
 - [`internal/helpers/resolve_v2.go`](internal/helpers/resolve_v2.go) — `ResolveBoxComponent`, `EnabledComponentsForBox`, `FindBoxType`, `FindOperator`, `ShortNodeKey`.
 - [`internal/manifests/builder_v2.go`](internal/manifests/builder_v2.go) — `BuildDeployments`, `InlineConfigMaps`, hugepages, ConfigSource branches.
 - [`internal/manifests/patcher.go`](internal/manifests/patcher.go) — `PatchRegistry`, `ApplyPatches` via `strategicpatch.StrategicMergePatch`.
 - [`internal/manifests/service_v2.go`](internal/manifests/service_v2.go) — `ServicePlan`, `BuildServices`, `ToService`.
+- [`internal/manifests/listeners_v2.go`](internal/manifests/listeners_v2.go) — fixed listener matrix and effective port env.
 - [`internal/controller/yanet_reconciler_v2.go`](internal/controller/yanet_reconciler_v2.go) — orchestration.
-- [`internal/controller/yanetconfig_controller_v2.go`](internal/controller/yanetconfig_controller_v2.go) — snapshot watcher.
+- [`internal/controller/host_network_ports_v2.go`](internal/controller/host_network_ports_v2.go) — deterministic post-patch host port allocation.
+- [`internal/controller/yanetconfig_controller_v2.go`](internal/controller/yanetconfig_controller_v2.go) — snapshot and shared Service owner.
 
 ---
 
@@ -264,26 +309,28 @@ controls how many controlplane Deployments are generated **per node**:
 
 ```
 Node has 2 NUMA domains  ⇒  2 Deployments:
-  yanet-<nodehash>-controlplane-numa0 listening on port + 0
-  yanet-<nodehash>-controlplane-numa1 listening on port + 1
+  <yanet>-<nodehash>-controlplane-numa0
+  <yanet>-<nodehash>-controlplane-numa1
 ```
 
-Three Service categories are generated:
+One shared Service exists per box-type NUMA role, independently of replicas and
+per-installation enablement:
 
-| Service                                     | Selector                                | InternalTrafficPolicy |
-|---------------------------------------------|-----------------------------------------|-----------------------|
-| `<yanet>-<nodehash>-numa{N}` (per-node)     | `app=cp, numa=N, node=<host>`           | `Local`               |
-| `<yanet>-controlplane-numa{N}-cluster` (RR) | `app=cp, numa=N`                        | (none)                |
-| `<yanet>-controlplane-all` (RR)             | `app=cp`                                | (none)                |
+| Service | Selector | Ports | InternalTrafficPolicy |
+|---|---|---|---|
+| `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>, component=controlplane, numa=N` | `grpc:8080`, `http:8081` | `Local` |
 
-Per-node Local services are how an in-node caller (e.g. a pod scheduled to the
-same NUMA domain) reaches the local controlplane instance. Cluster-wide RR
-services are entry points for unaware clients.
+The selector deliberately omits Yanet and node identity. `internalTrafficPolicy: Local`
+keeps callers on their node, while the NUMA label selects the requested gateway.
 
 ### Per-NUMA config files
 
-Each fan-out instance is pointed at its **own** config file. The operator takes
-the config path from `config.args` and appends the NUMA index to its base name:
+Each controlplane fan-out instance is pointed at its **own** config file.
+In `config.args`, `{numa}` is replaced by the physical NUMA index, for example
+`/etc/yanet2/controlplane.d/numa{numa}.yaml` becomes
+`/etc/yanet2/controlplane.d/numa0.yaml`. No extra suffix is added to an argument
+containing the placeholder. Disabled NUMA domains do not renumber the survivors.
+Arguments without the placeholder retain the legacy suffix convention:
 
 ```
 args: [-c, /etc/yanet2/controlplane.yaml]
@@ -291,8 +338,8 @@ args: [-c, /etc/yanet2/controlplane.yaml]
   ⇒ NUMA 1:  -c /etc/yanet2/controlplane-1.yaml
 ```
 
-Only `*.yaml` / `*.yml` argument elements are rewritten; flags and subcommands
-are passed through verbatim. This is required rather than cosmetic: the
+Without `{numa}`, only `*.yaml` / `*.yml` argument elements are rewritten;
+other arguments are passed through verbatim. This is required rather than cosmetic: the
 controlplane reads `gateway.instance_id`, the gateway endpoint and every module
 endpoint **from the file**, and the binary accepts only `-c <path>`. A shared
 file would make every instance serve dataplane instance `0` and contend for the
@@ -303,7 +350,8 @@ file per NUMA domain, each with a matching `instance_id` and port.
 
 A NUMA domain without a NIC runs no dataplane instance, so a controlplane there
 would have no peer to attach to. Such domains are listed in
-`controlplane.disabledNuma` and get **neither a Deployment nor a Service**:
+`controlplane.disabledNuma` and get no Deployment. The shared Service remains so
+its DNS name is stable while an installation is disabled or scaled to zero:
 
 ```yaml
 components:
@@ -313,7 +361,7 @@ components:
 ```
 
 Disabling does **not** renumber the survivors: with `disabledNuma: [0]` the
-remaining instance stays `numa1`, keeps port `port+1` and reads
+remaining instance stays `numa1`, keeps the shared gRPC/HTTP ports and reads
 `controlplane-1.yaml`. Out-of-range and duplicate indices are ignored.
 
 A single installation can override the cluster-wide list via
@@ -324,20 +372,38 @@ unique NUMA layout wants its own `YanetV2` CR selecting just that node.
 
 ### Operator services
 
-When `OperatorSpec.Port > 0`, **one** cluster-wide ClusterIP Service is
-generated, named after the operator (`route-operator`, `antiddos`, …), with
-`internalTrafficPolicy=Local` so callers on the same node hit the local pod
-without leaving the host.
+Every operator wired into a box type gets one shared ClusterIP Service named
+`yanet-<boxType>-<operator>`. `birdAdapter` and `announcer` use the same model;
+the netlink dataplane sidecar gets
+`yanet-<boxType>-netlink-dataplane-sidecar`. BIRD is service-less.
+The netlink Service remains when its box-type slot is declared but disabled,
+or an installation disables the sidecar; disabling it does not remove its DNS name.
 
-Other components (`bird`, `birdAdapter`, `announcer`, `dataplane`) each get
-one simple cluster-wide ClusterIP. `bird` and `birdAdapter` are Local
-(they share a `/run/bird` hostPath socket); the others are not.
+### Listener endpoints
+
+Services expose fixed `grpc:8080` and, where applicable, `http:8081` ports with
+named target ports. A Pod-network workload uses the same numeric target. After
+patches, a service-backed `hostNetwork` workload receives a deterministic target
+from `spec.hostNetworkPortRange`, with fixed BIRD and patch-added ports reserved.
+
+Before applying workloads, the live host-port guard checks Deployments, Pods,
+and ReplicaSets. If a new allocation overlaps another live workload's reserved
+port, preflight fails without applying that migration. Stop the conflicting old
+workloads and wait for their Pods to terminate before retrying. `Recreate` only
+serializes replacements within one Deployment, not port moves between Deployments.
+
+The operator injects `YANET_KUBERNETES_GRPC_PORT` and
+`YANET_KUBERNETES_HTTP_PORT` into the listener container. Runtime-specific
+endpoint variables are added by NamedPatches and can refer to these earlier env
+entries, for example `[::]:$(YANET_KUBERNETES_GRPC_PORT)`. For the fixed netlink
+sidecar, the builder directly supplies `YANET_SERVER_ENDPOINT` and
+`YANET_SERVER_ADVERTISE_ENDPOINT`; the latter advertises its shared Service.
 
 ---
 
 ## 5. ConfigSource — three variants
 
-All five hardcoded components and every operator container can supply a
+Every fixed workload, dataplane native sidecar, and operator container can supply a
 `ConfigSource` ([`api/v2alpha1/config_source.go`](api/v2alpha1/config_source.go)):
 
 | Variant   | What the builder does                                            |
@@ -350,7 +416,8 @@ The webhook enforces that exactly one variant is set.
 
 ### Literal process arguments
 
-`ConfigSource.args` is copied to the container verbatim. The builder does not
+`ConfigSource.args` is copied to the container verbatim except for controlplane
+NUMA substitution described above. The builder does not
 impose a generic config flag because YANET binaries use different conventions:
 dataplane accepts a positional path, controlplane uses `-c`, and bird-adapter
 uses `server -c`. For `hostPath`, args can reference any file in the mounted
@@ -386,11 +453,25 @@ Why strategic merge:
 
 Validation:
 - Webhook enforces uniqueness of names and existence of all references.
+- Dynamic operator names cannot reuse the built-in workload/container identities
+  `controlplane`, `dataplane`, `bird`, `bird-adapter`,
+  `netlink-dataplane-sidecar`, or `announcer`.
 - Webhook **dry-runs** every patch via `strategicpatch.StrategicMergePatch(empty Deployment, patch, appsv1.Deployment{})` so a typo (e.g. `templete:` instead of `template:`) is caught at admit time.
+
+After patching, the builder restores the Deployment name, namespace, controller
+owner, immutable selector, node placement, reserved labels, and `Recreate`
+strategy. Other metadata and Pod fields remain patchable. `Recreate` is required
+because a rolling replacement on the same node would overlap BIRD and managed
+host-network listener ports with the old Pod.
+
+Patches for BIRD or the netlink sidecar target `spec.template.spec.initContainers`
+because Kubernetes native sidecars are restartable init containers with
+`restartPolicy: Always`. All such patches remain attached to the single
+dataplane box slot.
 
 JSON6902 (`jsonPatch`) is intentionally not supported. Service / ConfigMap
 patching is not supported either — those are generated entirely from the
-component definition (`port`, `Hugepages`, `ConfigSource`).
+component definition (`Hugepages`, `ConfigSource`) and the fixed listener matrix.
 
 ---
 

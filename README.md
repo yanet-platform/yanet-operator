@@ -52,10 +52,48 @@ component spec embedded directly in the `Yanet` CR.
 
 ### v2alpha1 — `yanetsv2` / `yanetconfigsv2` ✨
 Component palette + named strategic-merge patches + named `boxTypes`
-live in `YanetConfigV2`. The `YanetV2` CR is minimal: pick a `boxType`,
+live in the cluster-scoped `YanetConfigV2` singleton named `config`. The
+`YanetV2` CR is minimal: pick a `boxType`,
 select nodes via `nodeSelector`, optionally override per-container
-`image.{name,tag}` and `enabled` flags. Per-NUMA controlplane fan-out is
-driven by the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`.
+`image.{name,tag}`, workload/native-sidecar `enabled`, and controlplane
+`disabledNuma`. BIRD and `netlink-dataplane-sidecar` are fixed optional native
+sidecars of the dataplane Pod. Shared Services
+are unconditional for service-backed roles and are named
+`yanet-<boxType>-<component>[-numa<N>]` within each namespace. They expose
+stable gRPC/HTTP ports `8080/8081`; host-network target ports are allocated from
+`YanetConfigV2.spec.hostNetworkPortRange`. Runtime endpoint variables generally
+belong in named Deployment patches; the fixed netlink sidecar receives its bind
+and shared-Service advertise endpoints from the builder. Per-NUMA controlplane
+fan-out is driven by the NFD label
+`feature.node.kubernetes.io/cpu-numa_nodes_count`. Each node can belong to only
+one `YanetV2`; overlapping selectors are resolved in favour of the existing
+workload owner (or the oldest CR before workloads exist).
+
+> **Scope migration:** Kubernetes does not permit changing an installed CRD
+> from namespaced to cluster-scoped. Before upgrading a cluster that already
+> has the older namespaced `YanetConfigV2` CRD, export its spec, remove and
+> reinstall that CRD, then recreate the configuration manually as cluster-scoped
+> `metadata.name: config` or let Helm create it through `yanetconfigV2` values.
+> When recreating an existing spec, set
+> `spec.components.dataplane.hostNetwork: true` explicitly to preserve the old
+> networking mode; omission now selects the pod network. Rename any
+> `spec.components.birdAdapter.containers.birdAdapter` override key to the
+> rendered container name `bird-adapter`.
+> Delete old per-installation v2 Services before enabling the shared-Service
+> model; the operator deliberately does not take over resources with another owner.
+> Before enabling the native BIRD sidecar, stop the old operator and delete its
+> standalone v2 BIRD Deployments. The old and new BIRD processes share the
+> node-local `/run/bird` control-socket directory and must not overlap.
+> Host-port migrations also require a stop-first transition when new allocations
+> overlap old workloads. Preflight checks live Deployments, Pods, and ReplicaSets
+> and refuses the conflicting migration; stop those workloads and wait for their
+> Pods to terminate before retrying. Stopping the operator alone does not stop Pods.
+
+Palette images may override `registry` and `prefix` independently: omission
+inherits `spec.images`, while `""` clears that part. Installation container
+overrides still only support `name`, `tag`, and native-sidecar `enabled`.
+Controlplane `config.args` supports `{numa}` for the physical NUMA index;
+literal `.yaml`/`.yml` arguments without it retain the legacy `-<index>` suffix.
 
 See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
 [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable
@@ -272,4 +310,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-

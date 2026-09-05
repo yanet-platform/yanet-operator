@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
@@ -27,8 +28,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // v2Scheme builds a runtime.Scheme that knows the v2alpha1 API plus the
@@ -80,11 +83,9 @@ func minimalConfigV2() yanetv2alpha1.YanetConfigSpec {
 		Components: yanetv2alpha1.ComponentsSpec{
 			Controlplane: yanetv2alpha1.ControlplaneSpec{
 				Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
-				Port:  8080,
 			},
 			Dataplane: yanetv2alpha1.DataplaneSpec{
 				Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
-				Port:  8081,
 			},
 		},
 		Patches: []yanetv2alpha1.NamedPatch{
@@ -94,9 +95,233 @@ func minimalConfigV2() yanetv2alpha1.YanetConfigSpec {
 			Name: "release",
 			Components: yanetv2alpha1.BoxComponents{
 				Controlplane: &yanetv2alpha1.BoxComponent{},
-				Dataplane:    &yanetv2alpha1.BoxComponent{},
+				Dataplane:    &yanetv2alpha1.BoxDataplane{},
 			},
 		}},
+	}
+}
+
+func serviceCollisionConfigV2() yanetv2alpha1.YanetConfigSpec {
+	cfg := minimalConfigV2()
+	cfg.Components.Operators = []yanetv2alpha1.OperatorSpec{{
+		Name: "controlplane-numa0",
+		Containers: []yanetv2alpha1.OperatorContainer{{
+			Name: "operator", Image: yanetv2alpha1.ImageRef{Name: "operator", Tag: "v1"},
+		}},
+	}}
+	cfg.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{"controlplane-numa0": {}}
+	return cfg
+}
+
+func TestReconcileV2_ServicePlanCollisionFailsBeforeApplyAndClearsReady(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		TypeMeta: metav1.TypeMeta{APIVersion: yanetv2alpha1.GroupVersion.String(), Kind: "YanetV2"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+		Status: yanetv2alpha1.YanetStatus{Conditions: []metav1.Condition{{
+			Type: "Ready", Status: metav1.ConditionTrue, Reason: "AllChecksPassed",
+		}}},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = serviceCollisionConfigV2()
+
+	result, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "conflicting Service plans") {
+		t.Fatalf("expected Service plan collision, got result=%+v err=%v", result, err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("preflight collision must prevent all Deployment changes, got %d", len(deployments.Items))
+	}
+	services := &corev1.ServiceList{}
+	if err := r.Client.List(context.Background(), services, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Services: %v", err)
+	}
+	if len(services.Items) != 0 {
+		t.Fatalf("preflight collision must prevent both Service plans, got %d", len(services.Items))
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	conditions := make(map[string]metav1.Condition, len(got.Status.Conditions))
+	for _, condition := range got.Status.Conditions {
+		conditions[condition.Type] = condition
+	}
+	if condition := conditions["Degraded"]; condition.Status != metav1.ConditionTrue || condition.Reason != "ResourcePreflightFailed" {
+		t.Errorf("unexpected Degraded condition: %+v", condition)
+	}
+	if condition := conditions["Ready"]; condition.Status != metav1.ConditionFalse {
+		t.Errorf("Ready must be false after preflight failure: %+v", condition)
+	}
+}
+
+func TestReconcileV2_RevalidatesComponentOverrides(t *testing.T) {
+	autoSync := true
+	disabled := false
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType:  "release",
+			AutoSync: &autoSync,
+			Components: &yanetv2alpha1.YanetComponentsOverride{
+				Dataplane: &yanetv2alpha1.YanetComponentOverride{
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+						yanetv2alpha1.DataplaneContainerName: {Enabled: &disabled},
+					},
+				},
+			},
+		},
+	}
+	r, snapshot := makeReconcilerEnv(t, yanet)
+	snapshot.Config = minimalConfigV2()
+
+	result, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err != nil || result.RequeueAfter == 0 {
+		t.Fatalf("invalid persisted override result=%+v err=%v", result, err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("invalid override must fail before applying Deployments: %+v", deployments.Items)
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Get(
+		context.Background(),
+		types.NamespacedName{Name: yanet.Name, Namespace: yanet.Namespace},
+		got,
+	); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	for _, condition := range got.Status.Conditions {
+		if condition.Type == "Degraded" && condition.Reason == "OverridesInvalid" {
+			return
+		}
+	}
+	t.Fatalf("OverridesInvalid condition not found: %+v", got.Status.Conditions)
+}
+
+func TestReconcileV2_InvalidPatchFailsBeforeApply(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = minimalConfigV2()
+	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
+		Name: "invalid", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"replicas":"not-an-integer"}}`)},
+	}}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"invalid"}
+
+	_, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "decode merged Deployment") {
+		t.Fatalf("expected invalid patch preflight error, got %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("invalid patch preflight must prevent partial rollout, got %d Deployments", len(deployments.Items))
+	}
+}
+
+func TestReconcileV2_CrossListContainerNameCollisionFailsBeforeApply(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = minimalConfigV2()
+	snapshot.Config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
+		Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+			Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
+		},
+	}
+	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
+		Name: "regular-bird", Patch: runtime.RawExtension{Raw: []byte(
+			`{"spec":{"template":{"spec":{"containers":[{"name":"bird","image":"bird:v1"}]}}}}`,
+		)},
+	}}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
+		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
+	}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"regular-bird"}
+
+	_, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "bird") || !strings.Contains(err.Error(), "init") {
+		t.Fatalf("expected cross-list container name collision, got %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("container-name preflight must prevent partial rollout, got %d Deployments", len(deployments.Items))
+	}
+}
+
+func TestReconcileV2_HostNetworkListenerWithoutRangeFailsBeforeApply(t *testing.T) {
+	autoSync := true
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "y", Namespace: "yanet", UID: types.UID("yanet-uid"), Finalizers: []string{yanetFinalizer},
+		},
+		Spec: yanetv2alpha1.YanetSpec{
+			BoxType: "release", NodeSelector: map[string]string{"role": "yanet"}, AutoSync: &autoSync,
+		},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
+	r, snapshot := makeReconcilerEnv(t, yanet, node)
+	snapshot.Config = minimalConfigV2()
+	snapshot.Config.Components.Operators = []yanetv2alpha1.OperatorSpec{{
+		Name: "route",
+		Containers: []yanetv2alpha1.OperatorContainer{{
+			Name: "route", Image: yanetv2alpha1.ImageRef{Name: "route", Tag: "v1"},
+		}},
+	}}
+	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
+		Name: "host-network", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"hostNetwork":true}}}}`)},
+	}}
+	snapshot.Config.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{
+		"route": {Patches: []string{"host-network"}},
+	}
+
+	_, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err == nil || !strings.Contains(err.Error(), "hostNetworkPortRange is not configured") {
+		t.Fatalf("expected missing host-network range error, got %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list Deployments: %v", err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatalf("host-port preflight must prevent partial rollout, got %d Deployments", len(deployments.Items))
 	}
 }
 
@@ -190,8 +415,40 @@ func TestReconcileV2_GlobalStop(t *testing.T) {
 	snap.Config = minimalConfigV2()
 	snap.Config.Stop = true
 	res, err := r.reconcileYanetV2(context.Background(), yanet)
-	if err != nil || res.RequeueAfter != 0 {
+	if err != nil || res != (ctrl.Result{}) {
 		t.Errorf("global stop must short-circuit: %+v %v", res, err)
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Client.Get(context.Background(), client.ObjectKeyFromObject(yanet), got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(got, yanetFinalizer) {
+		t.Fatal("global stop must not install a finalizer")
+	}
+}
+
+func TestReconcileV2_GlobalStopLoadedFromAPIBeforeSnapshot(t *testing.T) {
+	yanet := &yanetv2alpha1.YanetV2{
+		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
+		Spec:       yanetv2alpha1.YanetSpec{BoxType: "release"},
+	}
+	config := &yanetv2alpha1.YanetConfigV2{
+		ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
+		Spec:       minimalConfigV2(),
+	}
+	config.Spec.Stop = true
+	r, _ := makeReconcilerEnv(t, yanet, config)
+
+	res, err := r.reconcileYanetV2(context.Background(), yanet)
+	if err != nil || res != (ctrl.Result{}) {
+		t.Fatalf("persisted global stop must short-circuit before snapshot startup: %+v %v", res, err)
+	}
+	got := &yanetv2alpha1.YanetV2{}
+	if err := r.Client.Get(context.Background(), client.ObjectKeyFromObject(yanet), got); err != nil {
+		t.Fatalf("get YanetV2: %v", err)
+	}
+	if controllerutil.ContainsFinalizer(got, yanetFinalizer) {
+		t.Fatal("persisted global stop must prevent finalizer installation before snapshot startup")
 	}
 }
 
@@ -269,7 +526,7 @@ func TestReconcileV2_AutoSyncOff_OutOfSync(t *testing.T) {
 	}
 }
 
-func TestReconcileV2_AutoSyncOn_CreatesDeploymentsAndServices(t *testing.T) {
+func TestReconcileV2_AutoSyncOn_CreatesDeploymentsAndReportsSharedServices(t *testing.T) {
 	autoSync := true
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
@@ -309,8 +566,8 @@ func TestReconcileV2_AutoSyncOn_CreatesDeploymentsAndServices(t *testing.T) {
 	if err := r.Client.List(context.Background(), svcs, client.InNamespace("yanet")); err != nil {
 		t.Fatalf("list svcs: %v", err)
 	}
-	if len(svcs.Items) == 0 {
-		t.Errorf("expected services to be created")
+	if len(svcs.Items) != 0 {
+		t.Errorf("YanetV2 reconciler must not own shared Services, got %d", len(svcs.Items))
 	}
 
 	got := &yanetv2alpha1.YanetV2{}
@@ -398,16 +655,15 @@ func TestAggregateSyncStatusV2(t *testing.T) {
 
 // TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources
 // proves that with spec.autoSync=false the reconciler MUST NOT touch
-// any Deployment, Service or ConfigMap it had previously created from
+// any Deployment or ConfigMap it had previously created from
 // this YanetV2 CR. The user is expected to be able to manually mutate
 // them (and even delete some of them via orphan-prune skip) without
 // the operator fighting back.
 //
 // Coverage matrix (autoSync=false):
 //   - Deployment.Spec hand-edit          → not reverted   (line A)
-//   - Service.Spec hand-edit             → not reverted   (line B)
-//   - ConfigMap.Data hand-edit           → not reverted   (line C)
-//   - Orphan Deployment left in place    → not deleted    (line D, also covered by TestPruneOrphans_AutoSyncFalse_DoesNotDelete)
+//   - ConfigMap.Data hand-edit           → not reverted   (line B)
+//   - Orphan Deployment left in place    → not deleted    (line C, also covered by TestPruneOrphans_AutoSyncFalse_DoesNotDelete)
 func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testing.T) {
 	autoSync := true
 	yanet := &yanetv2alpha1.YanetV2{
@@ -426,34 +682,26 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 	}
 	r, snap := makeReconcilerEnv(t, yanet, node)
 	snap.Config = minimalConfigV2()
-	ctx := context.Background()
+	testContext := context.Background()
 
 	// Phase 1: autoSync=true creates the resources from scratch.
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("phase1 finalizer install: %v", err)
 	}
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
+	if err := r.Client.Get(testContext, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
 		t.Fatalf("phase1 re-get: %v", err)
 	}
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("phase1 reconcile: %v", err)
 	}
 
 	deps := &appsv1.DeploymentList{}
-	if err := r.Client.List(ctx, deps, client.InNamespace("yanet")); err != nil {
+	if err := r.Client.List(testContext, deps, client.InNamespace("yanet")); err != nil {
 		t.Fatalf("list deps: %v", err)
 	}
 	if len(deps.Items) == 0 {
 		t.Fatalf("phase1: expected deployments to be created")
 	}
-	svcs := &corev1.ServiceList{}
-	if err := r.Client.List(ctx, svcs, client.InNamespace("yanet")); err != nil {
-		t.Fatalf("list svcs: %v", err)
-	}
-	if len(svcs.Items) == 0 {
-		t.Fatalf("phase1: expected services to be created")
-	}
-
 	// Hand-edit a Deployment (line A): bump replicas to a value the
 	// operator would never generate (99) and add a foreign label.
 	targetDep := &deps.Items[0]
@@ -463,24 +711,10 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 		targetDep.Labels = map[string]string{}
 	}
 	targetDep.Labels["operator.example.com/owned-by-human"] = "yes"
-	if err := r.Client.Update(ctx, targetDep); err != nil {
+	if err := r.Client.Update(testContext, targetDep); err != nil {
 		t.Fatalf("hand-edit deployment: %v", err)
 	}
 	depKey := types.NamespacedName{Name: targetDep.Name, Namespace: targetDep.Namespace}
-
-	// Hand-edit a Service (line B): set a custom externalTrafficPolicy
-	// (a field the builder does not set, ensuring it is foreign) and
-	// a foreign annotation.
-	targetSvc := &svcs.Items[0]
-	targetSvc.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeLocal
-	if targetSvc.Annotations == nil {
-		targetSvc.Annotations = map[string]string{}
-	}
-	targetSvc.Annotations["operator.example.com/owned-by-human"] = "yes"
-	if err := r.Client.Update(ctx, targetSvc); err != nil {
-		t.Fatalf("hand-edit service: %v", err)
-	}
-	svcKey := types.NamespacedName{Name: targetSvc.Name, Namespace: targetSvc.Namespace}
 
 	// Hand-create a "previous-generation" ConfigMap that looks like
 	// it once belonged to the CR (carries the LabelYanet label so
@@ -496,28 +730,28 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 		},
 		Data: map[string]string{"config": "human-managed content"},
 	}
-	if err := r.Client.Create(ctx, staleCM); err != nil {
+	if err := r.Client.Create(testContext, staleCM); err != nil {
 		t.Fatalf("seed stale CM: %v", err)
 	}
 	cmKey := types.NamespacedName{Name: staleCM.Name, Namespace: staleCM.Namespace}
 
 	// Phase 2: flip autoSync to false. The reconciler must observe
 	// drift but must NOT push the hand edits back.
-	if err := r.Client.Get(ctx, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
+	if err := r.Client.Get(testContext, types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
 		t.Fatalf("phase2 re-get yanet: %v", err)
 	}
 	off := false
 	yanet.Spec.AutoSync = &off
-	if err := r.Client.Update(ctx, yanet); err != nil {
+	if err := r.Client.Update(testContext, yanet); err != nil {
 		t.Fatalf("phase2 disable autoSync: %v", err)
 	}
-	if _, err := r.reconcileYanetV2(ctx, yanet); err != nil {
+	if _, err := r.reconcileYanetV2(testContext, yanet); err != nil {
 		t.Fatalf("phase2 reconcile: %v", err)
 	}
 
 	// Assert line A: hand-edited Deployment is untouched.
 	gotDep := &appsv1.Deployment{}
-	if err := r.Client.Get(ctx, depKey, gotDep); err != nil {
+	if err := r.Client.Get(testContext, depKey, gotDep); err != nil {
 		t.Fatalf("re-get deployment: %v", err)
 	}
 	if gotDep.Spec.Replicas == nil || *gotDep.Spec.Replicas != handEditedReplicas {
@@ -528,23 +762,10 @@ func TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources(t *testin
 		t.Errorf("autoSync=false MUST preserve foreign labels on Deployment, got %v", gotDep.Labels)
 	}
 
-	// Assert line B: hand-edited Service is untouched.
-	gotSvc := &corev1.Service{}
-	if err := r.Client.Get(ctx, svcKey, gotSvc); err != nil {
-		t.Fatalf("re-get service: %v", err)
-	}
-	if gotSvc.Spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyTypeLocal {
-		t.Errorf("autoSync=false MUST preserve hand-edited Service.Spec, got externalTrafficPolicy=%q",
-			gotSvc.Spec.ExternalTrafficPolicy)
-	}
-	if gotSvc.Annotations["operator.example.com/owned-by-human"] != "yes" {
-		t.Errorf("autoSync=false MUST preserve foreign annotations on Service, got %v", gotSvc.Annotations)
-	}
-
-	// Assert line C/D: pre-existing CM is left alone (content
+	// Assert line B/C: pre-existing CM is left alone (content
 	// preserved AND object not garbage-collected by prune).
 	gotCM := &corev1.ConfigMap{}
-	if err := r.Client.Get(ctx, cmKey, gotCM); err != nil {
+	if err := r.Client.Get(testContext, cmKey, gotCM); err != nil {
 		t.Fatalf("autoSync=false MUST NOT delete pre-existing CM, got err=%v", err)
 	}
 	if gotCM.Data["config"] != "human-managed content" {

@@ -107,22 +107,38 @@ node-feature-discovery:
 #
 # Comment out / unset to omit the YanetConfig (e.g. if you manage
 # it through GitOps or applies it manually).
+# Chart-managed YanetConfigV2 requires webhook.failurePolicy=Ignore because the
+# webhook certificate/CA job completes after Helm's main resource phase.
 # ============================================================
 yanetconfigV2: {}
 #  spec:
 #    stop: false
 #    updateWindow: 60
+#    hostNetworkPortRange: {start: 20000, end: 20100}
 #    images:
 #      registry: cr.yandex/yanet
 #    components:
 #      controlplane:
 #        image: {name: controlplane, tag: v2.1}
-#        port: 8080
 #      dataplane:
 #        image: {name: dataplane, tag: v2.1}
-#        port: 8090
 #        hugepages: {size: 1Gi, count: 8}
+#        sidecars:
+#          bird:
+#            image: {name: bird, tag: "2.15"}
+#          netlinkDataplaneSidecar:
+#            image: {name: netlink-dataplane-sidecar, tag: v2.1}
 #    patches:
+#      - name: controlplane-listener
+#        patch:
+#          spec:
+#            template:
+#              spec:
+#                containers:
+#                  - name: controlplane
+#                    env:
+#                      - name: YANET_GATEWAY_ENDPOINT
+#                        value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
 #      - name: telegraf
 #        patch:
 #          spec:
@@ -133,5 +149,9 @@ yanetconfigV2: {}
 #    boxTypes:
 #      - name: release
 #        components:
-#          controlplane: {patches: [telegraf]}
-#          dataplane: {patches: [telegraf]}
+#          controlplane: {patches: [controlplane-listener, telegraf]}
+#          dataplane:
+#            sidecars:
+#              bird: {}
+#              netlinkDataplaneSidecar: {}
+#            patches: [telegraf]

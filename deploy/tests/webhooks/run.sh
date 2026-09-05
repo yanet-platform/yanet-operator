@@ -7,8 +7,8 @@
 #   2. Every "valid" CR is accepted by the webhook AND, once reconciled, the
 #      operator generates the expected Deployments (all with replicas=0 because
 #      every component has enabled=false).
-#   3. Every "invalid" CR under cases/invalid/ is REJECTED by the webhook with
-#      a non-empty error message.
+#   3. Every "invalid" CR is rejected by the webhook, or by the specific CRD
+#      validation rule expected for the invalid port-range fixture.
 #   4. The operator log contains no ERROR lines (except known-noise patterns
 #      that are explicitly whitelisted).
 #
@@ -104,7 +104,7 @@ done
 green "  all valid CRs accepted"
 
 # --------------------------------------------------------------------
-# 4) Apply invalid CRs — every one MUST fail with a webhook error.
+# 4) Apply invalid CRs — each must fail at its expected validation boundary.
 # --------------------------------------------------------------------
 blue "[4/5] Applying invalid CRs (must be rejected)..."
 for f in "$INVALID_DIR"/*.yaml; do
@@ -113,6 +113,13 @@ for f in "$INVALID_DIR"/*.yaml; do
     if out="$(kubectl apply -f "$f" 2>&1)"; then
         kubectl delete -f "$f" --ignore-not-found >/dev/null 2>&1 || true
         fail "invalid CR $name was unexpectedly accepted: $out"
+    fi
+    # CEL rejects reversed ranges before the admission webhook is called.
+    if [[ "$name" == "04-yanetconfig-v2-invalid-port.yaml" &&
+          "$out" == *"spec.hostNetworkPortRange:"* &&
+          "$out" == *"start must not exceed end"* ]]; then
+        green "  ok rejected by CRD range validation: $name"
+        continue
     fi
     if ! grep -qiE 'denied the request|admission webhook|validation failed' <<<"$out"; then
         fail "invalid CR $name was rejected, but not by the webhook: $out"

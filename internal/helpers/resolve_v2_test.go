@@ -17,49 +17,43 @@ limitations under the License.
 package helpers
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
 
-// fixtureConfig returns a fully-populated YanetConfigSpec covering the
-// 5 hardcoded components plus two operators. Tests mutate copies if
-// they need variations.
 func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 	return &yanetv2alpha1.YanetConfigSpec{
-		Images: yanetv2alpha1.ImagesSpec{
-			Registry: "cr.yandex/yanet",
-			Prefix:   "edge",
-		},
+		Images: yanetv2alpha1.ImagesSpec{Registry: "registry.example/test", Prefix: "edge"},
 		Components: yanetv2alpha1.ComponentsSpec{
 			Controlplane: yanetv2alpha1.ControlplaneSpec{
-				Image:     yanetv2alpha1.ImageRef{Name: "controlplane", Tag: "v2.1"},
-				Port:      8080,
-				PortRange: 4,
-				Numa:      Int32Ptr(2),
+				Image: yanetv2alpha1.ImageRef{Name: "controlplane", Tag: "v2.1"},
+				Numa:  Int32Ptr(2),
 			},
 			Dataplane: yanetv2alpha1.DataplaneSpec{
 				Image:       yanetv2alpha1.ImageRef{Name: "dataplane", Tag: "v2.1"},
-				Port:        8081,
 				Hugepages:   &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 8},
 				HostNetwork: PtrTrue(),
-			},
-			Bird: &yanetv2alpha1.BirdComponent{
-				Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "2.15"},
-				Port:  179,
+				Sidecars: &yanetv2alpha1.DataplaneSidecarsSpec{
+					Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+						Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "2.15"},
+					},
+					NetlinkDataplaneSidecar: &yanetv2alpha1.DataplaneSidecarSpec{
+						Image: yanetv2alpha1.ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v2.1"},
+					},
+				},
 			},
 			BirdAdapter: &yanetv2alpha1.BirdAdapterComp{
 				Image: yanetv2alpha1.ImageRef{Name: "bird-adapter", Tag: "v0.3"},
 			},
 			Announcer: &yanetv2alpha1.AnnouncerComp{
 				Image: yanetv2alpha1.ImageRef{Name: "announcer", Tag: "v0.2"},
-				Port:  9090,
 			},
 			Operators: []yanetv2alpha1.OperatorSpec{
 				{
 					Name: "antiddos",
-					Port: 9001,
 					Containers: []yanetv2alpha1.OperatorContainer{
 						{Name: "operator", Image: yanetv2alpha1.ImageRef{Name: "antiddos-operator", Tag: "v0.5"}},
 						{Name: "agent", Image: yanetv2alpha1.ImageRef{Name: "antiddos-agent", Tag: "v0.5"}, HostIPC: PtrTrue()},
@@ -67,9 +61,9 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 				},
 				{
 					Name: "route",
-					Containers: []yanetv2alpha1.OperatorContainer{
-						{Name: "route", Image: yanetv2alpha1.ImageRef{Name: "route-operator", Tag: "v0.4"}},
-					},
+					Containers: []yanetv2alpha1.OperatorContainer{{
+						Name: "route", Image: yanetv2alpha1.ImageRef{Name: "route-operator", Tag: "v0.4"},
+					}},
 				},
 			},
 		},
@@ -83,17 +77,25 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 				Name: "release",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{Patches: []string{"telegraf", "cp-resources"}},
-					Dataplane:    &yanetv2alpha1.BoxComponent{Patches: []string{"telegraf"}},
-					Bird:         &yanetv2alpha1.BoxComponent{},
-					Announcer:    &yanetv2alpha1.BoxComponent{},
+					Dataplane: &yanetv2alpha1.BoxDataplane{
+						Patches: []string{"telegraf"},
+						Sidecars: &yanetv2alpha1.BoxDataplaneSidecars{
+							Bird:                    &yanetv2alpha1.BoxDataplaneSidecar{},
+							NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{},
+						},
+					},
+					Announcer: &yanetv2alpha1.BoxComponent{},
 				},
 			},
 			{
 				Name: "firewall",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{},
-					Dataplane:    &yanetv2alpha1.BoxComponent{},
-					BirdAdapter:  &yanetv2alpha1.BoxComponent{},
+					Dataplane: &yanetv2alpha1.BoxDataplane{Sidecars: &yanetv2alpha1.BoxDataplaneSidecars{
+						Bird:                    &yanetv2alpha1.BoxDataplaneSidecar{},
+						NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{},
+					}},
+					BirdAdapter: &yanetv2alpha1.BoxComponent{},
 				},
 				Operators: map[string]yanetv2alpha1.BoxOperator{
 					"antiddos": {Patches: []string{"telegraf"}},
@@ -103,420 +105,394 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 				Name: "minimal",
 				Components: yanetv2alpha1.BoxComponents{
 					Controlplane: &yanetv2alpha1.BoxComponent{},
-					Dataplane:    &yanetv2alpha1.BoxComponent{},
+					Dataplane:    &yanetv2alpha1.BoxDataplane{},
 				},
 			},
 		},
 	}
 }
 
-func TestFindBoxType(t *testing.T) {
-	cfg := fixtureConfig()
-	if box, err := FindBoxType(cfg, "firewall"); err != nil || box.Name != "firewall" {
-		t.Fatalf("FindBoxType(firewall) = (%v, %v)", box, err)
+func TestFindBoxTypeAndOperator(t *testing.T) {
+	config := fixtureConfig()
+	if box, err := FindBoxType(config, "firewall"); err != nil || box.Name != "firewall" {
+		t.Fatalf("FindBoxType = (%v, %v)", box, err)
 	}
-	if _, err := FindBoxType(cfg, "missing"); err == nil {
-		t.Fatalf("FindBoxType(missing) expected error")
+	if _, err := FindBoxType(config, "missing"); err == nil {
+		t.Fatal("FindBoxType(missing) must fail")
 	}
-	if _, err := FindBoxType(nil, "release"); err == nil {
-		t.Fatalf("FindBoxType(nil) expected error")
+	if operator, err := FindOperator(config, "antiddos"); err != nil || operator.Name != "antiddos" {
+		t.Fatalf("FindOperator = (%v, %v)", operator, err)
 	}
-}
-
-func TestFindOperator(t *testing.T) {
-	cfg := fixtureConfig()
-	if op, err := FindOperator(cfg, "antiddos"); err != nil || op.Name != "antiddos" {
-		t.Fatalf("FindOperator(antiddos) = (%v, %v)", op, err)
-	}
-	if _, err := FindOperator(cfg, "missing"); err == nil {
-		t.Fatalf("FindOperator(missing) expected error")
+	if _, err := FindOperator(config, "missing"); err == nil {
+		t.Fatal("FindOperator(missing) must fail")
 	}
 }
 
 func TestEnabledComponentsForBox(t *testing.T) {
-	cfg := fixtureConfig()
-	tests := []struct {
-		name string
-		box  string
-		want []ComponentRef
-	}{
-		{
-			name: "release wires 4 hardcoded",
-			box:  "release",
-			want: []ComponentRef{
-				{Kind: KindControlplane},
-				{Kind: KindDataplane},
-				{Kind: KindBird},
-				{Kind: KindAnnouncer},
+	config := fixtureConfig()
+	want := []ComponentRef{
+		{Kind: KindControlplane},
+		{Kind: KindDataplane},
+		{Kind: KindBirdAdapter},
+		{Kind: KindOperator, OperatorName: "antiddos"},
+	}
+	got, err := EnabledComponentsForBox(config, "firewall")
+	if err != nil {
+		t.Fatalf("EnabledComponentsForBox: %v", err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("component refs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestResolveBoxComponent_Hardcoded(t *testing.T) {
+	config := fixtureConfig()
+	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
+	controlplane, err := ResolveBoxComponent(config, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("resolve controlplane: %v", err)
+	}
+	if controlplane.Name != "controlplane" || controlplane.Numa != 2 || !controlplane.Enabled {
+		t.Fatalf("controlplane = %+v", controlplane)
+	}
+	if controlplane.Image.FullPath() != "registry.example/test/edge/controlplane:v2.1" {
+		t.Fatalf("controlplane image = %+v", controlplane.Image)
+	}
+	if diff := cmp.Diff([]string{"telegraf", "cp-resources"}, controlplane.Patches); diff != "" {
+		t.Fatalf("patches mismatch (-want +got):\n%s", diff)
+	}
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve dataplane: %v", err)
+	}
+	if dataplane.Hugepages == nil || dataplane.Hugepages.Count != 8 ||
+		dataplane.HostNetwork == nil || !*dataplane.HostNetwork {
+		t.Fatalf("dataplane = %+v", dataplane)
+	}
+	if len(dataplane.NativeSidecars) != 2 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		dataplane.NativeSidecars[1].Name != yanetv2alpha1.BirdSidecarContainerName {
+		t.Fatalf("dataplane native sidecars = %+v", dataplane.NativeSidecars)
+	}
+	if adapter, err := ResolveBoxComponent(config, yanet, KindBirdAdapter, ""); err != nil || adapter != nil {
+		t.Fatalf("unwired adapter = (%v, %v)", adapter, err)
+	}
+}
+
+func TestResolveBoxComponent_Operator(t *testing.T) {
+	config := fixtureConfig()
+	operator, err := ResolveBoxComponent(
+		config,
+		&yanetv2alpha1.YanetSpec{BoxType: "firewall"},
+		KindOperator,
+		"antiddos",
+	)
+	if err != nil {
+		t.Fatalf("resolve operator: %v", err)
+	}
+	if operator.Name != "antiddos" || operator.Kind != KindOperator || len(operator.Containers) != 2 {
+		t.Fatalf("operator = %+v", operator)
+	}
+	if operator.Containers[0].Name != "operator" || operator.Containers[1].Name != "agent" ||
+		!operator.Containers[1].HostIPC {
+		t.Fatalf("operator containers = %+v", operator.Containers)
+	}
+}
+
+func TestResolveBoxComponent_Overrides(t *testing.T) {
+	config := fixtureConfig()
+	yanet := &yanetv2alpha1.YanetSpec{
+		BoxType: "firewall",
+		Components: &yanetv2alpha1.YanetComponentsOverride{
+			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+				YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
+					Enabled: PtrFalse(),
+					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+						"controlplane": {Tag: "hotfix"},
+					},
+				},
 			},
-		},
-		{
-			name: "firewall wires cp+dp+adapter+antiddos op",
-			box:  "firewall",
-			want: []ComponentRef{
-				{Kind: KindControlplane},
-				{Kind: KindDataplane},
-				{Kind: KindBirdAdapter},
-				{Kind: KindOperator, OperatorName: "antiddos"},
+			Dataplane: &yanetv2alpha1.YanetComponentOverride{
+				Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+					yanetv2alpha1.BirdSidecarContainerName: {
+						Enabled: PtrFalse(),
+					},
+					yanetv2alpha1.NetlinkDataplaneSidecarContainerName: {Tag: "hotfix"},
+				},
 			},
-		},
-		{
-			name: "minimal only cp+dp",
-			box:  "minimal",
-			want: []ComponentRef{
-				{Kind: KindControlplane},
-				{Kind: KindDataplane},
+			BirdAdapter: &yanetv2alpha1.YanetComponentOverride{
+				Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+					yanetv2alpha1.BirdAdapterContainerName: {Tag: "hotfix"},
+				},
+			},
+			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
+				"antiddos": {Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+					"operator": {Tag: "v0.5.1"},
+					"agent":    {Tag: "v0.5.2"},
+				}},
 			},
 		},
 	}
+	controlplane, err := ResolveBoxComponent(config, yanet, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("resolve controlplane: %v", err)
+	}
+	if controlplane.Enabled || controlplane.Image.Tag != "hotfix" {
+		t.Fatalf("controlplane override = %+v", controlplane)
+	}
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve dataplane: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 1 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		dataplane.NativeSidecars[0].Image.Tag != "hotfix" {
+		t.Fatalf("dataplane sidecar overrides = %+v", dataplane.NativeSidecars)
+	}
+	adapter, err := ResolveBoxComponent(config, yanet, KindBirdAdapter, "")
+	if err != nil {
+		t.Fatalf("resolve bird adapter: %v", err)
+	}
+	if adapter.Image.Tag != "hotfix" {
+		t.Fatalf("bird-adapter override = %+v", adapter.Image)
+	}
+	operator, err := ResolveBoxComponent(config, yanet, KindOperator, "antiddos")
+	if err != nil {
+		t.Fatalf("resolve operator: %v", err)
+	}
+	if operator.Containers[0].Image.Tag != "v0.5.1" || operator.Containers[1].Image.Tag != "v0.5.2" {
+		t.Fatalf("operator overrides = %+v", operator.Containers)
+	}
+}
+
+func TestResolveBoxComponent_DataplaneSidecarEnablement(t *testing.T) {
+	config := fixtureConfig()
+	box, err := FindBoxType(config, "release")
+	if err != nil {
+		t.Fatalf("find box: %v", err)
+	}
+	box.Components.Dataplane.Sidecars.Bird.Enabled = PtrFalse()
+	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
+
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve defaults: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 1 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("box-disabled BIRD sidecar = %+v", dataplane.NativeSidecars)
+	}
+
+	yanet.Components = &yanetv2alpha1.YanetComponentsOverride{
+		Dataplane: &yanetv2alpha1.YanetComponentOverride{
+			Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+				yanetv2alpha1.BirdSidecarContainerName: {Enabled: PtrTrue()},
+			},
+		},
+	}
+	dataplane, err = ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve override: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 2 ||
+		dataplane.NativeSidecars[1].Name != yanetv2alpha1.BirdSidecarContainerName {
+		t.Fatalf("installation-enabled BIRD sidecar = %+v", dataplane.NativeSidecars)
+	}
+
+	box.Components.Dataplane.Sidecars.Bird = nil
+	dataplane, err = ResolveBoxComponent(config, yanet, KindDataplane, "")
+	if err != nil {
+		t.Fatalf("resolve stale unwired override: %v", err)
+	}
+	if len(dataplane.NativeSidecars) != 1 ||
+		dataplane.NativeSidecars[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+		t.Fatalf("stale unwired BIRD override was not ignored: %+v", dataplane.NativeSidecars)
+	}
+}
+
+func TestResolveControlplane_DisabledNuma(t *testing.T) {
+	config := fixtureConfig()
+	config.Components.Controlplane.DisabledNuma = []int32{1}
+	tests := []struct {
+		name     string
+		override bool
+		disabled []int32
+		want     []int32
+	}{
+		{name: "inherit", want: []int32{1}},
+		{name: "inherit with null list", override: true, want: []int32{1}},
+		{name: "replace", disabled: []int32{0}, want: []int32{0}},
+		{name: "clear", disabled: []int32{}, want: nil},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := EnabledComponentsForBox(cfg, tt.box)
-			if err != nil {
-				t.Fatalf("err = %v", err)
-			}
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v refs, want %v: %#v", len(got), len(tt.want), got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("ref[%d] = %+v, want %+v", i, got[i], tt.want[i])
+			yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
+			if tt.override || tt.disabled != nil {
+				yanet.Components = &yanetv2alpha1.YanetComponentsOverride{
+					Controlplane: &yanetv2alpha1.YanetControlplaneOverride{DisabledNuma: tt.disabled},
 				}
+			}
+			// Typed client updates must preserve the explicit empty-list override.
+			raw, err := json.Marshal(yanet)
+			if err != nil {
+				t.Fatalf("marshal Yanet spec: %v", err)
+			}
+			yanet = &yanetv2alpha1.YanetSpec{}
+			if err = json.Unmarshal(raw, yanet); err != nil {
+				t.Fatalf("unmarshal Yanet spec: %v", err)
+			}
+			component, err := ResolveBoxComponent(config, yanet, KindControlplane, "")
+			if err != nil {
+				t.Fatalf("resolve controlplane: %v", err)
+			}
+			if diff := cmp.Diff(tt.want, component.DisabledNuma); diff != "" {
+				t.Fatalf("disabled NUMA mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
 }
 
-func TestResolveBoxComponent_Hardcoded(t *testing.T) {
-	cfg := fixtureConfig()
-	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
-
-	// controlplane: image, port, port-range, numa, patches.
-	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
-	if err != nil || cp == nil {
-		t.Fatalf("controlplane resolve: (%v, %v)", cp, err)
+func TestResolveBoxComponent_ImageLocationOverrides(t *testing.T) {
+	registry := "other.example/public"
+	prefix := "stable"
+	empty := ""
+	tests := []struct {
+		name     string
+		registry *string
+		prefix   *string
+		want     string
+	}{
+		{name: "inherit", want: "registry.example/test/edge/controlplane:hotfix"},
+		{name: "registry only", registry: &registry, want: "other.example/public/edge/controlplane:hotfix"},
+		{name: "prefix only", prefix: &prefix, want: "registry.example/test/stable/controlplane:hotfix"},
+		{name: "both", registry: &registry, prefix: &prefix, want: "other.example/public/stable/controlplane:hotfix"},
+		{name: "clear prefix", registry: &registry, prefix: &empty, want: "other.example/public/controlplane:hotfix"},
+		{name: "clear registry", registry: &empty, want: "edge/controlplane:hotfix"},
+		{name: "clear both", registry: &empty, prefix: &empty, want: "controlplane:hotfix"},
 	}
-	if cp.Name != "controlplane" || cp.Kind != KindControlplane {
-		t.Errorf("cp identity wrong: %+v", cp)
-	}
-	if cp.Image.Name != "controlplane" || cp.Image.Tag != "v2.1" || cp.Image.Registry != "cr.yandex/yanet" {
-		t.Errorf("cp image: %+v", cp.Image)
-	}
-	if cp.Port != 8080 || cp.PortRange != 4 || cp.Numa != 2 {
-		t.Errorf("cp ports/numa: port=%d range=%d numa=%d", cp.Port, cp.PortRange, cp.Numa)
-	}
-	if !cp.Enabled {
-		t.Errorf("cp default enabled should be true")
-	}
-	wantPatches := []string{"telegraf", "cp-resources"}
-	if len(cp.Patches) != len(wantPatches) {
-		t.Fatalf("cp patches len mismatch: %v", cp.Patches)
-	}
-	for i, p := range wantPatches {
-		if cp.Patches[i] != p {
-			t.Errorf("cp.Patches[%d] = %q, want %q", i, cp.Patches[i], p)
-		}
-	}
-
-	// dataplane: hugepages, host-network.
-	dp, err := ResolveBoxComponent(cfg, yanet, KindDataplane, "")
-	if err != nil || dp == nil {
-		t.Fatalf("dataplane resolve: (%v, %v)", dp, err)
-	}
-	if dp.Hugepages == nil || dp.Hugepages.Size != "1Gi" || dp.Hugepages.Count != 8 {
-		t.Errorf("dp hugepages: %+v", dp.Hugepages)
-	}
-	if dp.HostNetwork == nil || !*dp.HostNetwork {
-		t.Errorf("dp hostnetwork = %v", dp.HostNetwork)
-	}
-
-	// bird/announcer enabled in box.
-	if got, _ := ResolveBoxComponent(cfg, yanet, KindBird, ""); got == nil {
-		t.Errorf("bird should be enabled in release boxType")
-	}
-	if got, _ := ResolveBoxComponent(cfg, yanet, KindAnnouncer, ""); got == nil {
-		t.Errorf("announcer should be enabled in release")
-	}
-	// birdAdapter not in release.
-	if got, err := ResolveBoxComponent(cfg, yanet, KindBirdAdapter, ""); got != nil || err != nil {
-		t.Errorf("birdAdapter not in release boxType, want (nil,nil), got (%v, %v)", got, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := fixtureConfig()
+			config.Components.Controlplane.Image.Registry = tt.registry
+			config.Components.Controlplane.Image.Prefix = tt.prefix
+			yanet := &yanetv2alpha1.YanetSpec{
+				BoxType: "release",
+				Components: &yanetv2alpha1.YanetComponentsOverride{
+					Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
+						YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
+							Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+								"controlplane": {Tag: "hotfix"},
+							},
+						},
+					},
+				},
+			}
+			component, err := ResolveBoxComponent(config, yanet, KindControlplane, "")
+			if err != nil {
+				t.Fatalf("resolve controlplane: %v", err)
+			}
+			if got := component.Image.FullPath(); got != tt.want {
+				t.Fatalf("image = %q, want %q", got, tt.want)
+			}
+			if config.Components.Controlplane.Image.Tag != "v2.1" {
+				t.Fatal("resolving the override mutated the palette")
+			}
+		})
 	}
 }
 
-func TestResolveBoxComponent_Operator(t *testing.T) {
-	cfg := fixtureConfig()
+func TestResolveBoxComponent_MixedRegistryPalette(t *testing.T) {
+	config := fixtureConfig()
+	publicRegistry, privateRegistry, empty := "docker.io/test", "private.example/test", ""
+	config.Components.Dataplane.Image.Registry = &privateRegistry
+	config.Components.Dataplane.Sidecars.Bird.Image.Registry = &publicRegistry
+	config.Components.Dataplane.Sidecars.Bird.Image.Prefix = &empty
+	config.Components.Operators[0].Containers[0].Image.Registry = &privateRegistry
+	config.Components.Operators[0].Containers[1].Image.Registry = &publicRegistry
+	config.Components.Operators[0].Containers[1].Image.Prefix = &empty
 	yanet := &yanetv2alpha1.YanetSpec{BoxType: "firewall"}
-
-	op, err := ResolveBoxComponent(cfg, yanet, KindOperator, "antiddos")
-	if err != nil || op == nil {
-		t.Fatalf("operator antiddos resolve: (%v, %v)", op, err)
-	}
-	if op.Name != "antiddos" || op.Kind != KindOperator || op.Port != 9001 {
-		t.Errorf("op identity/port: %+v", op)
-	}
-	if len(op.Containers) != 2 {
-		t.Fatalf("operator container count = %d", len(op.Containers))
-	}
-	if op.Containers[0].Name != "operator" || op.Containers[0].HostIPC {
-		t.Errorf("c0 = %+v", op.Containers[0])
-	}
-	if op.Containers[1].Name != "agent" || !op.Containers[1].HostIPC {
-		t.Errorf("c1 = %+v", op.Containers[1])
-	}
-	if op.Image.Name != "antiddos-operator" {
-		t.Errorf("op primary image = %+v", op.Image)
-	}
-
-	// Operator not wired by minimal boxType ⇒ (nil, nil).
-	yanet2 := &yanetv2alpha1.YanetSpec{BoxType: "minimal"}
-	if got, err := ResolveBoxComponent(cfg, yanet2, KindOperator, "antiddos"); got != nil || err != nil {
-		t.Errorf("operator unwired: want (nil,nil), got (%v, %v)", got, err)
-	}
-
-	// Operator wired but missing in palette ⇒ error.
-	cfg2 := fixtureConfig()
-	cfg2.BoxTypes[1].Operators["ghost"] = yanetv2alpha1.BoxOperator{}
-	if _, err := ResolveBoxComponent(cfg2, yanet, KindOperator, "ghost"); err == nil {
-		t.Errorf("operator ghost should error: not declared in palette")
-	}
-}
-
-func TestResolveBoxComponent_Overrides(t *testing.T) {
-	cfg := fixtureConfig()
-	yanet := &yanetv2alpha1.YanetSpec{
-		BoxType: "release",
-		Components: &yanetv2alpha1.YanetComponentsOverride{
-			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
-				YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
-					Enabled: PtrFalse(),
-					Containers: map[string]yanetv2alpha1.ImageRef{
-						"controlplane": {Tag: "v2.1.5-hotfix"},
-					},
-				},
-			},
-			Dataplane: &yanetv2alpha1.YanetComponentOverride{
-				Containers: map[string]yanetv2alpha1.ImageRef{
-					"dataplane": {Name: "dataplane-fork"},
-				},
-			},
-		},
-	}
-
-	cp, _ := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
-	if cp == nil {
-		t.Fatalf("cp nil")
-	}
-	if cp.Enabled {
-		t.Errorf("cp enabled should be false")
-	}
-	if cp.Image.Tag != "v2.1.5-hotfix" {
-		t.Errorf("cp tag override failed: %+v", cp.Image)
-	}
-	if cp.Image.Name != "controlplane" {
-		t.Errorf("cp name should remain palette: %+v", cp.Image)
-	}
-
-	dp, _ := ResolveBoxComponent(cfg, yanet, KindDataplane, "")
-	if dp.Image.Name != "dataplane-fork" || dp.Image.Tag != "v2.1" {
-		t.Errorf("dp name override failed: %+v", dp.Image)
-	}
-}
-
-// --- disabled NUMA resolution -----------------------------------------------
-
-// TestResolveControlplane_DisabledNuma_ClusterWideDefault verifies that the
-// cluster-wide opt-out list from YanetConfigV2 is carried into the resolved
-// component when the installation says nothing.
-func TestResolveControlplane_DisabledNuma_ClusterWideDefault(t *testing.T) {
-	cfg := fixtureConfig()
-	cfg.Components.Controlplane.DisabledNuma = []int32{1}
-	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
-
-	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	dataplane, err := ResolveBoxComponent(config, yanet, KindDataplane, "")
 	if err != nil {
-		t.Fatalf("ResolveBoxComponent: %v", err)
+		t.Fatalf("resolve dataplane: %v", err)
 	}
-	if diff := cmp.Diff([]int32{1}, cp.DisabledNuma); diff != "" {
-		t.Errorf("disabledNuma mismatch (-want +got):\n%s", diff)
-	}
-}
-
-// TestResolveControlplane_DisabledNuma_InstallationReplaces verifies that the
-// per-installation list REPLACES the cluster-wide default instead of merging
-// with it.
-func TestResolveControlplane_DisabledNuma_InstallationReplaces(t *testing.T) {
-	cfg := fixtureConfig()
-	cfg.Components.Controlplane.DisabledNuma = []int32{1}
-	yanet := &yanetv2alpha1.YanetSpec{
-		BoxType: "release",
-		Components: &yanetv2alpha1.YanetComponentsOverride{
-			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
-				DisabledNuma: []int32{0},
-			},
-		},
-	}
-
-	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
+	operator, err := ResolveBoxComponent(config, yanet, KindOperator, "antiddos")
 	if err != nil {
-		t.Fatalf("ResolveBoxComponent: %v", err)
+		t.Fatalf("resolve operator: %v", err)
 	}
-	if diff := cmp.Diff([]int32{0}, cp.DisabledNuma); diff != "" {
-		t.Errorf("installation override must replace the default (-want +got):\n%s", diff)
+	if len(dataplane.NativeSidecars) != 2 || len(operator.Containers) != 2 {
+		t.Fatalf("unexpected resolved container counts: dataplane=%+v operator=%+v", dataplane, operator)
 	}
-}
-
-// TestResolveControlplane_DisabledNuma_EmptyListClearsDefault verifies that an
-// empty but non-nil list is an explicit "enable every NUMA", distinct from an
-// unset field that inherits the default.
-func TestResolveControlplane_DisabledNuma_EmptyListClearsDefault(t *testing.T) {
-	cfg := fixtureConfig()
-	cfg.Components.Controlplane.DisabledNuma = []int32{1}
-	yanet := &yanetv2alpha1.YanetSpec{
-		BoxType: "release",
-		Components: &yanetv2alpha1.YanetComponentsOverride{
-			Controlplane: &yanetv2alpha1.YanetControlplaneOverride{
-				DisabledNuma: []int32{},
-			},
-		},
+	want := []string{
+		"private.example/test/edge/dataplane:v2.1",
+		"registry.example/test/edge/netlink-dataplane-sidecar:v2.1",
+		"docker.io/test/bird:2.15",
+		"private.example/test/edge/antiddos-operator:v0.5",
+		"docker.io/test/antiddos-agent:v0.5",
 	}
-
-	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
-	if err != nil {
-		t.Fatalf("ResolveBoxComponent: %v", err)
+	got := []string{
+		dataplane.Image.FullPath(),
+		dataplane.NativeSidecars[0].Image.FullPath(),
+		dataplane.NativeSidecars[1].Image.FullPath(),
+		operator.Containers[0].Image.FullPath(),
+		operator.Containers[1].Image.FullPath(),
 	}
-	if len(cp.DisabledNuma) != 0 {
-		t.Errorf("empty list must clear the cluster-wide default, got %v", cp.DisabledNuma)
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("mixed-registry images mismatch (-want +got):\n%s", diff)
 	}
 }
 
-// TestResolveControlplane_DisabledNuma_NoAliasing guards against the resolved
-// slice aliasing the CR: mutating the result must not corrupt the config.
-func TestResolveControlplane_DisabledNuma_NoAliasing(t *testing.T) {
-	cfg := fixtureConfig()
-	cfg.Components.Controlplane.DisabledNuma = []int32{1}
-	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
-
-	cp, err := ResolveBoxComponent(cfg, yanet, KindControlplane, "")
-	if err != nil {
-		t.Fatalf("ResolveBoxComponent: %v", err)
-	}
-	cp.DisabledNuma[0] = 42
-	if cfg.Components.Controlplane.DisabledNuma[0] != 1 {
-		t.Errorf("resolved slice aliases the config: %v", cfg.Components.Controlplane.DisabledNuma)
-	}
-}
-
-func TestResolveBoxComponent_OperatorPerContainerOverride(t *testing.T) {
-	cfg := fixtureConfig()
-	yanet := &yanetv2alpha1.YanetSpec{
-		BoxType: "firewall",
-		Components: &yanetv2alpha1.YanetComponentsOverride{
-			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
-				"antiddos": {
-					Containers: map[string]yanetv2alpha1.ImageRef{
-						"operator": {Tag: "v0.5.1"},
-						"agent":    {Tag: "v0.5.2"},
-					},
-				},
-			},
-		},
-	}
-	op, _ := ResolveBoxComponent(cfg, yanet, KindOperator, "antiddos")
-	if op == nil {
-		t.Fatalf("op nil")
-	}
-	if op.Containers[0].Name != "operator" || op.Containers[0].Image.Tag != "v0.5.1" {
-		t.Errorf("primary container override failed: %+v", op.Containers[0])
-	}
-	if op.Containers[1].Name != "agent" || op.Containers[1].Image.Tag != "v0.5.2" {
-		t.Errorf("secondary container override failed: %+v", op.Containers[1])
-	}
-}
-
-func TestResolveBoxComponent_OperatorPartialContainerOverride(t *testing.T) {
-	// Only the primary container has an override; the agent must
-	// keep its declared image untouched.
-	cfg := fixtureConfig()
-	yanet := &yanetv2alpha1.YanetSpec{
-		BoxType: "firewall",
-		Components: &yanetv2alpha1.YanetComponentsOverride{
-			Operators: map[string]yanetv2alpha1.YanetComponentOverride{
-				"antiddos": {
-					Containers: map[string]yanetv2alpha1.ImageRef{
-						"operator": {Tag: "v0.5.1"},
-					},
-				},
-			},
-		},
-	}
-	op, _ := ResolveBoxComponent(cfg, yanet, KindOperator, "antiddos")
-	if op.Containers[0].Image.Tag != "v0.5.1" {
-		t.Errorf("primary tag override expected: %+v", op.Containers[0].Image)
-	}
-	if op.Containers[1].Image.Tag != "v0.5" {
-		t.Errorf("agent must keep its declared tag: %+v", op.Containers[1].Image)
+func TestEnabledComponentsForBox_UndeclaredOperator(t *testing.T) {
+	config := fixtureConfig()
+	config.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{"missing": {}}
+	if refs, err := EnabledComponentsForBox(config, "release"); err == nil {
+		t.Fatalf("undeclared wired operator must fail rather than disappear from the desired set: %+v", refs)
 	}
 }
 
 func TestResolveBoxComponent_Errors(t *testing.T) {
-	cfg := fixtureConfig()
+	config := fixtureConfig()
 	yanet := &yanetv2alpha1.YanetSpec{BoxType: "release"}
-
-	// nil config.
 	if _, err := ResolveBoxComponent(nil, yanet, KindControlplane, ""); err == nil {
-		t.Errorf("nil config: want error")
+		t.Error("nil config must fail")
 	}
-	// nil yanet.
-	if _, err := ResolveBoxComponent(cfg, nil, KindControlplane, ""); err == nil {
-		t.Errorf("nil yanet: want error")
+	if _, err := ResolveBoxComponent(config, nil, KindControlplane, ""); err == nil {
+		t.Error("nil Yanet spec must fail")
 	}
-	// boxType missing.
-	bad := &yanetv2alpha1.YanetSpec{BoxType: "ghost"}
-	if _, err := ResolveBoxComponent(cfg, bad, KindControlplane, ""); err == nil {
-		t.Errorf("ghost boxType: want error")
+	if _, err := ResolveBoxComponent(config, &yanetv2alpha1.YanetSpec{BoxType: "ghost"}, KindControlplane, ""); err == nil {
+		t.Error("unknown box type must fail")
 	}
-	// unknown kind.
-	if _, err := ResolveBoxComponent(cfg, yanet, ComponentKind("bogus"), ""); err == nil {
-		t.Errorf("bogus kind: want error")
+	if _, err := ResolveBoxComponent(config, yanet, ComponentKind("bogus"), ""); err == nil {
+		t.Error("unknown component kind must fail")
 	}
-
-	// boxType wires bird but palette has no Bird.
-	cfg2 := fixtureConfig()
-	cfg2.Components.Bird = nil
-	if _, err := ResolveBoxComponent(cfg2, yanet, KindBird, ""); err == nil {
-		t.Errorf("bird wired without palette: want error")
+	config.Components.Dataplane.Sidecars.Bird = nil
+	if _, err := ResolveBoxComponent(config, yanet, KindDataplane, ""); err == nil {
+		t.Error("wired dataplane sidecar missing from palette must fail")
 	}
 }
 
 func TestResolvedImage_FullPath(t *testing.T) {
 	tests := []struct {
-		name string
-		img  ResolvedImage
-		want string
+		image ResolvedImage
+		want  string
 	}{
-		{"all", ResolvedImage{Registry: "cr.io", Prefix: "edge", Name: "x", Tag: "v1"}, "cr.io/edge/x:v1"},
-		{"no prefix", ResolvedImage{Registry: "cr.io", Name: "x", Tag: "v1"}, "cr.io/x:v1"},
-		{"no registry", ResolvedImage{Prefix: "edge", Name: "x", Tag: "v1"}, "edge/x:v1"},
-		{"name only", ResolvedImage{Name: "x"}, "x"},
-		{"tag missing", ResolvedImage{Registry: "cr.io", Name: "x"}, "cr.io/x"},
+		{image: ResolvedImage{Registry: "cr.io", Prefix: "edge", Name: "x", Tag: "v1"}, want: "cr.io/edge/x:v1"},
+		{image: ResolvedImage{Registry: "cr.io", Name: "x", Tag: "v1"}, want: "cr.io/x:v1"},
+		{image: ResolvedImage{Prefix: "edge", Name: "x", Tag: "v1"}, want: "edge/x:v1"},
+		{image: ResolvedImage{Name: "x"}, want: "x"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.img.FullPath(); got != tt.want {
-				t.Errorf("FullPath() = %q, want %q", got, tt.want)
-			}
-		})
+		if got := tt.image.FullPath(); got != tt.want {
+			t.Errorf("FullPath() = %q, want %q", got, tt.want)
+		}
 	}
 }
 
 func TestShortNodeKey_StableAndShort(t *testing.T) {
-	a := ShortNodeKey("node-abc")
-	b := ShortNodeKey("node-abc")
-	if a != b || len(a) != 8 {
-		t.Errorf("ShortNodeKey not stable/8 hex: %q vs %q", a, b)
+	first := ShortNodeKey("node-abc")
+	if second := ShortNodeKey("node-abc"); first != second || len(first) != 8 {
+		t.Fatalf("ShortNodeKey is not stable: %q and %q", first, second)
 	}
-	c := ShortNodeKey("node-xyz")
-	if c == a {
-		t.Errorf("ShortNodeKey collision suspected: %q", c)
+	if other := ShortNodeKey("node-xyz"); other == first {
+		t.Fatalf("unexpected short-key collision: %q", first)
 	}
 }

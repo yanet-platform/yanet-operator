@@ -32,15 +32,15 @@ func ShortNodeKey(nodeName string) string {
 	return hex.EncodeToString(h[:4])
 }
 
-// ComponentKind identifies which component is being resolved. The five
-// hardcoded kinds match the fixed slots in YanetConfigV2.spec.components;
-// KindOperator covers any element of the dynamic operators[] array.
+// ComponentKind identifies which workload component is being resolved. BIRD
+// and the netlink dataplane helper are native sidecars of KindDataplane rather
+// than independent component kinds. KindOperator covers any element of the
+// dynamic operators[] array.
 type ComponentKind string
 
 const (
 	KindControlplane ComponentKind = "controlplane"
 	KindDataplane    ComponentKind = "dataplane"
-	KindBird         ComponentKind = "bird"
 	KindBirdAdapter  ComponentKind = "birdAdapter"
 	KindAnnouncer    ComponentKind = "announcer"
 	KindOperator     ComponentKind = "operator"
@@ -50,8 +50,8 @@ const (
 // definition from YanetConfigV2.spec.components with the optional
 // per-installation override from YanetV2.spec.components.
 //
-// Registry and Prefix come straight from YanetConfigV2.spec.images and
-// are kept here so the builder can render the full path without
+// Registry and Prefix use the palette image's overrides, falling back to
+// YanetConfigV2.spec.images. The builder can render the full path without
 // touching the global config again.
 type ResolvedImage struct {
 	Registry string
@@ -61,18 +61,16 @@ type ResolvedImage struct {
 }
 
 // ResolvedComponent is the merged view of a single Deployment slot
-// requested by a YanetV2 CR. It feeds the builder (Партия R3): the
-// builder turns this struct into one or more Deployment skeletons and
-// then ApplyPatches (Партия R3.5) layers strategic-merge patches on
+// requested by a YanetV2 CR. The builder turns this struct into one or more
+// Deployment skeletons and then ApplyPatches layers strategic-merge patches on
 // top.
 //
-// Numa is only populated for KindControlplane.
-// Containers is only populated for KindOperator (the multi-container
-// Pod case). Other kinds always render a single container.
+// Numa is only populated for KindControlplane. Containers is only populated
+// for KindOperator. NativeSidecars is only populated for KindDataplane.
 type ResolvedComponent struct {
 	Kind ComponentKind
-	// Name is the canonical component name. For the 5 hardcoded
-	// kinds it equals the kind ("controlplane", "dataplane", ...).
+	// Name is the canonical workload name. For fixed workload kinds it equals
+	// the kind ("controlplane", "dataplane", ...).
 	// For operators it is OperatorSpec.Name.
 	Name string
 
@@ -86,13 +84,6 @@ type ResolvedComponent struct {
 	// rest are exposed via Containers.
 	Image ResolvedImage
 
-	// Port is the primary service port. Zero means "no Service".
-	Port int32
-
-	// PortRange controls per-NUMA controlplane listen ports
-	// (Port..Port+PortRange-1). Ignored for non-controlplane kinds.
-	PortRange int32
-
 	// Config carries the resolved config source (inline | hostPath |
 	// URL). nil means the component does not need a config volume.
 	Config *yanetv2alpha1.ConfigSource
@@ -100,7 +91,7 @@ type ResolvedComponent struct {
 	// Hugepages is only set for KindDataplane.
 	Hugepages *yanetv2alpha1.Hugepages
 
-	// HostNetwork applies to KindDataplane (default true) and is nil
+	// HostNetwork applies to KindDataplane (default false) and is nil
 	// for the other kinds.
 	HostNetwork *bool
 
@@ -117,8 +108,13 @@ type ResolvedComponent struct {
 
 	// Containers is the resolved per-container view of an operator
 	// Pod. The first element is the primary container and backs the
-	// optional per-operator Service.
+	// per-operator Service.
 	Containers []ResolvedContainer
+
+	// NativeSidecars is the ordered set of enabled native sidecars for a
+	// dataplane Pod. The netlink sidecar precedes BIRD so it also terminates
+	// after BIRD when kubelet stops sidecars in reverse order.
+	NativeSidecars []ResolvedContainer
 
 	// Patches is the ordered list of patch NAMES that the box wires
 	// to this component. Resolution into actual NamedPatch objects
@@ -177,8 +173,8 @@ func FindOperator(config *yanetv2alpha1.YanetConfigSpec, name string) (*yanetv2a
 //
 // kind is one of the constants above. For KindOperator the operator
 // name is taken from the boxType.operators map and the overrides come
-// from YanetV2.spec.components.operators[name]. For the 5 hardcoded
-// kinds the operatorName argument is ignored.
+// from YanetV2.spec.components.operators[name]. For fixed workload kinds the
+// operatorName argument is ignored.
 //
 // A nil result with a nil error means the component is disabled in
 // the boxType (no slot at all, or operator key absent in
@@ -205,8 +201,6 @@ func ResolveBoxComponent(
 		return resolveControlplane(config, yanet, box)
 	case KindDataplane:
 		return resolveDataplane(config, yanet, box)
-	case KindBird:
-		return resolveBird(config, yanet, box)
 	case KindBirdAdapter:
 		return resolveBirdAdapter(config, yanet, box)
 	case KindAnnouncer:
@@ -236,15 +230,17 @@ func EnabledComponentsForBox(config *yanetv2alpha1.YanetConfigSpec, boxName stri
 	if err != nil {
 		return nil, err
 	}
+	for name := range box.Operators {
+		if _, err := FindOperator(config, name); err != nil {
+			return nil, err
+		}
+	}
 	var refs []ComponentRef
 	if box.Components.Controlplane != nil {
 		refs = append(refs, ComponentRef{Kind: KindControlplane})
 	}
 	if box.Components.Dataplane != nil {
 		refs = append(refs, ComponentRef{Kind: KindDataplane})
-	}
-	if box.Components.Bird != nil {
-		refs = append(refs, ComponentRef{Kind: KindBird})
 	}
 	if box.Components.BirdAdapter != nil {
 		refs = append(refs, ComponentRef{Kind: KindBirdAdapter})
@@ -280,8 +276,6 @@ func resolveControlplane(
 		Name:         string(KindControlplane),
 		Enabled:      resolveEnabled(override),
 		Image:        mergeImage(config.Images, cp.Image, containerOverride(override, string(KindControlplane))),
-		Port:         cp.Port,
-		PortRange:    cp.PortRange,
 		Config:       cp.Config,
 		Numa:         Int32Value(cp.Numa, 0),
 		DisabledNuma: resolveDisabledNuma(cp.DisabledNuma, yanet),
@@ -315,42 +309,88 @@ func resolveDataplane(
 	}
 	dp := config.Components.Dataplane
 	override := componentOverride(yanet, KindDataplane, "")
+	nativeSidecars, err := resolveDataplaneSidecars(config, yanet, box)
+	if err != nil {
+		return nil, err
+	}
 	return &ResolvedComponent{
-		Kind:        KindDataplane,
-		Name:        string(KindDataplane),
-		Enabled:     resolveEnabled(override),
-		Image:       mergeImage(config.Images, dp.Image, containerOverride(override, string(KindDataplane))),
-		Port:        dp.Port,
-		Config:      dp.Config,
-		Hugepages:   dp.Hugepages,
-		HostNetwork: dp.HostNetwork,
-		Patches:     slot.Patches,
+		Kind:           KindDataplane,
+		Name:           string(KindDataplane),
+		Enabled:        resolveEnabled(override),
+		Image:          mergeImage(config.Images, dp.Image, containerOverride(override, yanetv2alpha1.DataplaneContainerName)),
+		Config:         dp.Config,
+		Hugepages:      dp.Hugepages,
+		HostNetwork:    dp.HostNetwork,
+		NativeSidecars: nativeSidecars,
+		Patches:        slot.Patches,
 	}, nil
 }
 
-func resolveBird(
+func resolveDataplaneSidecars(
 	config *yanetv2alpha1.YanetConfigSpec,
 	yanet *yanetv2alpha1.YanetSpec,
 	box *yanetv2alpha1.BoxType,
-) (*ResolvedComponent, error) {
-	slot := box.Components.Bird
-	if slot == nil {
-		return nil, nil
+) ([]ResolvedContainer, error) {
+	var palette *yanetv2alpha1.DataplaneSidecarsSpec
+	if config.Components.Dataplane.Sidecars != nil {
+		palette = config.Components.Dataplane.Sidecars
 	}
-	if config.Components.Bird == nil {
-		return nil, fmt.Errorf("boxType %q wires bird but YanetConfigV2.spec.components.bird is not defined", box.Name)
+	var selection *yanetv2alpha1.BoxDataplaneSidecars
+	if box.Components.Dataplane != nil {
+		selection = box.Components.Dataplane.Sidecars
 	}
-	bird := config.Components.Bird
-	override := componentOverride(yanet, KindBird, "")
-	return &ResolvedComponent{
-		Kind:    KindBird,
-		Name:    string(KindBird),
-		Enabled: resolveEnabled(override),
-		Image:   mergeImage(config.Images, bird.Image, containerOverride(override, string(KindBird))),
-		Port:    bird.Port,
-		Config:  bird.Config,
-		Patches: slot.Patches,
-	}, nil
+	var override *yanetv2alpha1.YanetComponentOverride
+	if yanet.Components != nil {
+		override = yanet.Components.Dataplane
+	}
+
+	type sidecarSlot struct {
+		name      string
+		palette   *yanetv2alpha1.DataplaneSidecarSpec
+		selection *yanetv2alpha1.BoxDataplaneSidecar
+	}
+	slots := []sidecarSlot{
+		{name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName},
+		{name: yanetv2alpha1.BirdSidecarContainerName},
+	}
+	if palette != nil {
+		slots[0].palette = palette.NetlinkDataplaneSidecar
+		slots[1].palette = palette.Bird
+	}
+	if selection != nil {
+		slots[0].selection = selection.NetlinkDataplaneSidecar
+		slots[1].selection = selection.Bird
+	}
+
+	resolved := make([]ResolvedContainer, 0, len(slots))
+	for _, slot := range slots {
+		sidecarOverride := containerOverride(override, slot.name)
+		if slot.selection == nil {
+			// Admission rejects new unwired overrides. Ignore a stale persisted
+			// override here so removing a sidecar from the box can roll it out.
+			continue
+		}
+		if slot.palette == nil {
+			return nil, fmt.Errorf(
+				"boxType %q wires dataplane sidecar %q but YanetConfigV2.spec.components.dataplane.sidecars does not define it",
+				box.Name,
+				slot.name,
+			)
+		}
+		enabled := BoolValue(slot.selection.Enabled, true)
+		if sidecarOverride != nil && sidecarOverride.Enabled != nil {
+			enabled = *sidecarOverride.Enabled
+		}
+		if !enabled {
+			continue
+		}
+		resolved = append(resolved, ResolvedContainer{
+			Name:   slot.name,
+			Image:  mergeImage(config.Images, slot.palette.Image, sidecarOverride),
+			Config: slot.palette.Config,
+		})
+	}
+	return resolved, nil
 }
 
 func resolveBirdAdapter(
@@ -371,8 +411,7 @@ func resolveBirdAdapter(
 		Kind:    KindBirdAdapter,
 		Name:    string(KindBirdAdapter),
 		Enabled: resolveEnabled(override),
-		Image:   mergeImage(config.Images, ad.Image, containerOverride(override, string(KindBirdAdapter))),
-		Port:    ad.Port,
+		Image:   mergeImage(config.Images, ad.Image, containerOverride(override, yanetv2alpha1.BirdAdapterContainerName)),
 		Config:  ad.Config,
 		Patches: slot.Patches,
 	}, nil
@@ -397,7 +436,6 @@ func resolveAnnouncer(
 		Name:    string(KindAnnouncer),
 		Enabled: resolveEnabled(override),
 		Image:   mergeImage(config.Images, an.Image, containerOverride(override, string(KindAnnouncer))),
-		Port:    an.Port,
 		Config:  an.Config,
 		Patches: slot.Patches,
 	}, nil
@@ -421,11 +459,11 @@ func resolveOperator(
 		return nil, fmt.Errorf("operator %q has no containers", operatorName)
 	}
 	override := componentOverride(yanet, KindOperator, operatorName)
-
 	containers := make([]ResolvedContainer, 0, len(op.Containers))
 	for i := range op.Containers {
 		c := &op.Containers[i]
-		img := mergeImage(config.Images, c.Image, containerOverride(override, c.Name))
+		containerOvr := containerOverride(override, c.Name)
+		img := mergeImage(config.Images, c.Image, containerOvr)
 		containers = append(containers, ResolvedContainer{
 			Name:    c.Name,
 			Image:   img,
@@ -439,7 +477,6 @@ func resolveOperator(
 		Name:       op.Name,
 		Enabled:    resolveEnabled(override),
 		Image:      containers[0].Image,
-		Port:       op.Port,
 		Containers: containers,
 		Patches:    slot.Patches,
 	}, nil
@@ -464,8 +501,6 @@ func componentOverride(
 		return &yanet.Components.Controlplane.YanetComponentOverride
 	case KindDataplane:
 		return yanet.Components.Dataplane
-	case KindBird:
-		return yanet.Components.Bird
 	case KindBirdAdapter:
 		return yanet.Components.BirdAdapter
 	case KindAnnouncer:
@@ -488,17 +523,24 @@ func resolveEnabled(override *yanetv2alpha1.YanetComponentOverride) bool {
 
 // mergeImage builds the final image reference. When the per-container
 // override carries Name or Tag, those win over the palette values.
-// Registry / Prefix always come from YanetConfigV2.spec.images.
+// Palette Registry / Prefix override the global defaults independently. A nil
+// pointer inherits the global value; an explicit empty string clears it.
 func mergeImage(
 	images yanetv2alpha1.ImagesSpec,
 	base yanetv2alpha1.ImageRef,
-	override *yanetv2alpha1.ImageRef,
+	override *yanetv2alpha1.YanetContainerOverride,
 ) ResolvedImage {
 	out := ResolvedImage{
 		Registry: images.Registry,
 		Prefix:   images.Prefix,
 		Name:     base.Name,
 		Tag:      base.Tag,
+	}
+	if base.Registry != nil {
+		out.Registry = *base.Registry
+	}
+	if base.Prefix != nil {
+		out.Prefix = *base.Prefix
 	}
 	if override != nil {
 		if override.Name != "" {
@@ -517,7 +559,7 @@ func mergeImage(
 func containerOverride(
 	override *yanetv2alpha1.YanetComponentOverride,
 	containerName string,
-) *yanetv2alpha1.ImageRef {
+) *yanetv2alpha1.YanetContainerOverride {
 	if override == nil || len(override.Containers) == 0 {
 		return nil
 	}

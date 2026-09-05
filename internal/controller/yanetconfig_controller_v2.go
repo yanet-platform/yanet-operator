@@ -18,12 +18,17 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
@@ -44,37 +49,67 @@ type YanetConfigReconcilerV2 struct {
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2/finalizers,verbs=update
+//+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetsv2,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile updates the in-memory snapshot whenever the v2alpha1
-// YanetConfigV2 changes. Deletion clears the snapshot back to a zero
-// value so the YanetV2 reconciler can detect "no config available".
+// Reconcile updates the singleton in-memory snapshot whenever the
+// cluster-scoped YanetConfigV2 changes.
 func (r *YanetConfigReconcilerV2) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("yanetconfig-v2", req.NamespacedName)
 
-	cfg := &yanetv2alpha1.YanetConfigV2{}
-	err := r.Client.Get(ctx, req.NamespacedName, cfg)
+	cfg, err := refreshYanetConfigV2Snapshot(ctx, r.Client, r.GlobalConfigV2)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("YanetConfigV2 v2 deleted; clearing in-memory snapshot")
-			r.GlobalConfigV2.Lock.Lock()
-			r.GlobalConfigV2.Config = yanetv2alpha1.YanetConfigSpec{}
-			r.GlobalConfigV2.Lock.Unlock()
-			return ctrl.Result{}, nil
-		}
-		logger.Error(err, "failed to get YanetConfigV2 v2")
+		logger.Error(err, "failed to refresh YanetConfigV2 snapshot")
 		return ctrl.Result{}, err
 	}
-
-	r.GlobalConfigV2.Lock.Lock()
-	r.GlobalConfigV2.Config = *cfg.Spec.DeepCopy()
-	r.GlobalConfigV2.Lock.Unlock()
+	if cfg == nil {
+		logger.Info("YanetConfigV2 snapshot cleared; singleton does not exist")
+		return ctrl.Result{}, nil
+	}
 
 	logger.V(1).Info("YanetConfigV2 v2 snapshot updated",
 		"boxTypes", len(cfg.Spec.BoxTypes),
 		"patches", len(cfg.Spec.Patches),
 		"operators", len(cfg.Spec.Components.Operators),
 	)
+	if cfg.Spec.Stop {
+		logger.Info("YanetConfigV2.spec.stop is true, skipping shared Service reconcile")
+		return ctrl.Result{}, nil
+	}
+	if err := r.reconcileSharedServicesV2(ctx, cfg, logger); err != nil {
+		logger.Error(err, "failed to reconcile shared Services")
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
+}
+
+func refreshYanetConfigV2Snapshot(
+	ctx context.Context,
+	c client.Client,
+	snapshot *yanetv2alpha1.MutexYanetConfigSpec,
+) (*yanetv2alpha1.YanetConfigV2, error) {
+	if snapshot == nil {
+		return nil, fmt.Errorf("GlobalConfigV2 is nil")
+	}
+	// Both the config reconciler and the YanetV2 watch mapper refresh this
+	// snapshot. Serialize the read as well as publication so an older in-flight
+	// read cannot overwrite a newer config (including the global stop flag).
+	snapshot.Lock.Lock()
+	defer snapshot.Lock.Unlock()
+	cfg := &yanetv2alpha1.YanetConfigV2{}
+	err := c.Get(ctx, client.ObjectKey{Name: yanetv2alpha1.YanetConfigName}, cfg)
+	if err != nil && !apierrors.IsNotFound(err) {
+		snapshot.Config = yanetv2alpha1.YanetConfigSpec{}
+		return nil, err
+	}
+
+	if apierrors.IsNotFound(err) {
+		snapshot.Config = yanetv2alpha1.YanetConfigSpec{}
+		return nil, nil
+	}
+	snapshot.Config = *cfg.Spec.DeepCopy()
+	return cfg, nil
 }
 
 // SetupWithManager wires the controller to watch v2alpha1.YanetConfigV2.
@@ -84,5 +119,14 @@ func (r *YanetConfigReconcilerV2) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("yanetconfig-v2alpha1").
 		For(&yanetv2alpha1.YanetConfigV2{}).
+		Watches(&yanetv2alpha1.YanetV2{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigV2Singleton)).
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigV2Singleton)).
+		Owns(&corev1.Service{}).
 		Complete(r)
+}
+
+func enqueueYanetConfigV2Singleton(context.Context, client.Object) []reconcile.Request {
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: yanetv2alpha1.YanetConfigName},
+	}}
 }

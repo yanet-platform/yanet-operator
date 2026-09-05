@@ -35,7 +35,7 @@ import (
 )
 
 var _ = Describe("AutoSync Behavior E2E Tests", func() {
-	ctx := context.Background()
+	testContext := context.Background()
 
 	// Each context uses a dedicated namespace + unique node-selector
 	// label so its Deployments and Nodes never collide with the
@@ -50,7 +50,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 		var node *corev1.Node
 
 		BeforeEach(func() {
-			ensureNamespace(ctx, ns)
+			ensureNamespace(testContext, ns)
 
 			config = &yanetv1alpha1.YanetConfig{
 				ObjectMeta: metav1.ObjectMeta{
@@ -62,7 +62,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					Stop:         false,
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconciler time to update GlobalConfig snapshot
 			time.Sleep(1000 * time.Millisecond)
@@ -77,17 +77,17 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 		})
 
 		AfterEach(func() {
-			cleanupYanetV1(ctx, ns)
-			cleanupDeployments(ctx, ns)
+			cleanupYanetV1(testContext, ns)
+			cleanupDeployments(testContext, ns)
 			if node != nil {
-				_ = k8sClient.Delete(ctx, node)
+				_ = k8sClient.Delete(testContext, node)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
@@ -100,11 +100,11 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync: false,
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Give the reconciler time; expect no Deployments appear.
 			Consistently(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 3*time.Second, 500*time.Millisecond).Should(Equal(0),
 				"no deployments should be created when autoSync=false")
 		})
@@ -118,10 +118,10 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync: true,
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created when autoSync=true")
 		})
@@ -135,18 +135,18 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync: false,
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Consistently(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 2*time.Second, 500*time.Millisecond).Should(Equal(0))
 
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "autosync-toggle-v1", Namespace: ns}, yanet)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, types.NamespacedName{Name: "autosync-toggle-v1", Namespace: ns}, yanet)).Should(Succeed())
 			yanet.Spec.AutoSync = true
-			Expect(k8sClient.Update(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created after toggling autoSync to true")
 		})
@@ -164,34 +164,31 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 		var node *corev1.Node
 
 		BeforeEach(func() {
-			ensureNamespace(ctx, ns)
+			ensureNamespace(testContext, ns)
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "autosync-config-v2",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/cp", Tag: "v1"},
-							Port:  8080,
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "docker.io/test/dp", Tag: "v1"},
-							Port:  8081,
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{
 						Name: boxTypeNm,
 						Components: yanetv2alpha1.BoxComponents{
 							Controlplane: &yanetv2alpha1.BoxComponent{},
-							Dataplane:    &yanetv2alpha1.BoxComponent{},
+							Dataplane:    &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconcilerV2 time to update GlobalConfigV2 snapshot
 			time.Sleep(1000 * time.Millisecond)
@@ -207,17 +204,17 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 		})
 
 		AfterEach(func() {
-			cleanupYanetV2(ctx, ns)
-			cleanupDeployments(ctx, ns)
+			cleanupYanetV2(testContext, ns)
+			cleanupDeployments(testContext, ns)
 			if node != nil {
-				_ = k8sClient.Delete(ctx, node)
+				_ = k8sClient.Delete(testContext, node)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
@@ -230,10 +227,10 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(false),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Consistently(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 3*time.Second, 500*time.Millisecond).Should(Equal(0),
 				"no deployments should be created when autoSync=false")
 		})
@@ -247,10 +244,10 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created when autoSync=true")
 		})
@@ -264,18 +261,18 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(false),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Consistently(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 2*time.Second, 500*time.Millisecond).Should(Equal(0))
 
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "autosync-toggle-v2", Namespace: ns}, yanet)).Should(Succeed())
+			Expect(k8sClient.Get(testContext, types.NamespacedName{Name: "autosync-toggle-v2", Namespace: ns}, yanet)).Should(Succeed())
 			yanet.Spec.AutoSync = helpers.PtrBool(true)
-			Expect(k8sClient.Update(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() int {
-				return countDeployments(ctx, ns)
+				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created after toggling autoSync to true")
 		})
@@ -293,12 +290,11 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 		var node *corev1.Node
 
 		BeforeEach(func() {
-			ensureNamespace(ctx, ns)
+			ensureNamespace(testContext, ns)
 
 			config = &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "autosync-patch-config",
-					Namespace: ns,
+					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
 					Components: yanetv2alpha1.ComponentsSpec{
@@ -321,12 +317,12 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 							Controlplane: &yanetv2alpha1.BoxComponent{
 								Patches: []string{"test-patch"},
 							},
-							Dataplane: &yanetv2alpha1.BoxComponent{},
+							Dataplane: &yanetv2alpha1.BoxDataplane{},
 						},
 					}},
 				},
 			}
-			Expect(k8sClient.Create(ctx, config)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, config)).Should(Succeed())
 
 			// Give YanetConfigReconcilerV2 time to update GlobalConfigV2 snapshot
 			time.Sleep(1000 * time.Millisecond)
@@ -342,17 +338,17 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, node)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, node)).Should(Succeed())
 		})
 
 		AfterEach(func() {
-			cleanupYanetV2(ctx, ns)
-			cleanupDeployments(ctx, ns)
+			cleanupYanetV2(testContext, ns)
+			cleanupDeployments(testContext, ns)
 			if node != nil {
-				_ = k8sClient.Delete(ctx, node)
+				_ = k8sClient.Delete(testContext, node)
 			}
 			if config != nil {
-				_ = k8sClient.Delete(ctx, config)
+				_ = k8sClient.Delete(testContext, config)
 			}
 		})
 
@@ -365,11 +361,11 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 					AutoSync:     helpers.PtrBool(true),
 				},
 			}
-			Expect(k8sClient.Create(ctx, yanet)).Should(Succeed())
+			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			Eventually(func() bool {
 				depList := &appsv1.DeploymentList{}
-				if err := k8sClient.List(ctx, depList, client.InNamespace(ns)); err != nil {
+				if err := k8sClient.List(testContext, depList, client.InNamespace(ns)); err != nil {
 					return false
 				}
 				for i := range depList.Items {

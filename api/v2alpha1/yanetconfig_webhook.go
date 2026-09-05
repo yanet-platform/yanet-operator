@@ -20,9 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"net/url"
+	"path"
+	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -35,9 +41,7 @@ var yanetConfigLog = logf.Log.WithName("yanetconfig-v2-webhook")
 // final model: unique names, cross-references between boxTypes /
 // patches / operators, and a dry-run of every strategic-merge patch
 // against an empty appsv1.Deployment.
-//
-// The validator does not need a Kubernetes client: a YanetConfigV2 is
-// fully self-contained.
+// +kubebuilder:object:generate=false
 type YanetConfigCustomValidator struct{}
 
 var _ admission.Validator[*YanetConfigV2] = &YanetConfigCustomValidator{}
@@ -55,12 +59,18 @@ func SetupYanetConfigWebhookWithManager(mgr ctrl.Manager) error {
 // ValidateCreate implements admission.Validator.
 func (v *YanetConfigCustomValidator) ValidateCreate(ctx context.Context, cfg *YanetConfigV2) (admission.Warnings, error) {
 	yanetConfigLog.Info("validate create", "name", cfg.Name)
+	if err := validateYanetConfigIdentity(cfg); err != nil {
+		return nil, err
+	}
 	return nil, validateYanetConfig(&cfg.Spec)
 }
 
 // ValidateUpdate implements admission.Validator.
 func (v *YanetConfigCustomValidator) ValidateUpdate(ctx context.Context, _, cfg *YanetConfigV2) (admission.Warnings, error) {
 	yanetConfigLog.Info("validate update", "name", cfg.Name)
+	if err := validateYanetConfigIdentity(cfg); err != nil {
+		return nil, err
+	}
 	return nil, validateYanetConfig(&cfg.Spec)
 }
 
@@ -68,6 +78,13 @@ func (v *YanetConfigCustomValidator) ValidateUpdate(ctx context.Context, _, cfg 
 // allowed.
 func (v *YanetConfigCustomValidator) ValidateDelete(ctx context.Context, _ *YanetConfigV2) (admission.Warnings, error) {
 	return nil, nil
+}
+
+func validateYanetConfigIdentity(cfg *YanetConfigV2) error {
+	if cfg.Name != YanetConfigName {
+		return fmt.Errorf("metadata.name must be %q for the cluster-wide YanetConfigV2 singleton", YanetConfigName)
+	}
+	return nil
 }
 
 // validateYanetConfig runs the full v2 model check: name uniqueness,
@@ -78,6 +95,10 @@ func (v *YanetConfigCustomValidator) ValidateDelete(ctx context.Context, _ *Yane
 func validateYanetConfig(spec *YanetConfigSpec) error {
 	if spec.UpdateWindow < 0 {
 		return fmt.Errorf("spec.updateWindow must be >= 0, got %d", spec.UpdateWindow)
+	}
+	const maxUpdateWindow = math.MaxInt64 / int64(time.Second)
+	if int64(spec.UpdateWindow) > maxUpdateWindow {
+		return fmt.Errorf("spec.updateWindow must not exceed %d seconds, got %d", maxUpdateWindow, spec.UpdateWindow)
 	}
 	if err := validatePatchUniqueness(spec.Patches); err != nil {
 		return err
@@ -91,10 +112,13 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validateBoxTypeRefs(spec); err != nil {
 		return err
 	}
-	if err := validatePortRanges(&spec.Components); err != nil {
+	if err := validateHostNetworkPortRange(spec.HostNetworkPortRange); err != nil {
 		return err
 	}
 	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
+		return err
+	}
+	if err := validateComponentImages(&spec.Components); err != nil {
 		return err
 	}
 	if err := validateConfigSources(&spec.Components); err != nil {
@@ -109,13 +133,76 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	return nil
 }
 
+func validateComponentImages(components *ComponentsSpec) error {
+	validate := func(path string, image ImageRef) error {
+		if image.Name == "" {
+			return fmt.Errorf("%s.name is required", path)
+		}
+		return nil
+	}
+	if err := validate("spec.components.controlplane.image", components.Controlplane.Image); err != nil {
+		return err
+	}
+	if err := validate("spec.components.dataplane.image", components.Dataplane.Image); err != nil {
+		return err
+	}
+	if components.Dataplane.Sidecars != nil {
+		if components.Dataplane.Sidecars.Bird != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.bird.image",
+				components.Dataplane.Sidecars.Bird.Image,
+			); err != nil {
+				return err
+			}
+		}
+		if components.Dataplane.Sidecars.NetlinkDataplaneSidecar != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar.image",
+				components.Dataplane.Sidecars.NetlinkDataplaneSidecar.Image,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if components.BirdAdapter != nil {
+		if err := validate("spec.components.birdAdapter.image", components.BirdAdapter.Image); err != nil {
+			return err
+		}
+	}
+	if components.Announcer != nil {
+		if err := validate("spec.components.announcer.image", components.Announcer.Image); err != nil {
+			return err
+		}
+	}
+	for i := range components.Operators {
+		for j := range components.Operators[i].Containers {
+			if err := validate(
+				fmt.Sprintf("spec.components.operators[%d].containers[%d].image", i, j),
+				components.Operators[i].Containers[j].Image,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func validateConfigSources(components *ComponentsSpec) error {
-	validate := func(path string, source *ConfigSource) error {
+	validate := func(fieldPath string, source *ConfigSource) error {
 		if source == nil {
 			return nil
 		}
 		if variants := source.VariantsSet(); variants != 1 {
-			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", path, variants)
+			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", fieldPath, variants)
+		}
+		if source.HostPath != "" && !path.IsAbs(source.HostPath) {
+			return fmt.Errorf("%s.hostPath must be an absolute path", fieldPath)
+		}
+		if source.URL != "" {
+			parsed, err := url.Parse(source.URL)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+				return fmt.Errorf("%s.url must be an absolute HTTP(S) URL with a host", fieldPath)
+			}
 		}
 		return nil
 	}
@@ -126,9 +213,22 @@ func validateConfigSources(components *ComponentsSpec) error {
 	if err := validate("spec.components.dataplane.config", components.Dataplane.Config); err != nil {
 		return err
 	}
-	if components.Bird != nil {
-		if err := validate("spec.components.bird.config", components.Bird.Config); err != nil {
-			return err
+	if components.Dataplane.Sidecars != nil {
+		if components.Dataplane.Sidecars.Bird != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.bird.config",
+				components.Dataplane.Sidecars.Bird.Config,
+			); err != nil {
+				return err
+			}
+		}
+		if components.Dataplane.Sidecars.NetlinkDataplaneSidecar != nil {
+			if err := validate(
+				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar.config",
+				components.Dataplane.Sidecars.NetlinkDataplaneSidecar.Config,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	if components.BirdAdapter != nil {
@@ -164,6 +264,9 @@ func validateConfigSources(components *ComponentsSpec) error {
 // pinned explicitly. With NFD auto-detection the count is a per-node
 // runtime property, so the equivalent guard lives in the reconciler.
 func validateDisabledNuma(cp *ControlplaneSpec) error {
+	if cp.Numa != nil && *cp.Numa <= 0 {
+		return fmt.Errorf("spec.components.controlplane.numa must be greater than zero, got %d", *cp.Numa)
+	}
 	if len(cp.DisabledNuma) == 0 {
 		return nil
 	}
@@ -180,8 +283,8 @@ func validateDisabledNuma(cp *ControlplaneSpec) error {
 	}
 	count := *cp.Numa
 	disabled := int32(0)
-	for i := int32(0); i < count; i++ {
-		if _, ok := seen[i]; ok {
+	for index := range seen {
+		if index < count {
 			disabled++
 		}
 	}
@@ -219,22 +322,42 @@ func validatePatchUniqueness(patches []NamedPatch) error {
 }
 
 func validateOperatorUniqueness(ops []OperatorSpec) error {
+	reservedNames := map[string]struct{}{
+		"controlplane":              {},
+		"dataplane":                 {},
+		"bird":                      {},
+		"bird-adapter":              {},
+		"netlink-dataplane-sidecar": {},
+		"announcer":                 {},
+	}
 	seen := make(map[string]struct{}, len(ops))
 	for i := range ops {
 		name := ops[i].Name
 		if name == "" {
 			return fmt.Errorf("spec.components.operators[%d].name is empty", i)
 		}
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("spec.components.operators[%d].name %q is invalid: %s", i, name, strings.Join(errs, "; "))
+		}
+		if _, reserved := reservedNames[name]; reserved {
+			return fmt.Errorf("spec.components.operators[%d].name %q is reserved for a built-in component", i, name)
+		}
 		if _, dup := seen[name]; dup {
 			return fmt.Errorf("spec.components.operators[%d].name %q is duplicated", i, name)
 		}
 		seen[name] = struct{}{}
 
+		if count := len(ops[i].Containers); count < 1 || count > 8 {
+			return fmt.Errorf("spec.components.operators[%d:%s].containers must contain between 1 and 8 entries, got %d", i, name, count)
+		}
 		containerNames := make(map[string]struct{}, len(ops[i].Containers))
 		for j := range ops[i].Containers {
 			cname := ops[i].Containers[j].Name
 			if cname == "" {
 				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name is required", i, name, j)
+			}
+			if errs := k8svalidation.IsDNS1123Label(cname); len(errs) > 0 {
+				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name %q is invalid: %s", i, name, j, cname, strings.Join(errs, "; "))
 			}
 			if _, dup := containerNames[cname]; dup {
 				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name %q is duplicated", i, name, j, cname)
@@ -246,11 +369,17 @@ func validateOperatorUniqueness(ops []OperatorSpec) error {
 }
 
 func validateBoxTypeUniqueness(boxes []BoxType) error {
+	if len(boxes) == 0 {
+		return fmt.Errorf("spec.boxTypes must contain at least one entry")
+	}
 	seen := make(map[string]struct{}, len(boxes))
 	for i := range boxes {
 		name := boxes[i].Name
 		if name == "" {
 			return fmt.Errorf("spec.boxTypes[%d].name is empty", i)
+		}
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("spec.boxTypes[%d].name %q is invalid: %s", i, name, strings.Join(errs, "; "))
 		}
 		if _, dup := seen[name]; dup {
 			return fmt.Errorf("spec.boxTypes[%d].name %q is duplicated", i, name)
@@ -294,17 +423,21 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 		if err := assertPatchesExist(path+".components.dataplane.patches", box.Components.Dataplane.Patches, patchSet); err != nil {
 			return err
 		}
-		if box.Components.Bird != nil {
-			if err := assertPatchesExist(path+".components.bird.patches", box.Components.Bird.Patches, patchSet); err != nil {
-				return err
-			}
+		if err := validateDataplaneSidecarRefs(path, &spec.Components.Dataplane, box.Components.Dataplane); err != nil {
+			return err
 		}
 		if box.Components.BirdAdapter != nil {
+			if spec.Components.BirdAdapter == nil {
+				return fmt.Errorf("%s.components.birdAdapter has no matching spec.components.birdAdapter", path)
+			}
 			if err := assertPatchesExist(path+".components.birdAdapter.patches", box.Components.BirdAdapter.Patches, patchSet); err != nil {
 				return err
 			}
 		}
 		if box.Components.Announcer != nil {
+			if spec.Components.Announcer == nil {
+				return fmt.Errorf("%s.components.announcer has no matching spec.components.announcer", path)
+			}
 			if err := assertPatchesExist(path+".components.announcer.patches", box.Components.Announcer.Patches, patchSet); err != nil {
 				return err
 			}
@@ -322,85 +455,43 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 	return nil
 }
 
-// validatePortRanges checks that the listen-port intervals of the
-// declared components do not overlap. The controlplane occupies
-// Port..Port+PortRange-1 (per-NUMA fan-out); every other component
-// occupies a single Port. A Port of 0 means the component has no
-// listener and is skipped.
-func validatePortRanges(comps *ComponentsSpec) error {
-	type interval struct {
-		path     string
-		from, to int32 // inclusive
-	}
-
-	cp := comps.Controlplane
-	if cp.Port < 0 || cp.Port > 65535 {
-		return fmt.Errorf("spec.components.controlplane.port must be in 0..65535, got %d", cp.Port)
-	}
-	if cp.PortRange < 0 {
-		return fmt.Errorf("spec.components.controlplane.portRange must be >= 0, got %d", cp.PortRange)
-	}
-	if cp.Port > 0 && cp.PortRange > 0 && int64(cp.Port)+int64(cp.PortRange)-1 > 65535 {
-		return fmt.Errorf("spec.components.controlplane: port range %d..%d exceeds 65535",
-			cp.Port, int64(cp.Port)+int64(cp.PortRange)-1)
-	}
-
-	var intervals []interval
-	if cp.Port > 0 {
-		end := cp.Port
-		if cp.PortRange > 1 {
-			end = cp.Port + cp.PortRange - 1
-		}
-		intervals = append(intervals, interval{
-			path: "spec.components.controlplane",
-			from: cp.Port, to: end,
-		})
-	}
-	add := func(path string, port int32) error {
-		if port == 0 {
-			return nil
-		}
-		if port < 0 || port > 65535 {
-			return fmt.Errorf("%s.port must be in 0..65535, got %d", path, port)
-		}
-		intervals = append(intervals, interval{path: path, from: port, to: port})
+func validateDataplaneSidecarRefs(path string, palette *DataplaneSpec, box *BoxDataplane) error {
+	if box.Sidecars == nil {
 		return nil
 	}
-	if err := add("spec.components.dataplane", comps.Dataplane.Port); err != nil {
-		return err
+	if box.Sidecars.Bird != nil && (palette.Sidecars == nil || palette.Sidecars.Bird == nil) {
+		return fmt.Errorf(
+			"%s.components.dataplane.sidecars.bird has no matching spec.components.dataplane.sidecars.bird",
+			path,
+		)
 	}
-	if comps.Bird != nil {
-		if err := add("spec.components.bird", comps.Bird.Port); err != nil {
-			return err
-		}
+	if box.Sidecars.NetlinkDataplaneSidecar != nil &&
+		(palette.Sidecars == nil || palette.Sidecars.NetlinkDataplaneSidecar == nil) {
+		return fmt.Errorf(
+			"%s.components.dataplane.sidecars.netlinkDataplaneSidecar has no matching "+
+				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar",
+			path,
+		)
 	}
-	if comps.BirdAdapter != nil {
-		if err := add("spec.components.birdAdapter", comps.BirdAdapter.Port); err != nil {
-			return err
-		}
-	}
-	if comps.Announcer != nil {
-		if err := add("spec.components.announcer", comps.Announcer.Port); err != nil {
-			return err
-		}
-	}
-	for i := range comps.Operators {
-		op := &comps.Operators[i]
-		if err := add(fmt.Sprintf("spec.components.operators[%s]", op.Name), op.Port); err != nil {
-			return err
-		}
-	}
+	return nil
+}
 
-	// O(n^2) but n is tiny (≤5+operators).
-	for i := range intervals {
-		a := intervals[i]
-		for j := i + 1; j < len(intervals); j++ {
-			b := intervals[j]
-			if a.from <= b.to && b.from <= a.to {
-				return fmt.Errorf("port overlap between %s (%d..%d) and %s (%d..%d)",
-					a.path, a.from, a.to, b.path, b.from, b.to)
-			}
-		}
+func validateHostNetworkPortRange(portRange *HostNetworkPortRange) error {
+	if portRange == nil {
+		return nil
+	}
+	if portRange.Start <= 0 || portRange.Start > 65535 {
+		return fmt.Errorf("spec.hostNetworkPortRange.start must be in 1..65535, got %d", portRange.Start)
+	}
+	if portRange.End <= 0 || portRange.End > 65535 {
+		return fmt.Errorf("spec.hostNetworkPortRange.end must be in 1..65535, got %d", portRange.End)
+	}
+	if portRange.Start > portRange.End {
+		return fmt.Errorf(
+			"spec.hostNetworkPortRange.start %d must not exceed end %d",
+			portRange.Start,
+			portRange.End,
+		)
 	}
 	return nil
 }
@@ -414,10 +505,9 @@ func assertPatchesExist(path string, refs []string, registry map[string]struct{}
 	return nil
 }
 
-// dryRunPatches verifies that each patch is valid JSON/YAML and that
-// it can be merged into an empty appsv1.Deployment via the strategic
-// merge algorithm. A failure here means the patch references a field
-// that does not exist in appsv1.Deployment.
+// dryRunPatches verifies JSON object shape, strategic-merge applicability and
+// decoding of the merged Deployment's field types. This is not full Kubernetes
+// validation: the reconciler still checks the final rendered workload invariants.
 func dryRunPatches(patches []NamedPatch) error {
 	skeleton, err := json.Marshal(&appsv1.Deployment{})
 	if err != nil {
@@ -428,18 +518,20 @@ func dryRunPatches(patches []NamedPatch) error {
 		if len(raw) == 0 {
 			return fmt.Errorf("spec.patches[%d:%s].patch is empty", i, patches[i].Name)
 		}
-		// runtime.RawExtension stores arbitrary JSON; ensure it
-		// parses by re-marshalling.
-		var probe map[string]any
+		var probe map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &probe); err != nil {
 			return fmt.Errorf("spec.patches[%d:%s].patch is not valid JSON: %w", i, patches[i].Name, err)
 		}
-		patchBytes, err := json.Marshal(probe)
-		if err != nil {
-			return fmt.Errorf("spec.patches[%d:%s].patch re-marshal failed: %w", i, patches[i].Name, err)
+		if probe == nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch must be a JSON object, not null", i, patches[i].Name)
 		}
-		if _, err := strategicpatch.StrategicMergePatch(skeleton, patchBytes, appsv1.Deployment{}); err != nil {
+		merged, err := strategicpatch.StrategicMergePatch(skeleton, raw, appsv1.Deployment{})
+		if err != nil {
 			return fmt.Errorf("spec.patches[%d:%s].patch is not a valid strategic merge fragment of appsv1.Deployment: %w", i, patches[i].Name, err)
+		}
+		var deployment appsv1.Deployment
+		if err := json.Unmarshal(merged, &deployment); err != nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch has invalid Deployment field types: %w", i, patches[i].Name, err)
 		}
 	}
 	return nil

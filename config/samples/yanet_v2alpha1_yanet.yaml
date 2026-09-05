@@ -21,9 +21,10 @@ spec:
   # drift via Status without touching generated Deployments (default false).
   autoSync: true
 
-  # The ONLY per-installation overrides are enabled + per-container image.
-  # Everything broader (resources, securityContext, hostIPC, ...) lives in
-  # the YanetConfigV2 boxType/patches, or is emitted by the builder.
+  # The ONLY per-installation overrides are enabled, per-container image, and
+  # controlplane disabledNuma. Runtime endpoints and everything broader
+  # (resources, securityContext, hostIPC, ...) live in YanetConfigV2 patches or
+  # are emitted by the builder.
   components:
     controlplane:
       enabled: true

@@ -4,10 +4,14 @@ metadata:
   labels:
     app.kubernetes.io/name: yanet-operator
     app.kubernetes.io/managed-by: kustomize
-  name: yanetconfig-sample
+  name: config
 spec:
   # Global per-cluster throttling between any two node restarts (seconds).
   updateWindow: 60
+
+  # Optional inclusive range for application listeners after a Deployment
+  # patch enables hostNetwork. Service ports remain 8080 (gRPC) / 8081 (HTTP).
+  hostNetworkPortRange: {start: 20000, end: 20100}
 
   # Global image settings shared by every generated Deployment:
   # {registry}/{prefix}/{image}:{tag}.
@@ -18,7 +22,7 @@ spec:
 
   # ============================================================
   # 1) COMPONENTS — palette of available components.
-  #    The dataplane's privileged + hostNetwork/hostIPC + minimal host
+  #    The dataplane's privileged + hostIPC + minimal host
   #    devices, and the controlplane's hostIPC + /dev/hugepages shmem
   #    mount, are emitted by the BUILDER (see builder_v2.go). They are
   #    intrinsic to how the components run and are NOT configured here.
@@ -26,7 +30,6 @@ spec:
   components:
     controlplane:
       image: {name: controlplane, tag: v2.1.0}
-      port: 8080          # round-robin Service port over all NUMA instances
       numa: 1             # one controlplane Deployment per NUMA domain
       # disabledNuma: [1] # skip NUMA domains without a NIC
       config:
@@ -37,20 +40,42 @@ spec:
 
     dataplane:
       image: {name: dataplane, tag: v2.1.0}
-      port: 8090
       hugepages:
         size: 1Gi
         count: 8
-      hostNetwork: true   # default for DPDK
+      hostNetwork: false  # default; true remains available for legacy nodes
       config:
         hostPath: /etc/yanet2
         args: [/etc/yanet2/dataplane.yaml]
+      sidecars:
+        bird:
+          image: {name: bird, tag: "2.15"}
+          config:
+            hostPath: /etc/bird
+        netlinkDataplaneSidecar:
+          image: {name: netlink-dataplane-sidecar, tag: v2.1.0}
+          config:
+            hostPath: /etc/yanet2
+            args: [-c, /etc/yanet2/netlink-dataplane-sidecar.yaml]
 
   # ============================================================
   # 2) PATCHES — named registry of strategic-merge Deployment fragments.
   #    Only OPTIONAL tuning lives here (resources, tolerations, ...).
   # ============================================================
   patches:
+    # The operator injects YANET_KUBERNETES_GRPC_PORT before patch env entries.
+    # It is 8080 in a Pod network namespace and an allocated port with hostNetwork.
+    - name: controlplane-listener
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  env:
+                    - name: YANET_GATEWAY_ENDPOINT
+                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
+
     - name: tolerations
       patch:
         spec:
@@ -83,6 +108,9 @@ spec:
     - name: release
       components:
         controlplane:
-          patches: [tolerations]
+          patches: [controlplane-listener, tolerations]
         dataplane:
+          sidecars:
+            bird: {}
+            netlinkDataplaneSidecar: {}
           patches: [tolerations, dp-resources]
