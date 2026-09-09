@@ -194,11 +194,15 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
-	if overrideErr := yanetv2alpha1.ValidateEffectiveYanetComponentOverrides(
+	overrideErr := yanetv2alpha1.ValidateEffectiveYanetComponentOverrides(
 		yanet.Spec.Components,
 		&cfg.Spec.Components,
 		box,
-	); overrideErr != nil {
+	)
+	if overrideErr == nil {
+		overrideErr = yanetv2alpha1.ValidateYanetBirdDependencies(&yanet.Spec, &cfg.Spec.Components, box)
+	}
+	if overrideErr != nil {
 		logger.Error(overrideErr, "component override validation failed")
 		if r.Recorder != nil && r.checkGlobalStopV2() == nil {
 			r.Recorder.Eventf(
@@ -330,6 +334,9 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 				}
 				continue
 			}
+			if rc.IsColocated() {
+				continue
+			}
 
 			// ConfigMaps for inline configs (must land before the
 			// Deployment to avoid CreateContainerConfigError).
@@ -343,25 +350,13 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 				desired.ConfigMaps[n] = struct{}{}
 			}
 
-			deployments, berr := manifests.BuildDeployments(buildCtx, rc)
+			deployments, berr := manifests.RenderDeployments(buildCtx, rc, registry)
 			if berr != nil {
 				logger.Error(berr, "build failed", "component", rc.Name)
 				reconcileErrs = append(reconcileErrs, berr)
 				continue
 			}
 			for _, d := range deployments {
-				identity := manifests.CaptureWorkloadIdentity(d)
-				if perr := manifests.ApplyPatches(d, rc.Patches, registry); perr != nil {
-					logger.Error(perr, "patch failed", "component", rc.Name, "deployment", d.Name)
-					reconcileErrs = append(reconcileErrs, perr)
-					continue
-				}
-				manifests.RestoreWorkloadIdentity(d, identity)
-				if nameErr := manifests.ValidatePodContainerNames(d); nameErr != nil {
-					logger.Error(nameErr, "container name validation failed", "component", rc.Name, "deployment", d.Name)
-					reconcileErrs = append(reconcileErrs, nameErr)
-					continue
-				}
 				if listenerErr := manifests.ConfigureListeners(d, rc, listenerAssignments[node.Name][d.Name]); listenerErr != nil {
 					logger.Error(listenerErr, "listener configuration failed", "component", rc.Name, "deployment", d.Name)
 					reconcileErrs = append(reconcileErrs, listenerErr)
@@ -494,7 +489,12 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 	collided := make(map[string]struct{})
 	var preflightErrs []error
 	addServicePlans := func(buildCtx manifests.BuildContextV2, component *helpers.ResolvedComponent, location string) {
-		for _, plan := range manifests.BuildServices(buildCtx, component) {
+		declared, err := helpers.ResolveBoxServiceComponent(cfg, yanet.Spec.BoxType, component.Kind, component.Name)
+		if err != nil {
+			preflightErrs = append(preflightErrs, fmt.Errorf("resolve Service for %s %s: %w", component.Name, location, err))
+			return
+		}
+		for _, plan := range manifests.BuildServices(buildCtx, declared) {
 			if err := plan.Validate(); err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("validate Service for %s %s: %w", component.Name, location, err))
 				continue
@@ -536,7 +536,7 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 			if rc == nil {
 				continue
 			}
-			deployments, err := manifests.BuildDeployments(buildCtx, rc)
+			deployments, err := manifests.RenderDeployments(buildCtx, rc, registry)
 			if err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("build %s on node %s: %w", rc.Name, node.Name, err))
 				continue
@@ -547,22 +547,14 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 				continue
 			}
 			for _, deployment := range deployments {
-				identity := manifests.CaptureWorkloadIdentity(deployment)
-				if err := manifests.ApplyPatches(deployment, rc.Patches, registry); err != nil {
-					preflightErrs = append(preflightErrs,
-						fmt.Errorf("patch %s on node %s: %w", deployment.Name, node.Name, err))
-					continue
-				}
-				manifests.RestoreWorkloadIdentity(deployment, identity)
-				if err := manifests.ValidatePodContainerNames(deployment); err != nil {
-					preflightErrs = append(preflightErrs,
-						fmt.Errorf("validate %s on node %s: %w", deployment.Name, node.Name, err))
-					continue
-				}
 				normalizeDeploymentReplicas(deployment, rc.Enabled, installationEnabled)
 				workloads = append(workloads, renderedWorkloadV2{deployment: deployment, component: rc})
 			}
 			addServicePlans(buildCtx, rc, "on node "+node.Name)
+		}
+		if err := validateRenderedBirdDependenciesV2(workloads); err != nil {
+			preflightErrs = append(preflightErrs, fmt.Errorf("node %s: %w", node.Name, err))
+			continue
 		}
 		nodeAssignments, allocationErr := allocateHostNetworkPortsV2(workloads, cfg.HostNetworkPortRange)
 		if allocationErr != nil {
@@ -601,7 +593,38 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 	if err := r.validateLiveHostPortsV2(ctx, yanet, nodes, workloadsByNode); err != nil {
 		return nil, nil, err
 	}
+	if err := r.validateOperatorPlacementTransitionV2(ctx, yanet, nodes, workloadsByNode); err != nil {
+		return nil, nil, err
+	}
 	return plans, assignments, nil
+}
+
+// validateRenderedBirdDependenciesV2 repeats the dependency check after patches:
+// a patch may scale the dataplane to zero while leaving its BIRD consumers up.
+func validateRenderedBirdDependenciesV2(workloads []renderedWorkloadV2) error {
+	birdRunning := false
+	for _, workload := range workloads {
+		if workload.component.Kind != helpers.KindDataplane || deploymentReplicasAreZero(workload.deployment) {
+			continue
+		}
+		for _, container := range workload.deployment.Spec.Template.Spec.InitContainers {
+			if container.Name == yanetv2alpha1.BirdSidecarContainerName && container.RestartPolicy != nil &&
+				*container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+				birdRunning = true
+			}
+		}
+	}
+	if birdRunning {
+		return nil
+	}
+	for _, workload := range workloads {
+		if (workload.component.Kind == helpers.KindBirdAdapter || workload.component.Kind == helpers.KindAnnouncer) &&
+			!deploymentReplicasAreZero(workload.deployment) {
+			return fmt.Errorf("enabled %s requires a running managed BIRD sidecar and dataplane after patches; disable the consumer explicitly or enable the dataplane",
+				workload.component.Name)
+		}
+	}
+	return nil
 }
 
 //+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch

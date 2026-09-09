@@ -68,6 +68,7 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 	desired := make(map[sharedServiceKeyV2]*corev1.Service)
 	blocked := make(map[sharedServiceKeyV2]struct{})
 	protectedScopes := make(map[sharedServiceScopeV2]struct{})
+	scopes := make(map[sharedServiceScopeV2]struct{})
 	var planErrs []error
 	for index := range installations.Items {
 		yanet := &installations.Items[index]
@@ -75,6 +76,7 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 			continue
 		}
 		scope := sharedServiceScopeV2{namespace: yanet.Namespace, boxType: yanet.Spec.BoxType}
+		scopes[scope] = struct{}{}
 		installationFailed := false
 		refs, err := helpers.EnabledComponentsForBox(&config.Spec, yanet.Spec.BoxType)
 		if err != nil {
@@ -98,25 +100,9 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 			NumaCount: numaCount,
 		}
 		for _, ref := range refs {
-			serviceSpec := &yanet.Spec
-			if ref.Kind == helpers.KindDataplane {
-				// Shared DNS follows declared box/palette wiring, not whether any
-				// installation currently runs the netlink sidecar. This override is
-				// only for Service planning; unwired slots remain absent on resolve.
-				serviceSpec = &yanetv2alpha1.YanetSpec{
-					BoxType: yanet.Spec.BoxType,
-					Components: &yanetv2alpha1.YanetComponentsOverride{
-						Dataplane: &yanetv2alpha1.YanetComponentOverride{
-							Containers: map[string]yanetv2alpha1.YanetContainerOverride{
-								yanetv2alpha1.NetlinkDataplaneSidecarContainerName: {Enabled: helpers.PtrTrue()},
-							},
-						},
-					},
-				}
-			}
-			component, resolveErr := helpers.ResolveBoxComponent(
+			component, resolveErr := helpers.ResolveBoxServiceComponent(
 				&config.Spec,
-				serviceSpec,
+				yanet.Spec.BoxType,
 				ref.Kind,
 				ref.OperatorName,
 			)
@@ -170,6 +156,14 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 			protectedScopes[scope] = struct{}{}
 		}
 	}
+	// A shared selector cutover affects every installation in a namespace/box,
+	// even an autoSync=false installation or a no-longer-selected old node.
+	// Preserve routing and protect pruning while that scope has old producers.
+	migrationBlocked, migrationErrs := blockedSharedServicePlacementScopesV2(ctx, r.Client, &config.Spec, scopes)
+	planErrs = append(planErrs, migrationErrs...)
+	for scope := range migrationBlocked {
+		protectedScopes[scope] = struct{}{}
+	}
 	keys := make([]sharedServiceKeyV2, 0, len(desired))
 	for key := range desired {
 		keys = append(keys, key)
@@ -181,6 +175,10 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 		return keys[i].namespace < keys[j].namespace
 	})
 	for _, key := range keys {
+		scope := sharedServiceScopeV2{namespace: key.namespace, boxType: desired[key].Labels[manifests.LabelBoxType]}
+		if _, blocked := migrationBlocked[scope]; blocked {
+			continue
+		}
 		if r.sharedServicesStoppedV2() {
 			return nil
 		}
@@ -222,6 +220,66 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 		}
 	}
 	return errors.Join(planErrs...)
+}
+
+// blockedSharedServicePlacementScopesV2 is independent of workload reconciliation:
+// publishing a new snapshot must still allow explicit scale-to-zero to drain it.
+func blockedSharedServicePlacementScopesV2(
+	ctx context.Context, reader client.Reader, config *yanetv2alpha1.YanetConfigSpec, scopes map[sharedServiceScopeV2]struct{},
+) (map[sharedServiceScopeV2]struct{}, []error) {
+	blocked := make(map[sharedServiceScopeV2]struct{})
+	var errs []error
+	ordered := make([]sharedServiceScopeV2, 0, len(scopes))
+	for scope := range scopes {
+		ordered = append(ordered, scope)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].namespace+"/"+ordered[i].boxType < ordered[j].namespace+"/"+ordered[j].boxType
+	})
+	type inventory struct {
+		producers []placementProducerV2
+		err       error
+	}
+	byNamespace := make(map[string]inventory)
+	for _, scope := range ordered {
+		box, err := helpers.FindBoxType(config, scope.boxType)
+		if err != nil || len(box.Operators) == 0 {
+			// Resolution errors are already protected/reported by Service planning.
+			continue
+		}
+		live, loaded := byNamespace[scope.namespace]
+		if !loaded {
+			live.producers, live.err = listPlacementProducersV2(ctx, reader, scope.namespace)
+			byNamespace[scope.namespace] = live
+		}
+		if live.err != nil {
+			blocked[scope] = struct{}{}
+			errs = append(errs, live.err)
+			continue
+		}
+		var names []string
+		for name := range box.Operators {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, producer := range live.producers {
+			if producer.template.Labels[manifests.LabelBoxType] != scope.boxType {
+				continue
+			}
+			for _, name := range names {
+				if incompatibleOperatorPlacementV2(producer.template.Labels, name, box.Operators[name].Placement == yanetv2alpha1.OperatorPlacementDataplane) {
+					blocked[scope] = struct{}{}
+					errs = append(errs, fmt.Errorf("shared Service placement migration in %s/%s for %q requires drain of old %s %s; preserving existing Services until all installations in this scope have drained incompatible producers",
+						scope.namespace, scope.boxType, name, producer.kind, producer.name))
+					break
+				}
+			}
+			if _, failed := blocked[scope]; failed {
+				break
+			}
+		}
+	}
+	return blocked, errs
 }
 
 // A newer snapshot can publish stop while an API read or retry is in flight.

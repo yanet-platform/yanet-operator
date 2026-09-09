@@ -125,6 +125,10 @@ func buildServicePlan(
 		labelBoxType:   ctx.BoxType,
 		labelComponent: component.Name,
 	}
+	if component.IsColocated() {
+		selector[labelComponent] = string(helpers.KindDataplane)
+		selector[OperatorMembershipLabel(component.Name)] = component.Name
+	}
 	if numa != nil {
 		selector[labelNuma] = fmt.Sprintf("%d", *numa)
 	}

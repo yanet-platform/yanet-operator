@@ -18,6 +18,7 @@ package manifests
 
 import (
 	"fmt"
+	"strings"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
@@ -105,7 +106,7 @@ func CaptureWorkloadIdentity(deployment *appsv1.Deployment) WorkloadIdentity {
 	if identity.ManageNativeSidecars {
 		for i := range deployment.Spec.Template.Spec.InitContainers {
 			container := &deployment.Spec.Template.Spec.InitContainers[i]
-			if isFixedNativeSidecar(container.Name) {
+			if isManagedNativeContainer(container.Name) {
 				identity.NativeSidecars = append(identity.NativeSidecars, *container.DeepCopy())
 			}
 		}
@@ -142,7 +143,7 @@ func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
 	lastFixed := -1
 	for i := range pod.InitContainers {
 		container := pod.InitContainers[i]
-		if isFixedNativeSidecar(container.Name) {
+		if isManagedNativeContainer(container.Name) {
 			patched[container.Name] = container
 			lastFixed = i
 		}
@@ -170,7 +171,7 @@ func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
 	nextExpected := 0
 	for i := range pod.InitContainers {
 		container := pod.InitContainers[i]
-		if isFixedNativeSidecar(container.Name) {
+		if isManagedNativeContainer(container.Name) {
 			if nextExpected < len(restoredExpected) {
 				restored = append(restored, restoredExpected[nextExpected])
 				nextExpected++
@@ -197,7 +198,7 @@ func ValidatePodContainerNames(deployment *appsv1.Deployment) error {
 		for i := range containers {
 			name := containers[i].Name
 			if kind == "regular" && deployment.Spec.Template.Labels[labelComponent] == string(helpers.KindDataplane) &&
-				isFixedNativeSidecar(name) {
+				isManagedNativeContainer(name) {
 				return fmt.Errorf("deployment %s must place dataplane sidecar %q in initContainers", deployment.Name, name)
 			}
 			if previous, duplicate := seen[name]; duplicate {
@@ -224,10 +225,14 @@ func isFixedNativeSidecar(name string) bool {
 		name == yanetv2alpha1.NetlinkDataplaneSidecarContainerName
 }
 
+func isManagedNativeContainer(name string) bool {
+	return isFixedNativeSidecar(name) || strings.HasPrefix(name, operatorContainerPrefix)
+}
+
 func reservedLabels(labels map[string]string) map[string]string {
 	out := make(map[string]string)
 	for key, value := range labels {
-		if _, reserved := workloadIdentityLabels[key]; reserved {
+		if _, reserved := workloadIdentityLabels[key]; reserved || strings.HasPrefix(key, operatorMembershipPrefix) {
 			out[key] = value
 		}
 	}
@@ -240,6 +245,11 @@ func mergeIdentityLabels(labels, identity map[string]string) map[string]string {
 	}
 	for key := range workloadIdentityLabels {
 		delete(labels, key)
+	}
+	for key := range labels {
+		if strings.HasPrefix(key, operatorMembershipPrefix) {
+			delete(labels, key)
+		}
 	}
 	for key, value := range identity {
 		labels[key] = value

@@ -32,7 +32,7 @@
 | Component | Deployment | Wiring |
 |---|---|---|
 | `bird` (BIRD2) | Native sidecar in the dataplane Pod | hostPath config; owns `/run/bird`; shares dataplane network namespace |
-| `netlink-dataplane-sidecar` | Native sidecar in the dataplane Pod | privileged for per-interface `/proc/sys` writes, read-only `/etc/netplan`, gRPC callback Service; shares dataplane network namespace |
+| `netlink-dataplane-sidecar` | Native sidecar in the dataplane Pod | restores interfaces, publishes neighbour updates; privileged for per-interface `/proc/sys` writes, read-only `/etc/netplan`, self-registered common gRPC metrics Service; shares dataplane network namespace |
 | `bird-adapter` (`yanet-bird-adapter`) | Standalone Deployment | shared `/run/bird` (reads BIRD socket); gRPC → gateway service and/or route-operator service |
 
 > BIRD and the netlink helper are fixed optional slots below
@@ -42,6 +42,12 @@
 > During migration, stop the old operator and delete its standalone v2 BIRD
 > Deployments before enabling this sidecar. Both variants own the node-local
 > `/run/bird` control-socket directory and cannot run concurrently.
+
+BIRD is optional, but enabled `birdAdapter` and `announcer` workloads require the
+managed BIRD sidecar and dataplane to be enabled. Disabling BIRD through an
+installation override therefore requires explicitly disabling its consumers too.
+Whole-installation scale-to-zero is allowed; consumer enablement never cascades
+silently.
 
 ### 2.3. Operators and Agents
 
@@ -93,7 +99,7 @@ Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
 | `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>,component=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA role; exposes `grpc:8080` and `http:8081` |
-| `yanet-<boxType>-netlink-dataplane-sidecar` | `box-type=<boxType>,component=dataplane` | ClusterIP, `internalTrafficPolicy: Local` | Gateway callback endpoint for the netlink sidecar on `grpc:8080` |
+| `yanet-<boxType>-netlink-dataplane-sidecar` | `box-type=<boxType>,component=dataplane` | ClusterIP, `internalTrafficPolicy: Local` | Self-registered common metrics endpoint for the netlink sidecar on `grpc:8080` |
 | `yanet-<boxType>-<operator>` | `box-type=<boxType>,component=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks on `grpc:8080` |
 | `yanet-<boxType>-announcer` | `box-type=<boxType>,component=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point on `grpc:8080` |
 
@@ -102,6 +108,12 @@ installation or component has zero replicas. Their selectors omit Yanet and node
 identity so installations of the same box type share the stable DNS names in a
 namespace. Named target ports let host-network Pods use target ports allocated
 from `spec.hostNetworkPortRange`, while Pod-network workloads use `8080/8081`.
+
+The netlink sidecar publishes neighbours to the gateway as a client and exposes
+only the common gRPC metrics service, not a reverse-route configuration RPC.
+Its default server bind is `[::1]:0`; the operator supplies a Service-reachable
+`YANET_SERVER_ENDPOINT` and a stable `YANET_SERVER_ADVERTISE_ENDPOINT` for metrics
+self-registration. These endpoints remain necessary.
 
 ## 4. Dependencies
 
@@ -186,7 +198,8 @@ flowchart TB
     DP <-. shmem .-> BUNDLE
     DP --- HUGE
     SVCNL -.-> NL
-    NL <-->|gRPC Register / callback| GW
+    NL -->|gRPC Register / publish neighbours| GW
+    GW -->|gRPC metrics| SVCNL
 
     %% Operators register with gateway and serve callbacks
     OP_PIPE  <-->|gRPC Register / callback| GW

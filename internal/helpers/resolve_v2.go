@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
@@ -116,6 +117,14 @@ type ResolvedComponent struct {
 	// after BIRD when kubelet stops sidecars in reverse order.
 	NativeSidecars []ResolvedContainer
 
+	// ColocatedOperators includes every declared dataplane placement, sorted by
+	// name, including disabled roles. Their reserved two-port blocks never depend
+	// on installation enablement or palette/map iteration order.
+	ColocatedOperators []*ResolvedComponent
+	Placement          yanetv2alpha1.OperatorPlacement
+	ListenerNames      []string
+	PortIndex          int
+
 	// Patches is the ordered list of patch NAMES that the box wires
 	// to this component. Resolution into actual NamedPatch objects
 	// happens in the patcher package, where dry-run is also done.
@@ -210,6 +219,29 @@ func ResolveBoxComponent(
 	default:
 		return nil, fmt.Errorf("unknown component kind %q", kind)
 	}
+}
+
+// ResolveBoxServiceComponent resolves declared Service roles independently of
+// installation overrides and replica gates. A declared netlink sidecar keeps its
+// shared metrics Service even when every installation disables the container.
+// This synthetic enablement is for Service planning only, never Pod rendering.
+func ResolveBoxServiceComponent(
+	config *yanetv2alpha1.YanetConfigSpec,
+	boxName string,
+	kind ComponentKind,
+	operatorName string,
+) (*ResolvedComponent, error) {
+	spec := &yanetv2alpha1.YanetSpec{BoxType: boxName}
+	if kind == KindDataplane {
+		spec.Components = &yanetv2alpha1.YanetComponentsOverride{
+			Dataplane: &yanetv2alpha1.YanetComponentOverride{
+				Containers: map[string]yanetv2alpha1.YanetContainerOverride{
+					yanetv2alpha1.NetlinkDataplaneSidecarContainerName: {Enabled: PtrTrue()},
+				},
+			},
+		}
+	}
+	return ResolveBoxComponent(config, spec, kind, operatorName)
 }
 
 // EnabledComponentsForBox returns the set of (kind, operatorName)
@@ -313,16 +345,25 @@ func resolveDataplane(
 	if err != nil {
 		return nil, err
 	}
+	var colocated []*ResolvedComponent
+	for _, name := range colocatedOperatorNames(box) {
+		op, err := resolveOperator(config, yanet, box, name)
+		if err != nil {
+			return nil, err
+		}
+		colocated = append(colocated, op)
+	}
 	return &ResolvedComponent{
-		Kind:           KindDataplane,
-		Name:           string(KindDataplane),
-		Enabled:        resolveEnabled(override),
-		Image:          mergeImage(config.Images, dp.Image, containerOverride(override, yanetv2alpha1.DataplaneContainerName)),
-		Config:         dp.Config,
-		Hugepages:      dp.Hugepages,
-		HostNetwork:    dp.HostNetwork,
-		NativeSidecars: nativeSidecars,
-		Patches:        slot.Patches,
+		Kind:               KindDataplane,
+		Name:               string(KindDataplane),
+		Enabled:            resolveEnabled(override),
+		Image:              mergeImage(config.Images, dp.Image, containerOverride(override, yanetv2alpha1.DataplaneContainerName)),
+		Config:             dp.Config,
+		Hugepages:          dp.Hugepages,
+		HostNetwork:        dp.HostNetwork,
+		NativeSidecars:     nativeSidecars,
+		ColocatedOperators: colocated,
+		Patches:            slot.Patches,
 	}, nil
 }
 
@@ -458,6 +499,42 @@ func resolveOperator(
 	if len(op.Containers) == 0 {
 		return nil, fmt.Errorf("operator %q has no containers", operatorName)
 	}
+	if err := yanetv2alpha1.ValidateOperatorPlacement(slot.Placement); err != nil {
+		return nil, err
+	}
+	if err := yanetv2alpha1.ValidateOperatorListeners(op); err != nil {
+		return nil, err
+	}
+	var listeners []string
+	if op.Listeners != nil {
+		listeners = make([]string, 0, len(*op.Listeners))
+		for _, name := range []string{"grpc", "http"} {
+			for _, listener := range *op.Listeners {
+				if string(listener) == name {
+					listeners = append(listeners, name)
+				}
+			}
+		}
+	}
+	portIndex := 0
+	if slot.Placement == yanetv2alpha1.OperatorPlacementDataplane {
+		if box.Components.Dataplane == nil {
+			return nil, fmt.Errorf("operator %q requires a dataplane slot", operatorName)
+		}
+		names := colocatedOperatorNames(box)
+		portIndex = sort.SearchStrings(names, operatorName)
+		// Membership labels and target names use a short role hash. Check all
+		// declarations, not only enabled containers, before shared Services can
+		// accidentally select an existing producer with the same identity.
+		for _, name := range names {
+			if name != operatorName && ShortNodeKey(name) == ShortNodeKey(operatorName) {
+				return nil, fmt.Errorf("colocated operators %q and %q have colliding role identities", operatorName, name)
+			}
+		}
+		if portIndex > (65535-8083)/2 {
+			return nil, fmt.Errorf("operator %q exhausts the dataplane listener port range", operatorName)
+		}
+	}
 	override := componentOverride(yanet, KindOperator, operatorName)
 	containers := make([]ResolvedContainer, 0, len(op.Containers))
 	for i := range op.Containers {
@@ -473,13 +550,32 @@ func resolveOperator(
 	}
 
 	return &ResolvedComponent{
-		Kind:       KindOperator,
-		Name:       op.Name,
-		Enabled:    resolveEnabled(override),
-		Image:      containers[0].Image,
-		Containers: containers,
-		Patches:    slot.Patches,
+		Kind:          KindOperator,
+		Name:          op.Name,
+		Enabled:       resolveEnabled(override),
+		Image:         containers[0].Image,
+		Containers:    containers,
+		Patches:       slot.Patches,
+		Placement:     slot.Placement,
+		ListenerNames: listeners,
+		PortIndex:     portIndex,
 	}, nil
+}
+
+func colocatedOperatorNames(box *yanetv2alpha1.BoxType) []string {
+	var names []string
+	for name, slot := range box.Operators {
+		if slot.Placement == yanetv2alpha1.OperatorPlacementDataplane {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// IsColocated identifies an operator sharing the dataplane workload.
+func (c *ResolvedComponent) IsColocated() bool {
+	return c != nil && c.Kind == KindOperator && c.Placement == yanetv2alpha1.OperatorPlacementDataplane
 }
 
 // componentOverride returns the per-installation override block that

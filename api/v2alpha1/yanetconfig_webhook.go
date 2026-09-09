@@ -347,6 +347,9 @@ func validateOperatorUniqueness(ops []OperatorSpec) error {
 		}
 		seen[name] = struct{}{}
 
+		if err := ValidateOperatorListeners(&ops[i]); err != nil {
+			return err
+		}
 		if count := len(ops[i].Containers); count < 1 || count > 8 {
 			return fmt.Errorf("spec.components.operators[%d:%s].containers must contain between 1 and 8 entries, got %d", i, name, count)
 		}
@@ -442,8 +445,28 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 				return err
 			}
 		}
+		if err := ValidateYanetBirdDependencies(&YanetSpec{BoxType: box.Name}, &spec.Components, box); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
 		// operators
 		for opName, opSlot := range box.Operators {
+			if err := ValidateOperatorPlacement(opSlot.Placement); err != nil {
+				return fmt.Errorf("%s.operators[%s]: %w", path, opName, err)
+			}
+			if opSlot.Placement == OperatorPlacementDataplane {
+				if spec.Components.Dataplane.HostNetwork != nil && *spec.Components.Dataplane.HostNetwork {
+					return fmt.Errorf("%s.operators[%s]: dataplane placement requires a private network namespace", path, opName)
+				}
+				for _, name := range opSlot.Patches {
+					for _, patch := range spec.Patches {
+						if patch.Name == name {
+							if err := ValidateColocatedOperatorPatch(patch.Patch.Raw); err != nil {
+								return fmt.Errorf("%s.operators[%s] patch %q: %w", path, opName, name, err)
+							}
+						}
+					}
+				}
+			}
 			if _, ok := operatorSet[opName]; !ok {
 				return fmt.Errorf("%s.operators[%s]: operator is not declared in spec.components.operators", path, opName)
 			}

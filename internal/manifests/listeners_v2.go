@@ -59,7 +59,8 @@ type ListenerPort struct {
 
 // ListenerPorts returns the fixed listener contract for a workload. The
 // dataplane itself and BIRD have no application listener. When present, the
-// netlink dataplane sidecar exposes one gRPC listener for gateway callbacks.
+// netlink dataplane sidecar registers its common gRPC metrics service with the
+// gateway. It publishes neighbours as a client, not through a reverse-route RPC.
 func ListenerPorts(component *helpers.ResolvedComponent) []ListenerPort {
 	if component == nil {
 		return nil
@@ -81,17 +82,32 @@ func ListenerPorts(component *helpers.ResolvedComponent) []ListenerPort {
 		}
 		return nil
 	case helpers.KindOperator:
-		if component.Name == "metrics" {
-			return []ListenerPort{{Name: ListenerHTTP, ServicePort: ServiceHTTPPort, EnvName: EnvKubernetesHTTPPort}}
+		names := component.ListenerNames
+		if names == nil {
+			names = []string{ListenerGRPC}
+			if component.Name == "metrics" {
+				names = []string{ListenerHTTP}
+			}
 		}
-		return []ListenerPort{{Name: ListenerGRPC, ServicePort: ServiceGRPCPort, EnvName: EnvKubernetesGRPCPort}}
+		var listeners []ListenerPort
+		for _, name := range names {
+			listener := ListenerPort{Name: name, ServicePort: ServiceGRPCPort, EnvName: EnvKubernetesGRPCPort}
+			if name == ListenerHTTP {
+				listener.ServicePort, listener.EnvName = ServiceHTTPPort, EnvKubernetesHTTPPort
+			}
+			if component.IsColocated() {
+				listener.TargetPortName = colocatedTargetPort(component.Name, name)
+			}
+			listeners = append(listeners, listener)
+		}
+		return listeners
 	default:
 		return []ListenerPort{{Name: ListenerGRPC, ServicePort: ServiceGRPCPort, EnvName: EnvKubernetesGRPCPort}}
 	}
 }
 
 // ListenerContainerName returns the container that owns the workload's
-// application listeners. The dataplane delegates its callback listener to the
+// application listeners. The dataplane Pod's metrics listener belongs to the
 // netlink native sidecar. Dynamic operators expose their first container.
 func ListenerContainerName(component *helpers.ResolvedComponent) string {
 	if component == nil {
@@ -119,7 +135,41 @@ func ConfigureListeners(
 	component *helpers.ResolvedComponent,
 	overrides map[string]int32,
 ) error {
+	if err := configureComponentListeners(deployment, component, overrides); err != nil {
+		return err
+	}
+	if component != nil && component.Kind == helpers.KindDataplane {
+		for _, operator := range component.ColocatedOperators {
+			view := *operator
+			view.Containers = append([]helpers.ResolvedContainer(nil), operator.Containers...)
+			for i := range view.Containers {
+				view.Containers[i].Name = scopedOperatorName(operator.Name, view.Containers[i].Name)
+			}
+			for _, listener := range []string{ListenerGRPC, ListenerHTTP} {
+				if err := validatePortNameOwner(deployment, ListenerContainerName(&view), colocatedTargetPort(operator.Name, listener)); err != nil {
+					return err
+				}
+			}
+			if operator.Enabled {
+				if err := configureComponentListeners(deployment, &view, nil); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func configureComponentListeners(deployment *appsv1.Deployment, component *helpers.ResolvedComponent, overrides map[string]int32) error {
 	configureHostNetworkDNS(deployment)
+	// The shared metrics Service outlives a disabled sidecar. Reserve its target
+	// name even when there is no effective listener, so another container cannot
+	// become an endpoint for that Service through a dataplane patch.
+	if deployment != nil && component != nil && component.Kind == helpers.KindDataplane {
+		if err := validatePortNameOwner(deployment, yanetv2alpha1.NetlinkDataplaneSidecarContainerName, NetlinkGRPCTargetPort); err != nil {
+			return err
+		}
+	}
 	listeners := ListenerPorts(component)
 	if len(listeners) == 0 {
 		return nil
@@ -136,15 +186,17 @@ func ConfigureListeners(
 	env := make([]corev1.EnvVar, 0, len(container.Env)+len(listeners))
 	for _, listener := range listeners {
 		targetPortName := listenerTargetPortName(listener)
-		if owner := findPortNameOwner(deployment, containerName, targetPortName); owner != "" {
-			return fmt.Errorf(
-				"deployment %s listener target port name %q is also used by container %q",
-				deployment.Name,
-				targetPortName,
-				owner,
-			)
+		if err := validatePortNameOwner(deployment, containerName, targetPortName); err != nil {
+			return err
 		}
 		port := listener.ServicePort
+		if component.IsColocated() {
+			offset, err := colocatedPortOffset(component.PortIndex)
+			if err != nil {
+				return err
+			}
+			port += offset
+		}
 		if override := overrides[listener.Name]; override != 0 {
 			port = override
 		}
@@ -159,6 +211,17 @@ func ConfigureListeners(
 			Protocol:      corev1.ProtocolTCP,
 		})
 		env = append(env, corev1.EnvVar{Name: listener.EnvName, Value: strconv.FormatInt(int64(port), 10)})
+	}
+	if component.Kind == helpers.KindOperator {
+		for _, listener := range listeners {
+			name := "YANET_KUBERNETES_GRPC_ADVERTISE_ENDPOINT"
+			if listener.Name == ListenerHTTP {
+				name = "YANET_KUBERNETES_HTTP_ADVERTISE_ENDPOINT"
+			}
+			managedEnv[name] = struct{}{}
+			env = append(env, corev1.EnvVar{Name: name, Value: fmt.Sprintf("%s.%s.svc.cluster.local:%d",
+				SharedServiceName(deployment.Spec.Template.Labels[labelBoxType], component.Name, nil), deployment.Namespace, listener.ServicePort)})
+		}
 	}
 	if component.Kind == helpers.KindDataplane {
 		boxType := deployment.Spec.Template.Labels[labelBoxType]
@@ -196,6 +259,13 @@ func ConfigureListeners(
 	return nil
 }
 
+func colocatedPortOffset(index int) (int32, error) {
+	if index < 0 || index > (65535-8083)/2 {
+		return 0, fmt.Errorf("invalid colocated operator port index %d", index)
+	}
+	return 2 + 2*int32(index), nil
+}
+
 func configureHostNetworkDNS(deployment *appsv1.Deployment) {
 	if deployment == nil || !deployment.Spec.Template.Spec.HostNetwork {
 		return
@@ -230,7 +300,7 @@ func findContainer(deployment *appsv1.Deployment, name string) (*corev1.Containe
 	return found, nil
 }
 
-func findPortNameOwner(deployment *appsv1.Deployment, listenerContainer, portName string) string {
+func validatePortNameOwner(deployment *appsv1.Deployment, listenerContainer, portName string) error {
 	find := func(containers []corev1.Container) string {
 		for i := range containers {
 			container := &containers[i]
@@ -246,9 +316,14 @@ func findPortNameOwner(deployment *appsv1.Deployment, listenerContainer, portNam
 		return ""
 	}
 	if owner := find(deployment.Spec.Template.Spec.Containers); owner != "" {
-		return owner
+		return fmt.Errorf("deployment %s listener target port name %q is reserved for %q, but used by container %q",
+			deployment.Name, portName, listenerContainer, owner)
 	}
-	return find(deployment.Spec.Template.Spec.InitContainers)
+	if owner := find(deployment.Spec.Template.Spec.InitContainers); owner != "" {
+		return fmt.Errorf("deployment %s listener target port name %q is reserved for %q, but used by container %q",
+			deployment.Name, portName, listenerContainer, owner)
+	}
+	return nil
 }
 
 func listenerTargetPortName(listener ListenerPort) string {

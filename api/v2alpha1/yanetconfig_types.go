@@ -143,9 +143,11 @@ type ComponentsSpec struct {
 	// BirdAdapter is a SEPARATE Deployment (not a sidecar to bird),
 	// so the adapter can be updated without restarting bird.
 	// bird ↔ birdAdapter share the bird unix socket via a hostPath.
+	// An enabled adapter requires an enabled managed BIRD sidecar and dataplane.
 	// +optional
 	BirdAdapter *BirdAdapterComp `json:"birdAdapter,omitempty"`
 
+	// Announcer requires an enabled managed BIRD sidecar and dataplane when enabled.
 	// +optional
 	Announcer *AnnouncerComp `json:"announcer,omitempty"`
 
@@ -234,8 +236,10 @@ type DataplaneSidecarsSpec struct {
 	// +optional
 	Bird *DataplaneSidecarSpec `json:"bird,omitempty"`
 
-	// NetlinkDataplaneSidecar owns KNI/VLAN/address/route reconciliation in the
-	// dataplane network namespace.
+	// NetlinkDataplaneSidecar restores dataplane interfaces from netplan and
+	// publishes neighbour updates to the gateway from the dataplane network
+	// namespace. Its common gRPC metrics service self-registers with the gateway;
+	// it does not expose a reverse-route configuration RPC.
 	// +optional
 	NetlinkDataplaneSidecar *DataplaneSidecarSpec `json:"netlinkDataplaneSidecar,omitempty"`
 }
@@ -303,8 +307,8 @@ func (h *Hugepages) TotalQuantity() (resource.Quantity, error) {
 	return *resource.NewQuantity(pageBytes*int64(h.Count), pageQty.Format), nil
 }
 
-// OperatorSpec describes one dynamic operator. The whole Pod is
-// rendered as a single Deployment.
+// OperatorSpec describes one dynamic operator, deployed independently or as
+// native sidecars in the dataplane Pod according to its box placement.
 type OperatorSpec struct {
 	// Name is unique within the Operators array. It is used as the component
 	// label and default container name. Built-in component names are reserved.
@@ -319,7 +323,28 @@ type OperatorSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=8
 	Containers []OperatorContainer `json:"containers"`
+
+	// Listeners are owned by the first container. Omitted defaults to grpc,
+	// except the operator named metrics defaults to http. An empty list means
+	// no listener and no Service. Explicit lists are rendered in grpc/http order.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=2
+	Listeners *[]OperatorListener `json:"listeners,omitempty"`
 }
+
+// OperatorListener is a supported application listener.
+// +kubebuilder:validation:Enum=grpc;http
+type OperatorListener string
+
+// OperatorPlacement selects the network namespace and workload lifecycle.
+// +kubebuilder:validation:Enum=standalone;dataplane
+type OperatorPlacement string
+
+const (
+	OperatorPlacementStandalone OperatorPlacement = "standalone"
+	OperatorPlacementDataplane  OperatorPlacement = "dataplane"
+)
 
 // OperatorContainer describes one container of an operator Pod.
 type OperatorContainer struct {
@@ -434,6 +459,14 @@ type BoxDataplaneSidecar struct {
 
 // BoxOperator is the per-operator slot in a boxType.
 type BoxOperator struct {
+	// Placement defaults to a separate Deployment. Dataplane placement composes
+	// the operator's containers as restartable init sidecars in the private
+	// dataplane network namespace. Changing placement requires draining the old
+	// workloads first; it is never an apply-then-prune migration.
+	// +optional
+	// +kubebuilder:default=standalone
+	Placement OperatorPlacement `json:"placement,omitempty"`
+
 	// +optional
 	Patches []string `json:"patches,omitempty"`
 }

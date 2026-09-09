@@ -118,7 +118,11 @@ func (v *YanetCustomValidator) validate(ctx context.Context, y *YanetV2) (admiss
 	spec := &config.Spec
 	for j := range spec.BoxTypes {
 		if spec.BoxTypes[j].Name == y.Spec.BoxType {
-			return nil, ValidateYanetComponentOverrides(y.Spec.Components, &spec.Components, &spec.BoxTypes[j])
+			box := &spec.BoxTypes[j]
+			if err := ValidateYanetComponentOverrides(y.Spec.Components, &spec.Components, box); err != nil {
+				return nil, err
+			}
+			return nil, ValidateYanetBirdDependencies(&y.Spec, &spec.Components, box)
 		}
 	}
 	return nil, fmt.Errorf("spec.boxType %q is not defined in the cluster YanetConfigV2", y.Spec.BoxType)
@@ -263,6 +267,56 @@ func ValidateEffectiveYanetComponentOverrides(
 		}
 	}
 	return ValidateYanetComponentOverrides(effective, declared, box)
+}
+
+// ValidateYanetBirdDependencies checks desired BIRD consumer enablement after
+// typed overrides. Whole-installation scale-to-zero bypasses this dependency,
+// but disabling BIRD alone requires explicitly disabling its consumers too.
+func ValidateYanetBirdDependencies(spec *YanetSpec, declared *ComponentsSpec, box *BoxType) error {
+	if spec == nil || declared == nil || box == nil {
+		return fmt.Errorf("BIRD dependency validation requires a YanetV2 spec, component palette and boxType")
+	}
+	if spec.Enabled != nil && !*spec.Enabled {
+		return nil
+	}
+	var dataplane, adapter, announcer *YanetComponentOverride
+	if spec.Components != nil {
+		dataplane = spec.Components.Dataplane
+		adapter = spec.Components.BirdAdapter
+		announcer = spec.Components.Announcer
+	}
+	enabled := func(override *YanetComponentOverride) bool {
+		return override == nil || override.Enabled == nil || *override.Enabled
+	}
+	birdEnabled := false
+	if box.Components.Dataplane != nil && box.Components.Dataplane.Sidecars != nil &&
+		box.Components.Dataplane.Sidecars.Bird != nil && declared.Dataplane.Sidecars != nil &&
+		declared.Dataplane.Sidecars.Bird != nil && enabled(dataplane) {
+		flag := box.Components.Dataplane.Sidecars.Bird.Enabled
+		if dataplane != nil {
+			if override := dataplane.Containers[BirdSidecarContainerName]; override.Enabled != nil {
+				flag = override.Enabled
+			}
+		}
+		birdEnabled = flag == nil || *flag
+	}
+	if birdEnabled {
+		return nil
+	}
+	for _, consumer := range []struct {
+		name     string
+		wired    bool
+		override *YanetComponentOverride
+	}{
+		{name: "birdAdapter", wired: box.Components.BirdAdapter != nil, override: adapter},
+		{name: "announcer", wired: box.Components.Announcer != nil, override: announcer},
+	} {
+		if consumer.wired && enabled(consumer.override) {
+			return fmt.Errorf("boxType %q: enabled %s requires an enabled managed BIRD sidecar and dataplane; disable %s explicitly when BIRD is disabled",
+				box.Name, consumer.name, consumer.name)
+		}
+	}
+	return nil
 }
 
 func validateYanetComponentOverrideShape(overrides *YanetComponentsOverride) error {

@@ -378,8 +378,87 @@ the netlink dataplane sidecar gets
 `yanet-<boxType>-netlink-dataplane-sidecar`. BIRD is service-less.
 The netlink Service remains when its box-type slot is declared but disabled,
 or an installation disables the sidecar; disabling it does not remove its DNS name.
+Installation `status.services` reports this declared role too. Its target port name
+`netlink-grpc` remains reserved for the netlink container even while disabled, so
+another container in the dataplane Pod cannot capture the retained Service.
 
-### Listener endpoints
+BIRD remains optional: a BIRD-free box must also omit `birdAdapter` and `announcer`.
+If an installation disables BIRD or its dataplane, it must explicitly disable
+every wired BIRD consumer. Webhooks validate defaults and typed overrides; the
+reconciler repeats the checks, including the final patched replica counts.
+Whole-installation `enabled: false` remains valid and scales everything to zero.
+
+### Dynamic operator placement
+
+`BoxOperator.placement` is `standalone` (the default) or `dataplane`. The latter
+uses the same `OperatorSpec` palette and installation overrides at
+`YanetV2.spec.components.operators.<name>`, but renders its containers as native
+restartable init sidecars in the dataplane Deployment, not a separate Deployment.
+There is no special monalive slot; only BIRD and netlink are fixed slots.
+Colocation requires the dataplane's private network namespace; `hostNetwork` is
+rejected, including when set by a dataplane patch.
+
+`OperatorSpec.listeners` optionally selects `grpc`, `http`, or both. Omission
+preserves the gRPC default (HTTP for the operator named `metrics`); `[]` explicitly
+means no listener or Service. The first **declared** container owns the listeners.
+The dataplane reserves 8080/8081 for the fixed listener block (netlink gRPC remains
+8080), then allocates two-port blocks to all declared colocated operator names in
+lexicographic order: index 0 uses 8082/8083, index 1 uses 8084/8085, and so on.
+Disabling a role does not free its block. Reordering the palette or map does not
+change allocations; adding/removing declared colocated names can change indices.
+
+Shared Service names and external gRPC/HTTP ports remain unchanged at 8080/8081.
+Colocated Services select an operator-owned membership label on dataplane Pods
+and target role-specific named ports. Disabled roles lose their membership label
+and containers, but retain their declared Services and reserved target names.
+The builder injects `YANET_KUBERNETES_GRPC_PORT` / `YANET_KUBERNETES_HTTP_PORT`
+and the corresponding `YANET_KUBERNETES_*_ADVERTISE_ENDPOINT` values before user
+environment entries. Advertise values use the shared Service FQDN and external
+port. Runtime-specific endpoint configuration remains the caller's responsibility:
+arbitrary operators do **not** receive netlink's `YANET_SERVER_*` variables.
+
+Colocated operator patches may set only `spec.template.spec.containers`,
+`initContainers`, and `volumes` (including their strategic list-order directives).
+Other Deployment/Pod settings are rejected even if they match the dataplane.
+Patches address original logical container/volume names; composition scopes them
+as `op-<operator-name-hash>-<logical-name>` (long names get a hash suffix).
+ConfigSources, args, image overrides, shmem mounts, volume devices and resource
+field references are preserved. Patched config-download init containers precede
+their operator's restartable containers; URL fetching still requires such a patch.
+Named TCP/HTTP startup, readiness and liveness probe ports and HTTP lifecycle-hook
+ports follow the first container's managed listener renaming. Numeric local
+HTTP/TCP default listener ports follow their allocated ports too; a gRPC probe's
+default 8080 follows the allocated gRPC port. Other numeric gRPC probes on
+colocated containers must target a TCP port declared in that same container.
+Unknown names (including names owned only by a sibling) are rejected after
+composition and again after dataplane patches. Standalone port names are unchanged.
+**Do not make a native sidecar's startup probe or blocking lifecycle hook wait
+for dataplane startup:** kubelet starts the dataplane application containers only
+after the preceding native sidecars have started. Readiness checks should report
+the sidecar's own health rather than introduce a circular readiness dependency.
+Declared container removal/reordering is rejected. Dataplane patches run last,
+but cannot resurrect disabled managed containers or remove enabled ownership,
+membership, restart policy or relative order. `op-` init-container names and
+`yanet.yanet-platform.io/operator-` labels are reserved for this composition.
+
+Placement changes are fail-closed before any ConfigMap/Deployment writes. An old
+Deployment, ReplicaSet (including an unobserved scale-down), or nonterminal Pod
+in the other placement blocks startup. Drain explicitly with installation
+`spec.enabled: false` and `autoSync: true`, wait for zero observed workload
+replicas and terminated Pods, then re-enable with the new placement. Setting
+`stop: true` is **not** drain; it pauses reconciliation. Automatic producer
+migration is intentionally not implemented.
+Shared Service routing is gated over the entire namespace/box-type scope, across
+all installations (including `autoSync: false` and residual workloads on old
+nodes). While any incompatible old producer remains, that scope's existing
+Service specs are preserved and its Services are protected from pruning; other
+scopes continue reconciling. Failed live-workload reads also block cutover.
+The new config snapshot is still published so explicit scale-to-zero can drain
+the old placement; the Service gate does not wait for another controller's status.
+
+See `deploy/examples/v2alpha1-yanetconfig-placement.yaml` for the API shape.
+
+### Listener endpoint configuration
 
 Services expose fixed `grpc:8080` and, where applicable, `http:8081` ports with
 named target ports. A Pod-network workload uses the same numeric target. After
@@ -398,6 +477,11 @@ endpoint variables are added by NamedPatches and can refer to these earlier env
 entries, for example `[::]:$(YANET_KUBERNETES_GRPC_PORT)`. For the fixed netlink
 sidecar, the builder directly supplies `YANET_SERVER_ENDPOINT` and
 `YANET_SERVER_ADVERTISE_ENDPOINT`; the latter advertises its shared Service.
+The sidecar restores dataplane interfaces and publishes neighbour updates as a
+gateway client. Its registered server descriptors expose the common gRPC metrics
+service, not a reverse-route configuration RPC. The binary's default listener
+`[::1]:0` is not reachable through a Service, so the operator's explicit bind and
+advertise endpoints are required and must be preserved.
 
 ---
 

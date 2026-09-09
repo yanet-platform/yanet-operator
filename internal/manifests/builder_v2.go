@@ -96,7 +96,9 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 		deployments = []*appsv1.Deployment{buildSingle(ctx, c)}
 	}
 	for _, deployment := range deployments {
-		if err := ConfigureListeners(deployment, c, nil); err != nil {
+		// Dynamic sidecars are composed by RenderDeployments after their own
+		// patches have been applied. This skeleton only contains fixed slots.
+		if err := configureComponentListeners(deployment, c, nil); err != nil {
 			return nil, fmt.Errorf("buildDeployments: component %q: %w", c.Name, err)
 		}
 	}
@@ -648,6 +650,13 @@ func inlineNativeSidecarConfigMapName(
 // For non-inline configs the returned map is empty.
 func InlineConfigMaps(ctx BuildContextV2, c *helpers.ResolvedComponent) map[string]string {
 	out := map[string]string{}
+	for _, operator := range c.ColocatedOperators {
+		if operator.Enabled {
+			for name, content := range InlineConfigMaps(ctx, operator) {
+				out[name] = content
+			}
+		}
+	}
 	if c.Kind == helpers.KindOperator {
 		for i, rc := range c.Containers {
 			if !rc.Config.IsZero() && rc.Config.Inline != "" {

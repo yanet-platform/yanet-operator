@@ -186,6 +186,17 @@ spec:
                             items:
                               type: string
                             type: array
+                          placement:
+                            default: standalone
+                            description: |-
+                              Placement defaults to a separate Deployment. Dataplane placement composes
+                              the operator's containers as restartable init sidecars in the private
+                              dataplane network namespace. Changing placement requires draining the old
+                              workloads first; it is never an apply-then-prune migration.
+                            enum:
+                            - standalone
+                            - dataplane
+                            type: string
                         type: object
                       description: Operators is keyed by OperatorSpec.Name.
                       type: object
@@ -202,7 +213,8 @@ spec:
                   fixed optional native sidecars.
                 properties:
                   announcer:
-                    description: AnnouncerComp describes the announcer Deployment.
+                    description: Announcer requires an enabled managed BIRD sidecar
+                      and dataplane when enabled.
                     properties:
                       config:
                         description: |-
@@ -291,6 +303,7 @@ spec:
                       BirdAdapter is a SEPARATE Deployment (not a sidecar to bird),
                       so the adapter can be updated without restarting bird.
                       bird ↔ birdAdapter share the bird unix socket via a hostPath.
+                      An enabled adapter requires an enabled managed BIRD sidecar and dataplane.
                     properties:
                       config:
                         description: |-
@@ -666,8 +679,10 @@ spec:
                             type: object
                           netlinkDataplaneSidecar:
                             description: |-
-                              NetlinkDataplaneSidecar owns KNI/VLAN/address/route reconciliation in the
-                              dataplane network namespace.
+                              NetlinkDataplaneSidecar restores dataplane interfaces from netplan and
+                              publishes neighbour updates to the gateway from the dataplane network
+                              namespace. Its common gRPC metrics service self-registers with the gateway;
+                              it does not expose a reverse-route configuration RPC.
                             properties:
                               config:
                                 description: |-
@@ -761,8 +776,8 @@ spec:
                       Deployment and one Service.
                     items:
                       description: |-
-                        OperatorSpec describes one dynamic operator. The whole Pod is
-                        rendered as a single Deployment.
+                        OperatorSpec describes one dynamic operator, deployed independently or as
+                        native sidecars in the dataplane Pod according to its box placement.
                       properties:
                         containers:
                           description: |-
@@ -852,6 +867,21 @@ spec:
                           maxItems: 8
                           minItems: 1
                           type: array
+                        listeners:
+                          description: |-
+                            Listeners are owned by the first container. Omitted defaults to grpc,
+                            except the operator named metrics defaults to http. An empty list means
+                            no listener and no Service. Explicit lists are rendered in grpc/http order.
+                          items:
+                            description: OperatorListener is a supported application
+                              listener.
+                            enum:
+                            - grpc
+                            - http
+                            type: string
+                          maxItems: 2
+                          type: array
+                          x-kubernetes-list-type: set
                         name:
                           description: |-
                             Name is unique within the Operators array. It is used as the component

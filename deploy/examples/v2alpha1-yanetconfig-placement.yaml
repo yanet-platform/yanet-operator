@@ -1,0 +1,51 @@
+# Illustrative palette: replace images/config with the deployed binaries' settings.
+# monalive is an ordinary operator, never a fixed dataplane sidecar slot.
+# The operator injects YANET_KUBERNETES_{GRPC,HTTP}_PORT before user env and
+# YANET_KUBERNETES_{GRPC,HTTP}_ADVERTISE_ENDPOINT for the shared Service.
+# Wire those into the binary's own configuration/args/env via container patches;
+# no generic YANET_SERVER_* variables are forced on monalive.
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetConfigV2
+metadata:
+  name: config
+spec:
+  components:
+    controlplane:
+      image: {name: controlplane, tag: example}
+    dataplane:
+      image: {name: dataplane, tag: example}
+      hostNetwork: false
+      sidecars:
+        netlinkDataplaneSidecar:
+          image: {name: netlink-dataplane-sidecar, tag: example}
+    operators:
+      - name: monalive
+        listeners: [grpc, http]
+        containers:
+          - name: worker
+            image: {name: monalive, tag: example}
+      - name: probe
+        # Omitted listeners retains the default grpc listener.
+        containers:
+          - name: worker
+            image: {name: probe, tag: example}
+  boxTypes:
+    - name: private
+      components:
+        controlplane: {}
+        dataplane:
+          sidecars:
+            netlinkDataplaneSidecar: {}
+      operators:
+        # Sorted declared roles reserve two ports each, even when disabled:
+        # netlink=8080; monalive=8082/8083; probe=8084/8085.
+        # Shared Services still expose grpc:8080 and/or http:8081.
+        monalive: {placement: dataplane}
+        probe: {placement: dataplane}
+    - name: independent
+      components:
+        controlplane: {}
+        dataplane: {}
+      operators:
+        monalive: {placement: standalone}
+        probe: {} # standalone is the default

@@ -63,7 +63,9 @@ are unconditional for service-backed roles and are named
 stable gRPC/HTTP ports `8080/8081`; host-network target ports are allocated from
 `YanetConfigV2.spec.hostNetworkPortRange`. Runtime endpoint variables generally
 belong in named Deployment patches; the fixed netlink sidecar receives its bind
-and shared-Service advertise endpoints from the builder. Per-NUMA controlplane
+and shared-Service advertise endpoints from the builder for its self-registered
+common gRPC metrics service. Interface restoration and neighbour publication do
+not require a reverse-route configuration RPC. Per-NUMA controlplane
 fan-out is driven by the NFD label
 `feature.node.kubernetes.io/cpu-numa_nodes_count`. Each node can belong to only
 one `YanetV2`; overlapping selectors are resolved in favour of the existing
