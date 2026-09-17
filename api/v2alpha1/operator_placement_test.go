@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -79,5 +80,45 @@ func TestOperatorListenersEmptyRoundTrip(t *testing.T) {
 	}
 	if string(encoded["listeners"]) != "[]" {
 		t.Fatalf("explicit client-only contract must survive encoding/deepcopy: %s", raw)
+	}
+}
+
+func TestOperatorPlacementEffectiveHostNetwork(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		hostNetwork bool
+		patches     []string
+		wantErr     bool
+	}{
+		{name: "private palette"},
+		{name: "host palette overridden", hostNetwork: true, patches: []string{"private"}},
+		{name: "last patch selects private", hostNetwork: true, patches: []string{"host", "private"}},
+		{name: "host palette remains host", hostNetwork: true, wantErr: true},
+		{name: "private palette overridden", patches: []string{"host"}, wantErr: true},
+		{name: "last patch selects host", patches: []string{"private", "host"}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Dataplane.HostNetwork = boolPointer(tt.hostNetwork)
+			cfg.Spec.Components.Operators = []OperatorSpec{{Name: "netconfig", Containers: []OperatorContainer{{Name: "worker", Image: ImageRef{Name: "netconfig"}}}}}
+			cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"netconfig": {Placement: OperatorPlacementDataplane}}
+			cfg.Spec.BoxTypes[0].Components.Dataplane.Patches = tt.patches
+			cfg.Spec.Patches = append(cfg.Spec.Patches,
+				makePatch("private", `{"spec":{"template":{"spec":{"hostNetwork":false}}}}`),
+				makePatch("host", `{"spec":{"template":{"spec":{"hostNetwork":true}}}}`),
+			)
+			validator := &YanetConfigCustomValidator{}
+			_, createErr := validator.ValidateCreate(context.Background(), cfg)
+			_, updateErr := validator.ValidateUpdate(context.Background(), validConfig(), cfg)
+			for _, err := range []error{createErr, updateErr} {
+				if tt.wantErr {
+					if err == nil || !strings.Contains(err.Error(), "private network namespace") {
+						t.Fatalf("expected private network namespace error, got %v", err)
+					}
+				} else if err != nil {
+					t.Fatalf("effective private network rejected: %v", err)
+				}
+			}
+		})
 	}
 }

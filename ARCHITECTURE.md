@@ -289,6 +289,17 @@ its claim until finalizer cleanup and object removal complete.
 Finalizer cleanup requests foreground deletion of owned Deployments and waits
 for their removal before releasing the finalizer. A successful delete request
 alone does not release the node claim; `spec.stop=true` also pauses this cleanup.
+Cleanup uses the exact controller owner/UID, even if the installation label has
+been removed or changed, and preserves resources belonging to another instance.
+
+An apparent Deployment diff is normalized with an API-server dry-run update
+before deciding sync status or consuming the update window. Client-go's scheme
+does not supply server-side defaults. This extra admission request also occurs
+with `autoSync=false`, but nothing is persisted; normalization failures remain
+retryable errors. Conflict retries re-read ownership and reuse the normalized
+candidate for the actual update. Removed patch fields return to API defaults,
+while unchanged resources generate no persisted update. Shared Services declare
+`sessionAffinity: None` and managed metadata on creation to converge immediately.
 
 Key files:
 - [`internal/helpers/resolve_v2.go`](internal/helpers/resolve_v2.go) — `ResolveBoxComponent`, `EnabledComponentsForBox`, `FindBoxType`, `FindOperator`, `ShortNodeKey`.
@@ -372,7 +383,7 @@ unique NUMA layout wants its own `YanetV2` CR selecting just that node.
 
 ### Operator services
 
-Every operator wired into a box type gets one shared ClusterIP Service named
+Every service-backed operator wired into a box type gets one shared ClusterIP Service named
 `yanet-<boxType>-<operator>`. `birdAdapter` and `announcer` use the same model;
 the netlink dataplane sidecar gets
 `yanet-<boxType>-netlink-dataplane-sidecar`. BIRD is service-less.
@@ -395,8 +406,9 @@ uses the same `OperatorSpec` palette and installation overrides at
 `YanetV2.spec.components.operators.<name>`, but renders its containers as native
 restartable init sidecars in the dataplane Deployment, not a separate Deployment.
 There is no special monalive slot; only BIRD and netlink are fixed slots.
-Colocation requires the dataplane's private network namespace; `hostNetwork` is
-rejected, including when set by a dataplane patch.
+Colocation requires the dataplane's effective private network namespace after
+ordered dataplane patches. Admission and rendering reject a final
+`hostNetwork: true`; a patch overriding a host-network palette to false is valid.
 
 `OperatorSpec.listeners` optionally selects `grpc`, `http`, or both. Omission
 preserves the gRPC default (HTTP for the operator named `metrics`); `[]` explicitly
@@ -457,6 +469,29 @@ The new config snapshot is still published so explicit scale-to-zero can drain
 the old placement; the Service gate does not wait for another controller's status.
 
 See `deploy/examples/v2alpha1-yanetconfig-placement.yaml` for the API shape.
+
+### Split network runtime example
+
+`deploy/examples/v2alpha1-yanetconfig-full.yaml` selects `netconfig` and
+`neighbour-sidecar` as generic dataplane-placed operators with `listeners: []`.
+There is no combined netlink slot or automatic Service in this profile. BIRD
+starts first, followed by the generic operators in lexicographic order; all are
+restartable init containers. Netconfig waits/retries missing KNI within its
+process, allowing dataplane to start. Do not add a blocking init/PostStart hook.
+
+Netconfig's own patch grants `privileged: true`, mounts read-only `/etc/netplan`,
+and remaps its config mount to `/etc/netconfig`. Neighbour-sidecar retains a
+separate read-only `/etc/yanet2` mount and receives no interface-configuration
+privileges. Prepare `config.yaml`, `00-interfaces.yaml`, and
+`yanet-neighbour-sidecar.yaml` on the host and pin both images to tested releases.
+Configure neighbour `server.endpoint` and outbound `gateways` in that file;
+the status listener is not currently integrated with operator port allocation.
+
+This profile has no runtime Kubernetes startup, readiness, or liveness probes.
+Announcer decides application readiness through YANET gRPC APIs. Direct
+neighbour `Ready/Watch` reports publication status, not forwarding readiness;
+it does not imply that announcer already polls that endpoint. Reading these
+APIs from yanet-operator is deferred.
 
 ### Listener endpoint configuration
 

@@ -111,13 +111,13 @@ test-integration: test-docker-integration ## Run integration tests only in Docke
 .PHONY: test-docker
 test-docker: helm-crds ## Run all tests in Docker container.
 	$(call docker-go,go mod download && \
-		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
+		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) && \
 		KUBEBUILDER_ASSETS=\$$(/go/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path) go test ./... -coverprofile cover.out)
 
 .PHONY: test-docker-race
 test-docker-race: ## Run tests with race detector in Docker container.
 	$(call docker-go,go mod download && \
-		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
+		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) && \
 		KUBEBUILDER_ASSETS=\$$(/go/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path) go test -race ./... -coverprofile cover.out)
 
 .PHONY: test-docker-unit
@@ -128,7 +128,7 @@ test-docker-unit: ## Run unit tests in Docker container.
 .PHONY: test-docker-integration
 test-docker-integration: ## Run integration tests in Docker container.
 	$(call docker-go,go mod download && \
-		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
+		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) && \
 		KUBEBUILDER_ASSETS=\$$(/go/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path) go test -v ./internal/controller/... -coverprofile cover-integration.out)
 
 .PHONY: lint

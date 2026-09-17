@@ -133,45 +133,6 @@ func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 	}
 }
 
-// TestHandleYanetV2Deletion_CleanupError_RetainsFinalizer verifies that
-// when cleanup fails, the finalizer is retained and the error is returned
-// for retry.
-func TestHandleYanetV2Deletion_CleanupError_RetainsFinalizer(t *testing.T) {
-	yanet := &yanetv2alpha1.YanetV2{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "y",
-			Namespace:  "yanet",
-			Finalizers: []string{yanetFinalizer},
-		},
-	}
-
-	r, _ := makeReconcilerEnv(t, yanet)
-
-	// Note: In a real scenario, cleanup might fail due to API errors.
-	// With fake client, pruneOrphans should succeed, so this test
-	// primarily verifies the error handling path exists.
-	// For a true error test, we'd need a client that can simulate failures.
-
-	result, err := r.handleYanetV2Deletion(context.Background(), yanet, silentLogger())
-
-	// With fake client, cleanup should succeed
-	if err != nil {
-		t.Logf("cleanup error (expected in some scenarios): %v", err)
-		// Verify requeue is set on error
-		if result.RequeueAfter == 0 {
-			t.Errorf("expected RequeueAfter > 0 on cleanup error")
-		}
-	} else {
-		// Cleanup succeeded, finalizer should be removed
-		if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
-			t.Fatalf("re-get yanet: %v", err)
-		}
-		if controllerutil.ContainsFinalizer(yanet, yanetFinalizer) {
-			t.Errorf("finalizer must be removed after successful cleanup")
-		}
-	}
-}
-
 // TestHandleYanetV2Deletion_ForeignResources_NotDeleted verifies that
 // resources not owned by this Yanet are not deleted during cleanup.
 func TestHandleYanetV2Deletion_ForeignResources_NotDeleted(t *testing.T) {

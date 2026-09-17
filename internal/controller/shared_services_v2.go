@@ -32,7 +32,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -307,7 +306,10 @@ func (r *YanetConfigReconcilerV2) applySharedServiceV2(
 		if r.sharedServicesStoppedV2() {
 			return nil
 		}
-		return r.Client.Create(ctx, desired)
+		candidate := desired.DeepCopy()
+		candidate.Spec.SessionAffinity = corev1.ServiceAffinityNone
+		mergeManagedMeta(&candidate.ObjectMeta, &desired.ObjectMeta)
+		return r.Client.Create(ctx, candidate)
 	}
 	if err != nil {
 		return err
@@ -334,8 +336,9 @@ func (r *YanetConfigReconcilerV2) applySharedServiceV2(
 func desiredSharedServiceUpdateV2(existing, desired *corev1.Service) (*corev1.Service, bool) {
 	existingNormalized := existing.DeepCopy()
 	desiredNormalized := desired.DeepCopy()
-	clientgoscheme.Scheme.Default(existingNormalized)
-	clientgoscheme.Scheme.Default(desiredNormalized)
+	// Shared ClusterIP Services have a fixed non-sticky endpoint contract.
+	// Set it explicitly: client-go's scheme does not apply server defaults.
+	desiredNormalized.Spec.SessionAffinity = corev1.ServiceAffinityNone
 	desiredNormalized.Spec.ClusterIP = existingNormalized.Spec.ClusterIP
 	desiredNormalized.Spec.ClusterIPs = append([]string(nil), existingNormalized.Spec.ClusterIPs...)
 	desiredNormalized.Spec.IPFamilies = append([]corev1.IPFamily(nil), existingNormalized.Spec.IPFamilies...)

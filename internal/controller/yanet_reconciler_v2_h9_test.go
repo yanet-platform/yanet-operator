@@ -365,6 +365,11 @@ func TestApplyDeploymentV2_RetriesConflictAndMergesLabels(t *testing.T) {
 		WithObjects(existing).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				options := &client.UpdateOptions{}
+				options.ApplyOptions(opts)
+				if len(options.DryRun) != 0 {
+					return c.Update(ctx, obj, opts...)
+				}
 				if atomic.AddInt32(&updates, 1) == 1 {
 					return apierrors.NewConflict(
 						schema.GroupResource{Group: "apps", Resource: "deployments"},

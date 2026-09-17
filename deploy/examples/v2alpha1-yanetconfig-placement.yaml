@@ -1,4 +1,6 @@
 # Illustrative palette: replace images/config with the deployed binaries' settings.
+# This example retains the legacy combined slot to illustrate port reservations.
+# For split netconfig/neighbour-sidecar runtime, see v2alpha1-yanetconfig-full.yaml.
 # monalive is an ordinary operator, never a fixed dataplane sidecar slot.
 # The operator injects YANET_KUBERNETES_{GRPC,HTTP}_PORT before user env and
 # YANET_KUBERNETES_{GRPC,HTTP}_ADVERTISE_ENDPOINT for the shared Service.

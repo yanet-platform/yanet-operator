@@ -448,15 +448,15 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 		if err := ValidateYanetBirdDependencies(&YanetSpec{BoxType: box.Name}, &spec.Components, box); err != nil {
 			return fmt.Errorf("%s: %w", path, err)
 		}
+		if err := validateBoxDataplaneNetwork(spec, box); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
 		// operators
 		for opName, opSlot := range box.Operators {
 			if err := ValidateOperatorPlacement(opSlot.Placement); err != nil {
 				return fmt.Errorf("%s.operators[%s]: %w", path, opName, err)
 			}
 			if opSlot.Placement == OperatorPlacementDataplane {
-				if spec.Components.Dataplane.HostNetwork != nil && *spec.Components.Dataplane.HostNetwork {
-					return fmt.Errorf("%s.operators[%s]: dataplane placement requires a private network namespace", path, opName)
-				}
 				for _, name := range opSlot.Patches {
 					for _, patch := range spec.Patches {
 						if patch.Name == name {
@@ -474,6 +474,51 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// validateBoxDataplaneNetwork checks the effective network setting, not the
+// palette default: ordered dataplane patches may override it for this box.
+// Container composition does not affect hostNetwork; full rendering remains in
+// the reconciler, which independently enforces the final Pod invariant.
+func validateBoxDataplaneNetwork(spec *YanetConfigSpec, box *BoxType) error {
+	colocated := false
+	for _, operator := range box.Operators {
+		if operator.Placement == OperatorPlacementDataplane {
+			colocated = true
+			break
+		}
+	}
+	if !colocated {
+		return nil
+	}
+	deployment := appsv1.Deployment{}
+	if spec.Components.Dataplane.HostNetwork != nil {
+		deployment.Spec.Template.Spec.HostNetwork = *spec.Components.Dataplane.HostNetwork
+	}
+	merged, err := json.Marshal(&deployment)
+	if err != nil {
+		return fmt.Errorf("marshal dataplane network skeleton: %w", err)
+	}
+	registry := make(map[string][]byte, len(spec.Patches))
+	for _, patch := range spec.Patches {
+		registry[patch.Name] = patch.Patch.Raw
+	}
+	// References have already been checked by validateBoxTypeRefs.
+	for _, name := range box.Components.Dataplane.Patches {
+		merged, err = strategicpatch.StrategicMergePatch(merged, registry[name], appsv1.Deployment{})
+		if err != nil {
+			return fmt.Errorf("dataplane patch %q: %w", name, err)
+		}
+	}
+	// Decode into a fresh value so a patch deleting hostNetwork resets it.
+	var effective appsv1.Deployment
+	if err := json.Unmarshal(merged, &effective); err != nil {
+		return fmt.Errorf("decode patched dataplane network: %w", err)
+	}
+	if effective.Spec.Template.Spec.HostNetwork {
+		return fmt.Errorf("dataplane placement requires a private network namespace")
 	}
 	return nil
 }

@@ -36,7 +36,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1203,24 +1202,13 @@ func (r *YanetV2Reconciler) applyDeploymentV2(
 		return "error", 0, err
 	}
 
-	if _, changed := r.desiredDeploymentUpdate(existing, desired); !changed {
-		return "synced", 0, nil
-	}
-	if !autoSync {
-		return "out-of-sync", 0, nil
-	}
-
-	// UpdateWindow throttle is local to the v2 controller.
-	if rt := r.checkUpdateRequeue(logger, updateWindow, nodeName); rt > 0 {
-		yanetUpdateThrottledTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
-		return "sync-waiting", rt, nil
-	}
-
 	// R10: handle 409 Conflict by re-fetching and re-applying the
 	// desired spec. Without this, two operator replicas (now that
 	// leader-election is on by default replicaCount may still be
 	// >1) would race each other to the loser's exit code.
 	updated := false
+	state := "synced"
+	var requeue time.Duration
 	updErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &appsv1.Deployment{}
 		if gerr := r.Client.Get(ctx, key, fresh); gerr != nil {
@@ -1229,8 +1217,21 @@ func (r *YanetV2Reconciler) applyDeploymentV2(
 		if ownershipErr := validateDeploymentOwnership(fresh, desired); ownershipErr != nil {
 			return ownershipErr
 		}
-		candidate, changed := r.desiredDeploymentUpdate(fresh, desired)
+		candidate, changed, err := r.desiredDeploymentUpdate(ctx, fresh, desired)
+		if err != nil {
+			return err
+		}
 		if !changed {
+			return nil
+		}
+		if !autoSync {
+			state = "out-of-sync"
+			return nil
+		}
+		// Only real drift consumes the update window, not API defaults.
+		if requeue = r.checkUpdateRequeue(logger, updateWindow, nodeName); requeue > 0 {
+			yanetUpdateThrottledTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
+			state = "sync-waiting"
 			return nil
 		}
 		if err := r.checkGlobalStopV2(); err != nil {
@@ -1249,27 +1250,40 @@ func (r *YanetV2Reconciler) applyDeploymentV2(
 	if updated {
 		yanetDeploymentsUpdatedTotal.WithLabelValues(desired.Name, desired.Namespace).Inc()
 	}
-	return "synced", 0, nil
+	return state, requeue, nil
 }
 
 func (r *YanetV2Reconciler) desiredDeploymentUpdate(
+	ctx context.Context,
 	existing, desired *appsv1.Deployment,
-) (*appsv1.Deployment, bool) {
-	existingNormalized := existing.DeepCopy()
-	desiredNormalized := desired.DeepCopy()
-	clientgoscheme.Scheme.Default(existingNormalized)
-	clientgoscheme.Scheme.Default(desiredNormalized)
+) (*appsv1.Deployment, bool, error) {
 	candidate := existing.DeepCopy()
-	candidate.Spec = desiredNormalized.Spec
-	candidate.OwnerReferences = append([]metav1.OwnerReference(nil), desiredNormalized.OwnerReferences...)
+	candidate.Spec = *desired.Spec.DeepCopy()
+	candidate.OwnerReferences = append([]metav1.OwnerReference(nil), desired.OwnerReferences...)
 	// Keep foreign metadata while removing keys previously managed by the
 	// operator that disappeared from the desired object.
-	mergeManagedMeta(&candidate.ObjectMeta, &desiredNormalized.ObjectMeta)
-	changed := !apiequality.Semantic.DeepEqual(existingNormalized.Spec, candidate.Spec) ||
+	mergeManagedMeta(&candidate.ObjectMeta, &desired.ObjectMeta)
+	if !deploymentUpdateChangedV2(existing, candidate) {
+		return candidate, false, nil
+	}
+	if err := r.checkGlobalStopV2(); err != nil {
+		return nil, false, err
+	}
+	// client-go's scheme does not install API-server defaults. Normalize via
+	// admission on apparent drift, even in report-only mode, without persisting.
+	// Reuse this exact candidate for the write; rebuilding it would lose defaults
+	// and could turn removed patch fields into perpetual drift.
+	if err := r.Client.Update(ctx, candidate, client.DryRunAll); err != nil {
+		return nil, false, fmt.Errorf("normalize Deployment %s/%s: %w", desired.Namespace, desired.Name, err)
+	}
+	return candidate, deploymentUpdateChangedV2(existing, candidate), nil
+}
+
+func deploymentUpdateChangedV2(existing, candidate *appsv1.Deployment) bool {
+	return !apiequality.Semantic.DeepEqual(existing.Spec, candidate.Spec) ||
 		!apiequality.Semantic.DeepEqual(existing.OwnerReferences, candidate.OwnerReferences) ||
 		!apiequality.Semantic.DeepEqual(existing.Labels, candidate.Labels) ||
 		!apiequality.Semantic.DeepEqual(existing.Annotations, candidate.Annotations)
-	return candidate, changed
 }
 
 func validateDeploymentOwnership(existing, desired *appsv1.Deployment) error {

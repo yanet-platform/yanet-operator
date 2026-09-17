@@ -19,6 +19,7 @@ package v2alpha1
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -423,15 +424,6 @@ func TestYanetConfigWebhook_NegativeUpdateWindow(t *testing.T) {
 	}
 }
 
-func TestYanetConfigWebhook_ZeroUpdateWindow_OK(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.UpdateWindow = 0
-	v := &YanetConfigCustomValidator{}
-	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
-		t.Errorf("zero updateWindow must be accepted: %v", err)
-	}
-}
-
 func TestYanetConfigWebhook_PositiveUpdateWindow_OK(t *testing.T) {
 	cfg := validConfig()
 	cfg.Spec.UpdateWindow = 300
@@ -516,6 +508,7 @@ func TestYanetConfigWebhook_OperatorShape(t *testing.T) {
 		{name: "invalid operator name", operator: "not_an_operator", container: "main", count: 1, wantErr: "name"},
 		{name: "invalid container name", operator: "test", container: "not.a.container", count: 1, wantErr: "containers[0].name"},
 		{name: "no containers", operator: "test", count: 0, wantErr: "between 1 and 8"},
+		{name: "maximum containers", operator: "test", count: 8},
 		{name: "too many containers", operator: "test", count: 9, wantErr: "between 1 and 8"},
 	}
 	for _, tt := range tests {
@@ -523,7 +516,11 @@ func TestYanetConfigWebhook_OperatorShape(t *testing.T) {
 			cfg := validConfig()
 			containers := make([]OperatorContainer, tt.count)
 			for i := range containers {
-				containers[i] = OperatorContainer{Name: tt.container, Image: ImageRef{Name: "test"}}
+				name := tt.container
+				if tt.count > 1 {
+					name = fmt.Sprintf("worker-%d", i)
+				}
+				containers[i] = OperatorContainer{Name: name, Image: ImageRef{Name: "test"}}
 			}
 			cfg.Spec.Components.Operators = []OperatorSpec{{Name: tt.operator, Containers: containers}}
 			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)

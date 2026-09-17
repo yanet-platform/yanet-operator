@@ -37,7 +37,7 @@ import (
 )
 
 func TestYanetConfigReconcileV2IsolatesServiceApplyFailures(t *testing.T) {
-	ctx := context.Background()
+	testContext := context.Background()
 	config := &yanetv2alpha1.YanetConfigV2{
 		ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName, UID: "config-uid"},
 		Spec:       minimalConfigV2(),
@@ -70,22 +70,22 @@ func TestYanetConfigReconcileV2IsolatesServiceApplyFailures(t *testing.T) {
 	r := &YanetConfigReconcilerV2{
 		Client: cl, Scheme: scheme, GlobalConfigV2: &yanetv2alpha1.MutexYanetConfigSpec{},
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{}); err == nil {
+	if _, err := r.Reconcile(testContext, ctrl.Request{}); err == nil {
 		t.Fatal("foreign Service must produce a retryable reconciliation error")
 	}
-	if err := cl.Get(ctx, client.ObjectKey{
+	if err := cl.Get(testContext, client.ObjectKey{
 		Name: foreign.Name, Namespace: "healthy",
 	}, &corev1.Service{}); err != nil {
 		t.Fatalf("unrelated Service must still converge: %v", err)
 	}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(stale), &corev1.Service{}); !apierrors.IsNotFound(err) {
+	if err := cl.Get(testContext, client.ObjectKeyFromObject(stale), &corev1.Service{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("unrelated orphan must still be pruned: %v", err)
 	}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(protected), &corev1.Service{}); err != nil {
+	if err := cl.Get(testContext, client.ObjectKeyFromObject(protected), &corev1.Service{}); err != nil {
 		t.Fatalf("failed scope must retain its previous Services: %v", err)
 	}
 	gotForeign := &corev1.Service{}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(foreign), gotForeign); err != nil {
+	if err := cl.Get(testContext, client.ObjectKeyFromObject(foreign), gotForeign); err != nil {
 		t.Fatalf("foreign Service must remain: %v", err)
 	}
 	if metav1.GetControllerOf(gotForeign) != nil {
@@ -94,7 +94,7 @@ func TestYanetConfigReconcileV2IsolatesServiceApplyFailures(t *testing.T) {
 }
 
 func TestYanetConfigReconcileV2PreservesAmbiguousServiceAcrossBoxTypes(t *testing.T) {
-	ctx := context.Background()
+	testContext := context.Background()
 	config := &yanetv2alpha1.YanetConfigV2{
 		ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName, UID: "config-uid"},
 		Spec:       minimalConfigV2(),
@@ -122,26 +122,26 @@ func TestYanetConfigReconcileV2PreservesAmbiguousServiceAcrossBoxTypes(t *testin
 	r := &YanetConfigReconcilerV2{
 		Client: cl, Scheme: scheme, GlobalConfigV2: &yanetv2alpha1.MutexYanetConfigSpec{},
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+	if _, err := r.Reconcile(testContext, ctrl.Request{}); err != nil {
 		t.Fatalf("initial reconcile: %v", err)
 	}
 	key := client.ObjectKey{Name: "yanet-a-b-c", Namespace: "yanet"}
 	previous := &corev1.Service{}
-	if err := cl.Get(ctx, key, previous); err != nil {
+	if err := cl.Get(testContext, key, previous); err != nil {
 		t.Fatalf("get initial Service: %v", err)
 	}
 	second := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: "yanet"},
 		Spec:       yanetv2alpha1.YanetSpec{BoxType: "a-b"},
 	}
-	if err := cl.Create(ctx, second); err != nil {
+	if err := cl.Create(testContext, second); err != nil {
 		t.Fatalf("create colliding installation: %v", err)
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{}); err == nil || !strings.Contains(err.Error(), "conflicting shared Service plans") {
+	if _, err := r.Reconcile(testContext, ctrl.Request{}); err == nil || !strings.Contains(err.Error(), "conflicting shared Service plans") {
 		t.Fatalf("expected cross-box name collision, got %v", err)
 	}
 	current := &corev1.Service{}
-	if err := cl.Get(ctx, key, current); err != nil {
+	if err := cl.Get(testContext, key, current); err != nil {
 		t.Fatalf("ambiguous Service must be preserved regardless of planning order: %v", err)
 	}
 	if current.Spec.Selector[manifests.LabelBoxType] != "a" || current.UID != previous.UID {
@@ -150,7 +150,7 @@ func TestYanetConfigReconcileV2PreservesAmbiguousServiceAcrossBoxTypes(t *testin
 }
 
 func TestYanetConfigReconcileV2PruningChecksObservedServiceVersion(t *testing.T) {
-	ctx := context.Background()
+	testContext := context.Background()
 	config := &yanetv2alpha1.YanetConfigV2{
 		ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName, UID: "config-uid"},
 		Spec:       minimalConfigV2(),
@@ -189,16 +189,16 @@ func TestYanetConfigReconcileV2PruningChecksObservedServiceVersion(t *testing.T)
 	r := &YanetConfigReconcilerV2{
 		Client: cl, Scheme: scheme, GlobalConfigV2: &yanetv2alpha1.MutexYanetConfigSpec{},
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{}); err == nil {
+	if _, err := r.Reconcile(testContext, ctrl.Request{}); err == nil {
 		t.Fatal("stale ownership check must result in a retry, not deletion")
 	}
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(stale), &corev1.Service{}); err != nil {
+	if err := cl.Get(testContext, client.ObjectKeyFromObject(stale), &corev1.Service{}); err != nil {
 		t.Fatalf("Service whose ownership changed during pruning must remain: %v", err)
 	}
 }
 
 func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testing.T) {
-	ctx := context.Background()
+	testContext := context.Background()
 	config := &yanetv2alpha1.YanetConfigV2{
 		ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName, UID: "config-uid"},
 		Spec:       minimalConfigV2(),
@@ -244,7 +244,7 @@ func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testi
 	assertServices := func(want []string) {
 		t.Helper()
 		services := &corev1.ServiceList{}
-		if err := cl.List(ctx, services); err != nil {
+		if err := cl.List(testContext, services); err != nil {
 			t.Fatalf("list Services: %v", err)
 		}
 		var names []string
@@ -259,7 +259,7 @@ func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testi
 			t.Fatalf("unexpected namespace/box/NUMA Service scopes: got %v, want %v", names, want)
 		}
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+	if _, err := r.Reconcile(testContext, ctrl.Request{}); err != nil {
 		t.Fatalf("initial reconcile: %v", err)
 	}
 	assertServices([]string{
@@ -272,10 +272,10 @@ func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testi
 		"right/yanet-release-controlplane-numa2",
 		"right/yanet-release-route",
 	})
-	if err := cl.Delete(ctx, selected); err != nil {
+	if err := cl.Delete(testContext, selected); err != nil {
 		t.Fatalf("delete selected node: %v", err)
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+	if _, err := r.Reconcile(testContext, ctrl.Request{}); err != nil {
 		t.Fatalf("reconcile after node deletion: %v", err)
 	}
 	assertServices([]string{
@@ -371,7 +371,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 		{name: "configured NUMA and disabled box sidecar", numa: &configuredNuma, wantNuma: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
+			testContext := context.Background()
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName, UID: "config-uid"},
 				Spec:       minimalConfigV2(),
@@ -411,7 +411,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 			}
 			reconcile := func() {
 				t.Helper()
-				if _, err := r.Reconcile(ctx, ctrl.Request{}); err != nil {
+				if _, err := r.Reconcile(testContext, ctrl.Request{}); err != nil {
 					t.Fatalf("reconcile shared Services: %v", err)
 				}
 			}
@@ -419,7 +419,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 			getNetlinkService := func() *corev1.Service {
 				t.Helper()
 				service := &corev1.Service{}
-				if err := cl.Get(ctx, key, service); err != nil {
+				if err := cl.Get(testContext, key, service); err != nil {
 					t.Fatalf("declared netlink Service must exist: %v", err)
 				}
 				return service
@@ -427,13 +427,13 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 			reconcile()
 			reconcile()
 			previous := getNetlinkService()
-			if err := cl.Get(ctx, client.ObjectKeyFromObject(installation), installation); err != nil {
+			if err := cl.Get(testContext, client.ObjectKeyFromObject(installation), installation); err != nil {
 				t.Fatalf("get installation: %v", err)
 			}
 			disabled := false
 			installation.Spec.Components.Dataplane.Containers[yanetv2alpha1.NetlinkDataplaneSidecarContainerName] =
 				yanetv2alpha1.YanetContainerOverride{Enabled: &disabled}
-			if err := cl.Update(ctx, installation); err != nil {
+			if err := cl.Update(testContext, installation); err != nil {
 				t.Fatalf("disable last netlink sidecar: %v", err)
 			}
 			reconcile()
@@ -460,26 +460,26 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 				}
 			}
 			services := &corev1.ServiceList{}
-			if err := cl.List(ctx, services, client.MatchingLabels{manifests.LabelComponent: "controlplane"}); err != nil {
+			if err := cl.List(testContext, services, client.MatchingLabels{manifests.LabelComponent: "controlplane"}); err != nil {
 				t.Fatalf("list controlplane Services: %v", err)
 			}
 			if len(services.Items) != tt.wantNuma {
 				t.Fatalf("disabled NUMA Services must remain unconditional: got %d, want %d", len(services.Items), tt.wantNuma)
 			}
-			if err := cl.Delete(ctx, current); err != nil {
+			if err := cl.Delete(testContext, current); err != nil {
 				t.Fatalf("delete netlink Service: %v", err)
 			}
 			reconcile()
 			getNetlinkService()
-			if err := cl.Get(ctx, client.ObjectKeyFromObject(config), config); err != nil {
+			if err := cl.Get(testContext, client.ObjectKeyFromObject(config), config); err != nil {
 				t.Fatalf("get config: %v", err)
 			}
 			config.Spec.BoxTypes[0].Components.Dataplane.Sidecars.NetlinkDataplaneSidecar = nil
-			if err := cl.Update(ctx, config); err != nil {
+			if err := cl.Update(testContext, config); err != nil {
 				t.Fatalf("remove netlink wiring: %v", err)
 			}
 			reconcile()
-			if err := cl.Get(ctx, key, &corev1.Service{}); !apierrors.IsNotFound(err) {
+			if err := cl.Get(testContext, key, &corev1.Service{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("removing box wiring must still prune the netlink Service: %v", err)
 			}
 		})

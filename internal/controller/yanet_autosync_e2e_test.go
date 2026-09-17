@@ -38,8 +38,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 	testContext := context.Background()
 
 	// Each context uses a dedicated namespace + unique node-selector
-	// label so its Deployments and Nodes never collide with the
-	// throttling suite (which runs in "default") or with each other.
+	// label so its Deployments and Nodes never collide with other suites.
 
 	Context("V1 API - AutoSync behavior", func() {
 		const (
@@ -103,7 +102,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
 			// Give the reconciler time; expect no Deployments appear.
-			Consistently(func() int {
+			Consistently(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 3*time.Second, 500*time.Millisecond).Should(Equal(0),
 				"no deployments should be created when autoSync=false")
@@ -120,7 +119,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			}
 			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
-			Eventually(func() int {
+			Eventually(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created when autoSync=true")
@@ -137,7 +136,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			}
 			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
-			Consistently(func() int {
+			Consistently(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 2*time.Second, 500*time.Millisecond).Should(Equal(0))
 
@@ -145,7 +144,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			yanet.Spec.AutoSync = true
 			Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 
-			Eventually(func() int {
+			Eventually(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created after toggling autoSync to true")
@@ -229,7 +228,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			}
 			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
-			Consistently(func() int {
+			Consistently(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 3*time.Second, 500*time.Millisecond).Should(Equal(0),
 				"no deployments should be created when autoSync=false")
@@ -246,7 +245,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			}
 			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
-			Eventually(func() int {
+			Eventually(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created when autoSync=true")
@@ -263,7 +262,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			}
 			Expect(k8sClient.Create(testContext, yanet)).Should(Succeed())
 
-			Consistently(func() int {
+			Consistently(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 2*time.Second, 500*time.Millisecond).Should(Equal(0))
 
@@ -271,7 +270,7 @@ var _ = Describe("AutoSync Behavior E2E Tests", func() {
 			yanet.Spec.AutoSync = helpers.PtrBool(true)
 			Expect(k8sClient.Update(testContext, yanet)).Should(Succeed())
 
-			Eventually(func() int {
+			Eventually(func() (int, error) {
 				return countDeployments(testContext, ns)
 			}, 15*time.Second, 500*time.Millisecond).Should(BeNumerically(">", 0),
 				"deployments should be created after toggling autoSync to true")

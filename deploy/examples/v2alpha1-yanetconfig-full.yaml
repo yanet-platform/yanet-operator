@@ -4,6 +4,11 @@
 #   2. spec.patches    — named registry of strategic-merge Deployment patch fragments
 #   3. spec.boxTypes   — box presets: which components are enabled and which patches to apply
 #
+# Runtime network setup and neighbour publication use separate generic operators.
+# Replace their illustrative :example tags with independently tested releases.
+# No runtime Kubernetes probes: application readiness belongs to announcer/gRPC.
+# Prepare the host config files before deployment; this is a placement example.
+#
 # See also: yanet-operator/YANET2_MIGRATION_PLAN/17-final-model.md
 ---
 apiVersion: yanet.yanet-platform.io/v2alpha1
@@ -70,11 +75,6 @@ spec:
           config:
             # Mounted at /etc/bird. BIRD reads bird.conf or bird6.conf.
             hostPath: /etc/bird
-        netlinkDataplaneSidecar:
-          image: {name: netlink-dataplane-sidecar, tag: v2.1.0}
-          config:
-            hostPath: /etc/yanet2
-            args: [-c, /etc/yanet2/netlink-dataplane-sidecar.yaml]
 
     # NOTE: birdAdapter is a separate Deployment (not a native sidecar),
     # so the adapter can be updated without restarting bird.
@@ -107,6 +107,27 @@ spec:
 
     # --- Dynamic operators (array, no hardcoded names) ---
     operators:
+      - name: netconfig
+        listeners: [] # No RPC or automatically generated Service.
+        containers:
+          - name: netconfig
+            image: {registry: ghcr.io, prefix: yanet-platform, name: netconfig, tag: example}
+            config:
+              # source: netplan; netplan_path: /etc/netplan/00-interfaces.yaml.
+              # The operator patch moves the default mount to /etc/netconfig.
+              hostPath: /etc/netconfig
+              args: [-config, /etc/netconfig/config.yaml]
+      - name: neighbour-sidecar
+        listeners: [] # Its own gRPC Ready/Watch endpoint is not managed here.
+        containers:
+          - name: neighbour-sidecar
+            image: {registry: ghcr.io, prefix: yanet-platform/yanet2, name: neighbour-sidecar, tag: example}
+            config:
+              # Configure server.endpoint (e.g. [::]:9903), gateways, table_name
+              # and link_map in this file. Disable route's local netlink monitor.
+              # Gateways are outbound transports; the sidecar does not register.
+              hostPath: /etc/yanet2
+              args: [-c, /etc/yanet2/yanet-neighbour-sidecar.yaml]
       - name: antiddos
         containers:
           - name: operator
@@ -282,22 +303,32 @@ spec:
                     requests: {cpu: 100m, memory: 4Gi}
                     limits:   {cpu: "4", memory: 32Gi}
 
-    # --- generic netconfig initContainer example ---
-    - name: netconfig-init
+    # Applied to the operator's logical container before dataplane composition.
+    # Netconfig retries missing KNI asynchronously while dataplane starts. Do not
+    # add a blocking init/PostStart hook, a startup probe, or the -once flag.
+    - name: netconfig-runtime
       patch:
         spec:
           template:
             spec:
-              initContainers:
+              containers:
                 - name: netconfig
-                  image: ubuntu:22.04
-                  command:
-                    - /bin/sh
-                    - -c
-                    - |
-                      apt-get install -y jq iproute2
-                      until ip addr | grep kni[0-9]; do sleep 2; done
-                      # ... read controlplane.conf and configure interfaces
+                  securityContext:
+                    privileged: true # Netlink and per-interface IPv6 sysctls.
+                  volumeMounts:
+                    - mountPath: /etc/yanet2
+                      $patch: delete
+                    - name: config-0
+                      mountPath: /etc/netconfig
+                      readOnly: true
+                    - name: netplan
+                      mountPath: /etc/netplan
+                      readOnly: true
+              volumes:
+                - name: netplan
+                  hostPath:
+                    path: /etc/netplan
+                    type: Directory
 
   # ============================================================
   # 3) BOX TYPES — box presets.
@@ -314,11 +345,12 @@ spec:
         dataplane:
           sidecars:
             bird: {}
-            netlinkDataplaneSidecar: {}
           patches: [tolerations, telegraf, checkpointer, dp-resources, bird-resources]
         announcer:
           patches: [tolerations, telegraf, checkpointer, announcer-resources]
-      # operators: {}   # not enabled
+      operators:
+        netconfig: {placement: dataplane, patches: [netconfig-runtime]}
+        neighbour-sidecar: {placement: dataplane}
 
     # ---- balancer: cp + dp with native sidecars + birdAdapter (no announcer)
     - name: balancer
@@ -328,11 +360,12 @@ spec:
         dataplane:
           sidecars:
             bird: {}
-            netlinkDataplaneSidecar: {}
           patches: [tolerations, telegraf, checkpointer, dp-resources, bird-resources]
         birdAdapter:
           patches: [tolerations, telegraf, checkpointer]
       operators:
+        netconfig: {placement: dataplane, patches: [netconfig-runtime]}
+        neighbour-sidecar: {placement: dataplane}
         route:
           patches: [route-listener, tolerations, telegraf]
 
@@ -344,8 +377,9 @@ spec:
         dataplane:
           sidecars:
             bird: {}
-            netlinkDataplaneSidecar: {}
           patches: [tolerations, telegraf, checkpointer, dp-resources, firewall-max-memory, bird-resources]
       operators:
+        netconfig: {placement: dataplane, patches: [netconfig-runtime]}
+        neighbour-sidecar: {placement: dataplane}
         antiddos:
           patches: [tolerations, telegraf]

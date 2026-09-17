@@ -298,7 +298,9 @@ var _ = Describe("Status Reporting E2E Tests", func() {
 				"missing deployments must be reported as OutOfSync when autoSync=false")
 
 			// And no deployments should actually be created.
-			Expect(countDeployments(testContext, ns)).Should(Equal(0))
+			count, err := countDeployments(testContext, ns)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(count).Should(Equal(0))
 		})
 
 		It("Should update Status when toggling autoSync false->true", func() {

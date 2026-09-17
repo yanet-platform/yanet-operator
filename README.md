@@ -56,16 +56,30 @@ live in the cluster-scoped `YanetConfigV2` singleton named `config`. The
 `YanetV2` CR is minimal: pick a `boxType`,
 select nodes via `nodeSelector`, optionally override per-container
 `image.{name,tag}`, workload/native-sidecar `enabled`, and controlplane
-`disabledNuma`. BIRD and `netlink-dataplane-sidecar` are fixed optional native
-sidecars of the dataplane Pod. Shared Services
+`disabledNuma`. Generic operators can run standalone or with `placement: dataplane`
+as restartable init containers in the dataplane's private network namespace.
+The [full example](deploy/examples/v2alpha1-yanetconfig-full.yaml) uses separate
+`netconfig` and `neighbour-sidecar` operators alongside the fixed BIRD sidecar.
+Both declare `listeners: []`: no separate Deployment or automatic Service.
+Only netconfig receives interface-configuration privileges, through its own patch;
+both receive independently scoped read-only configuration mounts. Their example
+image tags must be replaced with tested releases before deployment.
+
+Runtime Kubernetes probes and blocking KNI startup hooks are intentionally absent:
+dataplane must start to create KNI. Application readiness belongs to announcer and
+the YANET gRPC readiness APIs; operator consumption of this readiness is deferred.
+Neighbour-sidecar's own `Ready/Watch` bind comes from its config, with no gateway
+registration or automatic listener allocation. The legacy combined
+`netlink-dataplane-sidecar` slot remains available for existing profiles.
+
+Shared Services
 are unconditional for service-backed roles and are named
 `yanet-<boxType>-<component>[-numa<N>]` within each namespace. They expose
 stable gRPC/HTTP ports `8080/8081`; host-network target ports are allocated from
 `YanetConfigV2.spec.hostNetworkPortRange`. Runtime endpoint variables generally
 belong in named Deployment patches; the fixed netlink sidecar receives its bind
 and shared-Service advertise endpoints from the builder for its self-registered
-common gRPC metrics service. Interface restoration and neighbour publication do
-not require a reverse-route configuration RPC. Per-NUMA controlplane
+common gRPC metrics service. Per-NUMA controlplane
 fan-out is driven by the NFD label
 `feature.node.kubernetes.io/cpu-numa_nodes_count`. Each node can belong to only
 one `YanetV2`; overlapping selectors are resolved in favour of the existing

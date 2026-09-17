@@ -45,7 +45,6 @@ func (r *YanetV2Reconciler) pruneConflictingDeploymentsV2(
 		ctx,
 		deployments,
 		client.InNamespace(yanet.Namespace),
-		client.MatchingLabels{manifests.LabelYanet: yanet.Name},
 	); err != nil {
 		return fmt.Errorf("list conflicting Deployments: %w", err)
 	}
@@ -86,8 +85,8 @@ func controlledByYanetV2(object client.Object, yanet *yanetv2alpha1.YanetV2) boo
 }
 
 // desiredSet groups names of resources the reconciler intends to keep
-// for a single YanetV2 installation. Anything labelled as ours that is
-// NOT in this set is considered an orphan.
+// for a single YanetV2 installation. Owned resources that are NOT in this
+// set are considered orphans.
 type desiredSet struct {
 	Deployments map[string]struct{}
 	ConfigMaps  map[string]struct{}
@@ -102,9 +101,11 @@ func newDesiredSet() desiredSet {
 }
 
 // pruneOrphans deletes every Deployment or ConfigMap that
-//   - carries the LabelYanet=<yanet.Name> label, AND
 //   - is controlled by this exact YanetV2 instance, AND
 //   - is NOT present in the desired set.
+//
+// Deployment ownership, not its mutable labels, determines cleanup eligibility.
+// ConfigMaps additionally carry LabelYanet=<yanet.Name>.
 //
 // When autoSync=false the helper is a no-op for safety: orphans are
 // just counted (the caller may surface the count via a metric or
@@ -128,7 +129,7 @@ func (r *YanetV2Reconciler) pruneOrphans(
 
 	// Deployments ---------------------------------------------
 	deps := &appsv1.DeploymentList{}
-	if err := r.Client.List(ctx, deps, ns, selector); err != nil {
+	if err := r.Client.List(ctx, deps, ns); err != nil {
 		return 0, err
 	}
 	for i := range deps.Items {
@@ -163,7 +164,7 @@ func (r *YanetV2Reconciler) pruneOrphans(
 	// Re-read after deletion so completed foreground cleanup does not keep
 	// otherwise unused ConfigMaps alive on the strength of the old snapshot.
 	if autoSync && count > 0 {
-		if err := r.List(ctx, deps, ns, selector); err != nil {
+		if err := r.List(ctx, deps, ns); err != nil {
 			return count, err
 		}
 	}

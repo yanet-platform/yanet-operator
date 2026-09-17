@@ -53,6 +53,7 @@ var ctx context.Context
 var cancel context.CancelFunc
 var globalConfig *yanetv1alpha1.MutexYanetConfigSpec
 var globalConfigV2 *yanetv2alpha1.MutexYanetConfigSpec
+var managerDone chan error
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -152,10 +153,9 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
+	managerDone = make(chan error, 1)
 	go func() {
-		defer GinkgoRecover()
-		err = k8sManager.Start(ctx)
-		Expect(err).ToNot(HaveOccurred(), "failed to run manager")
+		managerDone <- k8sManager.Start(ctx)
 	}()
 
 	// Wait until the webhook server is reachable before yielding control
@@ -185,6 +185,11 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	By("canceling the context")
 	cancel()
+	if managerDone != nil {
+		var managerErr error
+		Eventually(managerDone, 30*time.Second).Should(Receive(&managerErr), "manager must exit before stopping envtest")
+		Expect(managerErr).NotTo(HaveOccurred(), "failed to run manager")
+	}
 
 	By("tearing down the test environment")
 	err := testEnv.Stop()

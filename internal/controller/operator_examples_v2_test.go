@@ -3,17 +3,30 @@ package controller
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 
 	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
 )
 
 func TestOperatorPlacementExamples(t *testing.T) {
-	for _, file := range []string{"v2alpha1-yanetconfig-full.yaml", "v2alpha1-yanetconfig-placement.yaml"} {
-		t.Run(file, func(t *testing.T) {
+	for _, example := range []struct {
+		name, file     string
+		patchedPrivate bool
+		disableNetwork bool
+	}{
+		{name: "full", file: "v2alpha1-yanetconfig-full.yaml"},
+		{name: "private-patch-overrides-host-palette", file: "v2alpha1-yanetconfig-full.yaml", patchedPrivate: true},
+		{name: "disabled-network-sidecars", file: "v2alpha1-yanetconfig-full.yaml", disableNetwork: true},
+		{name: "placement", file: "v2alpha1-yanetconfig-placement.yaml"},
+	} {
+		t.Run(example.name, func(t *testing.T) {
+			file := example.file
 			raw, err := os.ReadFile("../../deploy/examples/" + file)
 			if err != nil {
 				t.Fatal(err)
@@ -21,6 +34,15 @@ func TestOperatorPlacementExamples(t *testing.T) {
 			config := &api.YanetConfigV2{}
 			if err := yaml.UnmarshalStrict(raw, config); err != nil {
 				t.Fatal(err)
+			}
+			if example.patchedPrivate {
+				config.Spec.Components.Dataplane.HostNetwork = helpers.PtrBool(true)
+				config.Spec.Patches = append(config.Spec.Patches, api.NamedPatch{Name: "private-network",
+					Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"hostNetwork":false}}}}`)}})
+				for i := range config.Spec.BoxTypes {
+					box := &config.Spec.BoxTypes[i]
+					box.Components.Dataplane.Patches = append(box.Components.Dataplane.Patches, "private-network")
+				}
 			}
 			if _, err := (&api.YanetConfigCustomValidator{}).ValidateCreate(context.Background(), config); err != nil {
 				t.Fatal(err)
@@ -31,9 +53,15 @@ func TestOperatorPlacementExamples(t *testing.T) {
 					t.Fatal(err)
 				}
 				build := manifests.BuildContextV2{YanetName: "example", Namespace: "test", BoxType: box.Name, NodeName: "test-node", NumaCount: 2}
+				spec := &api.YanetSpec{BoxType: box.Name}
+				if example.disableNetwork {
+					spec.Components = &api.YanetComponentsOverride{Operators: map[string]api.YanetComponentOverride{
+						"netconfig": {Enabled: helpers.PtrBool(false)}, "neighbour-sidecar": {Enabled: helpers.PtrBool(false)},
+					}}
+				}
 				var workloads []renderedWorkloadV2
 				for _, ref := range refs {
-					component, err := helpers.ResolveBoxComponent(&config.Spec, &api.YanetSpec{BoxType: box.Name}, ref.Kind, ref.OperatorName)
+					component, err := helpers.ResolveBoxComponent(&config.Spec, spec, ref.Kind, ref.OperatorName)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -48,12 +76,104 @@ func TestOperatorPlacementExamples(t *testing.T) {
 						if err := plan.Validate(); err != nil {
 							t.Fatal(err)
 						}
+						if file == "v2alpha1-yanetconfig-full.yaml" &&
+							(plan.Component == "netconfig" || plan.Component == "neighbour-sidecar" || plan.Component == "netlink-dataplane-sidecar") {
+							t.Fatalf("%s: network sidecar must not have an automatic Service: %+v", box.Name, plan)
+						}
 					}
 				}
 				if _, err := allocateHostNetworkPortsV2(workloads, config.Spec.HostNetworkPortRange); err != nil {
 					t.Fatal(err)
 				}
+				if file == "v2alpha1-yanetconfig-full.yaml" {
+					assertNetworkSidecarExample(t, workloads, example.disableNetwork)
+				}
 			}
 		})
+	}
+}
+
+func assertNetworkSidecarExample(t *testing.T, workloads []renderedWorkloadV2, disabled bool) {
+	t.Helper()
+	var dataplanes int
+	for _, workload := range workloads {
+		if workload.component.Name == "netconfig" || workload.component.Name == "neighbour-sidecar" {
+			t.Fatalf("%s must share the dataplane Pod, not a separate Deployment", workload.component.Name)
+		}
+		pod := workload.deployment.Spec.Template.Spec
+		for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+			for _, container := range containers {
+				if container.StartupProbe != nil || container.ReadinessProbe != nil || container.LivenessProbe != nil {
+					t.Fatalf("runtime %s must use application gRPC readiness, not Kubernetes probes", container.Name)
+				}
+			}
+		}
+		if workload.component.Kind != helpers.KindDataplane {
+			continue
+		}
+		dataplanes++
+		wantInit := 3
+		if disabled {
+			wantInit = 1
+		}
+		if pod.HostNetwork || len(pod.Containers) != 1 || pod.Containers[0].Name != "dataplane" ||
+			len(pod.InitContainers) != wantInit || pod.InitContainers[0].Name != "bird" {
+			t.Fatalf("expected private dataplane with BIRD and two network sidecars: %+v", pod)
+		}
+		for _, container := range pod.InitContainers {
+			if container.RestartPolicy == nil || *container.RestartPolicy != corev1.ContainerRestartPolicyAlways ||
+				(container.Lifecycle != nil && container.Lifecycle.PostStart != nil) {
+				t.Fatalf("%s must start without a blocking init/PostStart step", container.Name)
+			}
+		}
+		if disabled {
+			continue
+		}
+		neighbour, netconfig := pod.InitContainers[1], pod.InitContainers[2]
+		if neighbour.Image != "ghcr.io/yanet-platform/yanet2/neighbour-sidecar:example" ||
+			netconfig.Image != "ghcr.io/yanet-platform/netconfig:example" {
+			t.Fatalf("wrong sidecar images/order: %s, %s", neighbour.Image, netconfig.Image)
+		}
+		if !reflect.DeepEqual(neighbour.Args, []string{"-c", "/etc/yanet2/yanet-neighbour-sidecar.yaml"}) ||
+			!reflect.DeepEqual(netconfig.Args, []string{"-config", "/etc/netconfig/config.yaml"}) {
+			t.Fatalf("wrong runtime args: neighbour=%v netconfig=%v", neighbour.Args, netconfig.Args)
+		}
+		if netconfig.SecurityContext == nil || netconfig.SecurityContext.Privileged == nil || !*netconfig.SecurityContext.Privileged ||
+			(neighbour.SecurityContext != nil && (neighbour.SecurityContext.Capabilities != nil ||
+				(neighbour.SecurityContext.Privileged != nil && *neighbour.SecurityContext.Privileged))) {
+			t.Fatal("only netconfig may receive interface-configuration privileges")
+		}
+		volumes := make(map[string]corev1.Volume)
+		for _, volume := range pod.Volumes {
+			volumes[volume.Name] = volume
+		}
+		seen := make(map[string]bool)
+		for _, tt := range []struct {
+			container corev1.Container
+			paths     []string
+		}{{neighbour, []string{"/etc/yanet2"}}, {netconfig, []string{"/etc/netconfig", "/etc/netplan"}}} {
+			if len(tt.container.Ports) != 0 || len(tt.container.VolumeMounts) != len(tt.paths) {
+				t.Fatalf("unexpected listeners or mounts for %s: %+v", tt.container.Name, tt.container)
+			}
+			for _, path := range tt.paths {
+				found := false
+				for _, mount := range tt.container.VolumeMounts {
+					if mount.MountPath != path {
+						continue
+					}
+					volume := volumes[mount.Name]
+					if !mount.ReadOnly || seen[mount.Name] || volume.HostPath == nil || volume.HostPath.Path != path {
+						t.Fatalf("expected independently scoped read-only %s mount: %+v", path, mount)
+					}
+					seen[mount.Name], found = true, true
+				}
+				if !found {
+					t.Fatalf("%s missing config mount %s", tt.container.Name, path)
+				}
+			}
+		}
+	}
+	if dataplanes != 1 {
+		t.Fatalf("expected one dataplane Deployment, got %d", dataplanes)
 	}
 }

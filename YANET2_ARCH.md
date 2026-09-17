@@ -27,18 +27,20 @@
 | `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` (for shmem) | hostPath, inline or URL |
 | `metrics-collector` | DaemonSet (out of yanet-operator scope in Phase 4) | gRPC to gateway service | — |
 
-### 2.2. BIRD
+### 2.2. Dataplane network sidecars and BIRD
 
 | Component | Deployment | Wiring |
 |---|---|---|
 | `bird` (BIRD2) | Native sidecar in the dataplane Pod | hostPath config; owns `/run/bird`; shares dataplane network namespace |
-| `netlink-dataplane-sidecar` | Native sidecar in the dataplane Pod | restores interfaces, publishes neighbour updates; privileged for per-interface `/proc/sys` writes, read-only `/etc/netplan`, self-registered common gRPC metrics Service; shares dataplane network namespace |
+| `netconfig` | Generic operator placed in the dataplane Pod | bootstraps KNI/VLAN/lo/dummy; privileged for netlink and per-interface IPv6 sysctls; read-only `/etc/netconfig` and `/etc/netplan`; no RPC listener |
+| `neighbour-sidecar` | Generic operator placed in the dataplane Pod | observes kernel neighbours and publishes `SwapNeighbours` through outbound gateways; own configured gRPC `Ready/Watch`; read-only config, no interface-configuration privileges |
 | `bird-adapter` (`yanet-bird-adapter`) | Standalone Deployment | shared `/run/bird` (reads BIRD socket); gRPC → gateway service and/or route-operator service |
 
-> BIRD and the netlink helper are fixed optional slots below
-> `spec.components.dataplane.sidecars`. A box type selects them below its
-> dataplane slot. Kubernetes renders both as restartable init containers
-> (`restartPolicy: Always`); netlink precedes BIRD so BIRD stops first.
+> BIRD uses its fixed optional slot below `spec.components.dataplane.sidecars`.
+> Netconfig and neighbour-sidecar use `spec.components.operators[]` with explicit
+> `listeners: []`, selected by `boxTypes[].operators` with `placement: dataplane`.
+> All three use restartable init containers (`restartPolicy: Always`), sharing
+> the private dataplane netns. Generic operators follow BIRD in lexicographic order.
 > During migration, stop the old operator and delete its standalone v2 BIRD
 > Deployments before enabling this sidecar. Both variants own the node-local
 > `/run/bird` control-socket directory and cannot run concurrently.
@@ -49,11 +51,28 @@ installation override therefore requires explicitly disabling its consumers too.
 Whole-installation scale-to-zero is allowed; consumer enablement never cascades
 silently.
 
+Netconfig must retry absent KNI asynchronously: dataplane creates KNI only after
+the native sidecars start. No blocking init/PostStart hook or runtime Kubernetes
+probes are configured. Announcer owns application readiness decisions through
+YANET gRPC readiness APIs; operator consumption of these APIs is deferred.
+Neighbour-sidecar does not register with gateway; its configured `Ready/Watch`
+listener (default `[::]:9903`) has no automatic Service or port allocation here.
+It reports publication status, not FIB/forwarding readiness.
+
+The legacy combined `netlinkDataplaneSidecar` palette slot remains supported, but
+is not selected by the split-runtime profile. See the
+[full example](deploy/examples/v2alpha1-yanetconfig-full.yaml) for separate images,
+config mounts, and the netconfig-specific security patch. Image release/pinning,
+host config generation, and a real Kubernetes forwarding smoke are rollout steps.
+
 ### 2.3. Operators and Agents
 
-The list comes from CRD field `OperatorsSpec.Items[]`.
-For each item a separate Deployment + ClusterIP Service is created.
-The link to `gateway` is bidirectional over gRPC: an operator registers itself in the gateway, and the gateway calls the operator back at the address of its Service.
+The list comes from `spec.components.operators[]`. Standalone placement creates
+a separate Deployment; `placement: dataplane` composes restartable containers
+into the dataplane Pod. Service-backed operators receive a shared box-type
+ClusterIP Service. Explicit `listeners: []` suppresses managed listeners and
+Services. Registering operators talk bidirectionally with gateway; the two
+network sidecars above do not register.
 
 | Operator | Binary | Example config file |
 |---|---|---|
@@ -99,21 +118,19 @@ Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
 | `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>,component=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA role; exposes `grpc:8080` and `http:8081` |
-| `yanet-<boxType>-netlink-dataplane-sidecar` | `box-type=<boxType>,component=dataplane` | ClusterIP, `internalTrafficPolicy: Local` | Self-registered common metrics endpoint for the netlink sidecar on `grpc:8080` |
 | `yanet-<boxType>-<operator>` | `box-type=<boxType>,component=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks on `grpc:8080` |
 | `yanet-<boxType>-announcer` | `box-type=<boxType>,component=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point on `grpc:8080` |
 
-Services are unconditional for roles wired by a box type, even when an
+Services are unconditional for service-backed roles wired by a box type, even when an
 installation or component has zero replicas. Their selectors omit Yanet and node
 identity so installations of the same box type share the stable DNS names in a
 namespace. Named target ports let host-network Pods use target ports allocated
 from `spec.hostNetworkPortRange`, while Pod-network workloads use `8080/8081`.
 
-The netlink sidecar publishes neighbours to the gateway as a client and exposes
-only the common gRPC metrics service, not a reverse-route configuration RPC.
-Its default server bind is `[::1]:0`; the operator supplies a Service-reachable
-`YANET_SERVER_ENDPOINT` and a stable `YANET_SERVER_ADVERTISE_ENDPOINT` for metrics
-self-registration. These endpoints remain necessary.
+Netconfig and neighbour-sidecar declare `listeners: []` and receive no automatic
+Service. The reserved 8080/8081 block does not imply a listener is active.
+Legacy profiles selecting the combined netlink slot still receive
+`yanet-<boxType>-netlink-dataplane-sidecar` and its managed metrics endpoint.
 
 ## 4. Dependencies
 
@@ -129,8 +146,8 @@ self-registration. These endpoints remain necessary.
 
 > Simplified single-NUMA view (in production a node has N NUMA domains and N
 > `controlplane` Deployments). Modules live **inside** `controlplane` (bundle).
-> Operators are **separate Deployments** outside `controlplane`. BIRD and the
-> netlink helper are native sidecars in the dataplane Pod. The BIRD unix socket
+> Standalone operators run outside `controlplane`. BIRD, netconfig and
+> neighbour-sidecar share the dataplane Pod. The BIRD unix socket
 > (`/run/bird`) is also mounted into `bird-adapter` and `announcer`.
 
 ```mermaid
@@ -150,7 +167,6 @@ flowchart TB
         direction LR
         EXT["External clients<br/>cli / web / metrics-collector<br/>(not deployed by operator)"]:::plan
         SVCNUMA["Service: yanet-&lt;boxType&gt;-controlplane-numa{N}<br/>internalTrafficPolicy: Local"]:::svc
-        SVCNL["Service: yanet-&lt;boxType&gt;-netlink-dataplane-sidecar<br/>internalTrafficPolicy: Local"]:::svc
         EXT -->|gRPC/HTTP| SVCNUMA
     end
 
@@ -162,7 +178,9 @@ flowchart TB
 
         subgraph DPPOD[" dataplane Deployment / shared Pod network namespace "]
             DP["dataplane<br/>hostIPC + hugepages"]:::dp
-            NL["netlink-dataplane-sidecar<br/>privileged"]:::op
+            NC["netconfig<br/>privileged bootstrap"]:::op
+            NS["neighbour-sidecar<br/>discovery and publication"]:::op
+            KNI["KNI / VLAN / lo / dummy"]:::host
             BIRD["bird (BIRD2)"]:::bird
         end
 
@@ -197,9 +215,10 @@ flowchart TB
     %% dataplane <-> controlplane via shmem (host IPC)
     DP <-. shmem .-> BUNDLE
     DP --- HUGE
-    SVCNL -.-> NL
-    NL -->|gRPC Register / publish neighbours| GW
-    GW -->|gRPC metrics| SVCNL
+    DP -->|create KNI| KNI
+    NC -->|bootstrap| KNI
+    KNI -->|kernel neighbours| NS
+    NS -->|gRPC SwapNeighbours| GW
 
     %% Operators register with gateway and serve callbacks
     OP_PIPE  <-->|gRPC Register / callback| GW
@@ -239,8 +258,8 @@ The architecture above translates into the following items in the implementation
 1. **Optional NFD dependency** in the helm chart; read
    `feature.node.kubernetes.io/cpu-numa_nodes_count` to determine how many controlplane Deployments to generate per node.
 2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: false` by
-   default, hugepages, `securityContext`, hostPath config, and fixed optional
-   BIRD/netlink native-sidecar slots.
+   default, hugepages, `securityContext`, hostPath config, fixed optional BIRD
+   and generic dataplane-placed network sidecars.
 3. **N controlplane Deployments per node** plus one shared
    `yanet-<boxType>-controlplane-numa{N}` Service per NUMA role. Each Service has
    `internalTrafficPolicy: Local` and exposes fixed gRPC/HTTP ports `8080/8081`.
@@ -256,7 +275,8 @@ The architecture above translates into the following items in the implementation
      if any container sets it. This supports both classical operators
      (single-container) and operator+agent pairs (e.g. `antiddos`) in
      a single Deployment.
-   For each item a separate Deployment and shared box-type Service are generated.
+   Placement controls standalone versus dataplane composition; explicit
+   `listeners: []` suppresses managed ports and the shared Service.
 6. **Announcer Deployment** — separate CRD section, with `/run/bird` mount
    and access to the gateway service.
 

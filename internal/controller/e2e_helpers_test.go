@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	. "github.com/onsi/gomega"
@@ -43,14 +42,14 @@ func resourceMustParse(s string) resource.Quantity {
 }
 
 // countDeployments returns the number of Deployments in the given
-// namespace. Errors are treated as zero so it can be used directly in
-// Eventually/Consistently polling closures.
-func countDeployments(ctx context.Context, ns string) int {
+// namespace. Polling assertions must propagate list errors rather than treating
+// a failed observation as evidence that no resources exist.
+func countDeployments(ctx context.Context, ns string) (int, error) {
 	depList := &appsv1.DeploymentList{}
 	if err := k8sClient.List(ctx, depList, client.InNamespace(ns)); err != nil {
-		return 0
+		return 0, err
 	}
-	return len(depList.Items)
+	return len(depList.Items), nil
 }
 
 // cleanupDeployments best-effort deletes every Deployment in ns.
@@ -78,45 +77,6 @@ func ensureNamespace(ctx context.Context, ns string) {
 	namespace := &corev1.Namespace{}
 	namespace.Name = ns
 	_ = k8sClient.Create(ctx, namespace)
-}
-
-// waitForGlobalConfigV1 polls GlobalConfig until it has non-zero UpdateWindow,
-// indicating YanetConfigReconciler has updated the snapshot. Use instead of
-// time.Sleep for reliable synchronization in tests.
-func waitForGlobalConfigV1(timeout time.Duration) error {
-	if globalConfig == nil {
-		return fmt.Errorf("globalConfig is nil")
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		globalConfig.Lock.Lock()
-		hasConfig := globalConfig.Config.UpdateWindow > 0
-		globalConfig.Lock.Unlock()
-		if hasConfig {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("timeout waiting for GlobalConfig v1")
-}
-
-// waitForGlobalConfigV2 polls GlobalConfigV2 until it has at least one BoxType,
-// indicating YanetConfigReconcilerV2 has updated the snapshot.
-func waitForGlobalConfigV2(timeout time.Duration) error {
-	if globalConfigV2 == nil {
-		return fmt.Errorf("globalConfigV2 is nil")
-	}
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		globalConfigV2.Lock.Lock()
-		hasConfig := len(globalConfigV2.Config.BoxTypes) > 0
-		globalConfigV2.Lock.Unlock()
-		if hasConfig {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("timeout waiting for GlobalConfig v2")
 }
 
 // cleanupYanetV1 best-effort deletes every v1 Yanet CR in ns. The
