@@ -80,8 +80,10 @@ stable gRPC/HTTP ports `8080/8081`; host-network target ports are allocated from
 belong in named Deployment patches; the fixed netlink sidecar receives its bind
 and shared-Service advertise endpoints from the builder for its self-registered
 common gRPC metrics service. Per-NUMA controlplane
-fan-out is driven by the NFD label
-`feature.node.kubernetes.io/cpu-numa_nodes_count`. Each node can belong to only
+fan-out is configured by `YanetConfigV2.spec.components.controlplane.numa`
+(default 1). Set it explicitly for multi-NUMA hosts before upgrading; node
+labels do not determine the fan-out. `disabledNuma` excludes physical domains
+without renumbering the remaining instances. Each node can belong to only
 one `YanetV2`; overlapping selectors are resolved in favour of the existing
 workload owner (or the oldest CR before workloads exist).
 

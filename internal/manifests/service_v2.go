@@ -102,7 +102,7 @@ func BuildServices(ctx BuildContextV2, component *helpers.ResolvedComponent) []S
 		return []ServicePlan{buildServicePlan(ctx, component, nil, listeners)}
 	}
 
-	numa := effectiveNuma(ctx, component)
+	numa := effectiveNuma(component)
 	plans := make([]ServicePlan, 0, numa)
 	for index := int32(0); index < numa; index++ {
 		index := index

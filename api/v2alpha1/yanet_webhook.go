@@ -430,10 +430,9 @@ func validateDataplaneOverride(
 }
 
 // validateOverrideDisabledNuma checks the per-installation controlplane
-// NUMA opt-out list. Only the index domain is validated here: whether
-// the list drains every NUMA domain depends on the per-node fan-out
-// count (NFD label), which is a runtime property unavailable at admit
-// time.
+// NUMA opt-out list. Only the index domain is validated here. The reconciler
+// checks that an enabled controlplane retains at least one domain after
+// resolving the current palette, installation enablement and patches.
 func validateOverrideDisabledNuma(disabled []int32) error {
 	for _, n := range disabled {
 		if n < 0 {

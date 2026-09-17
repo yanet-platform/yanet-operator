@@ -259,7 +259,7 @@ snapshot                     ▼
                              ├─ listNodes(nodeSelector)
                              │
                              │  for each node:
-                             │    BuildContextV2 (NUMA from NFD label)
+                             │    BuildContextV2 (node identity and images)
                              │    for each ComponentRef:
                              │      ResolveBoxComponent → ResolvedComponent
                              │      InlineConfigMaps   → CreateOrUpdate ConfigMaps
@@ -317,11 +317,11 @@ Key files:
 
 ## 4. Controlplane NUMA fan-out
 
-`controlplane.numa` (or NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`)
-controls how many controlplane Deployments are generated **per node**:
+`YanetConfigV2.spec.components.controlplane.numa` controls how many controlplane
+Deployments are generated **per node**, defaulting to 1 when omitted:
 
 ```
-Node has 2 NUMA domains  ⇒  2 Deployments:
+controlplane.numa: 2  ⇒  2 Deployments:
   <yanet>-<nodehash>-controlplane-numa0
   <yanet>-<nodehash>-controlplane-numa1
 ```

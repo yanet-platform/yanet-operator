@@ -56,10 +56,6 @@ type BuildContextV2 struct {
 	// the builder falls back to YanetSpec.NodeSelector and skips
 	// the kubernetes.io/hostname constraint.
 	NodeName string
-	// NumaCount is the number of NUMA domains on the node, used by
-	// the controlplane fan-out. Read from the NFD label by the
-	// reconciler. <= 0 falls back to 1.
-	NumaCount int32
 	// PullPolicy is propagated from YanetConfigV2.spec.images.
 	PullPolicy corev1.PullPolicy
 	// PullSecrets are propagated from YanetConfigV2.spec.images.
@@ -111,7 +107,7 @@ func BuildDeployments(ctx BuildContextV2, c *helpers.ResolvedComponent) ([]*apps
 // Services remain unconditional so their DNS names do not appear and disappear
 // as installations are scaled or temporarily disabled.
 func buildControlplaneFanout(ctx BuildContextV2, c *helpers.ResolvedComponent) []*appsv1.Deployment {
-	numa := effectiveNuma(ctx, c)
+	numa := effectiveNuma(c)
 	disabled := disabledNumaSet(c)
 	out := make([]*appsv1.Deployment, 0, numa)
 	for i := int32(0); i < numa; i++ {
@@ -178,15 +174,10 @@ func numaConfigArgs(args []string, numa int32) []string {
 	return out
 }
 
-// effectiveNuma resolves the per-component NUMA count. The component
-// override (ResolvedComponent.Numa) wins; fallback is the node label
-// (BuildContextV2.NumaCount); ultimate fallback is 1.
-func effectiveNuma(ctx BuildContextV2, c *helpers.ResolvedComponent) int32 {
+// effectiveNuma resolves the configured NUMA count, defaulting to one domain.
+func effectiveNuma(c *helpers.ResolvedComponent) int32 {
 	if c.Numa > 0 {
 		return c.Numa
-	}
-	if ctx.NumaCount > 0 {
-		return ctx.NumaCount
 	}
 	return 1
 }

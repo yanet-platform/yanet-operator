@@ -45,6 +45,8 @@ func TestReconcileSharedServicesV2AggregatesInstallationsAndPrunesOwnedOrphans(t
 		},
 		Spec: minimalConfigV2(),
 	}
+	numa := int32(3)
+	config.Spec.Components.Controlplane.Numa = &numa
 	config.Spec.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
 		NetlinkDataplaneSidecar: &yanetv2alpha1.DataplaneSidecarSpec{
 			Image: yanetv2alpha1.ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v1"},
@@ -99,12 +101,12 @@ func TestReconcileSharedServicesV2AggregatesInstallationsAndPrunesOwnedOrphans(t
 		config,
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
 			Name: "node-a", Labels: map[string]string{
-				"pool": "first", yanetv2alpha1.NFDNumaCountLabel: "2",
+				"pool": "first",
 			},
 		}},
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{
 			Name: "node-b", Labels: map[string]string{
-				"pool": "second", yanetv2alpha1.NFDNumaCountLabel: "3",
+				"pool": "second",
 			},
 		}},
 		stale,

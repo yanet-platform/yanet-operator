@@ -97,7 +97,7 @@ type ResolvedComponent struct {
 	HostNetwork *bool
 
 	// Numa is the NUMA fan-out count for KindControlplane.
-	// Zero means "use the NFD label / fall back to 1".
+	// Zero means the default of 1.
 	Numa int32
 
 	// DisabledNuma is the resolved set of NUMA indices that must not

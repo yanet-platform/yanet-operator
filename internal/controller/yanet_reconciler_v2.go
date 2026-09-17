@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -313,12 +312,10 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 			Namespace:   yanet.Namespace,
 			BoxType:     yanet.Spec.BoxType,
 			NodeName:    node.Name,
-			NumaCount:   readNumaFromNode(node),
 			PullPolicy:  pullPolicy,
 			PullSecrets: cfg.Spec.Images.PullSecrets,
 			OwnerRef:    owner,
 		}
-		ns.NumaCount = buildCtx.NumaCount
 
 		for _, ref := range enabled {
 			rc, rerr := helpers.ResolveBoxComponent(&cfg.Spec, &yanet.Spec, ref.Kind, ref.OperatorName)
@@ -356,6 +353,9 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 				continue
 			}
 			for _, d := range deployments {
+				if ref.Kind == helpers.KindControlplane {
+					ns.NumaCount++
+				}
 				if listenerErr := manifests.ConfigureListeners(d, rc, listenerAssignments[node.Name][d.Name]); listenerErr != nil {
 					logger.Error(listenerErr, "listener configuration failed", "component", rc.Name, "deployment", d.Name)
 					reconcileErrs = append(reconcileErrs, listenerErr)
@@ -521,7 +521,6 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 			Namespace:   yanet.Namespace,
 			BoxType:     yanet.Spec.BoxType,
 			NodeName:    node.Name,
-			NumaCount:   readNumaFromNode(node),
 			PullPolicy:  pullPolicy,
 			PullSecrets: cfg.Images.PullSecrets,
 			OwnerRef:    owner,
@@ -573,7 +572,6 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 		buildCtx := manifests.BuildContextV2{
 			Namespace: yanet.Namespace,
 			BoxType:   yanet.Spec.BoxType,
-			NumaCount: 1,
 		}
 		for _, ref := range enabled {
 			component, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
@@ -1071,22 +1069,6 @@ func yanetV2Precedes(left, right *yanetv2alpha1.YanetV2) bool {
 	leftKey := left.Namespace + "/" + left.Name
 	rightKey := right.Namespace + "/" + right.Name
 	return leftKey < rightKey
-}
-
-// readNumaFromNode reads the NFD label exposing the NUMA count on
-// the node and returns 0 when absent (caller falls back to 1).
-func readNumaFromNode(node *corev1.Node) int32 {
-	v, ok := node.Labels[yanetv2alpha1.NFDNumaCountLabel]
-	if !ok {
-		return 0
-	}
-	n, err := strconv.Atoi(v)
-	// Cap at int32 max to avoid overflow on absurd label values.
-	const maxInt32 = 1<<31 - 1
-	if err != nil || n < 0 || n > maxInt32 {
-		return 0
-	}
-	return int32(n) //nolint:gosec // bounds-checked above
 }
 
 // applyInlineConfigMapsV2 creates/updates ConfigMaps for the inline

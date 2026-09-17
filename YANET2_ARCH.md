@@ -136,9 +136,6 @@ Legacy profiles selecting the combined netlink slot still receive
 
 - **Kubernetes 1.33+** — required so EndpointSlice resolves named Service
   target ports exposed by restartable init-container sidecars.
-- **Node Feature Discovery (NFD)** — optional helm-chart dependency.
-  - `helm install -n node-feature-discovery --create-namespace nfd oci://registry.k8s.io/nfd/charts/node-feature-discovery --version 0.19.0`
-  - The label `feature.node.kubernetes.io/cpu-numa_nodes_count` is used to determine how many controlplane Deployments to generate per node.
 - Host requirements: hugepages, `hostIPC`, DPDK devices, and netplan input.
   `hostNetwork` remains an explicit legacy option.
 
@@ -255,8 +252,9 @@ flowchart TB
 The architecture above translates into the following items in the implementation plan
 ([`YANET2_MIGRATION_PLAN/16-phase4-plan.md`](YANET2_MIGRATION_PLAN/16-phase4-plan.md)):
 
-1. **Optional NFD dependency** in the helm chart; read
-   `feature.node.kubernetes.io/cpu-numa_nodes_count` to determine how many controlplane Deployments to generate per node.
+1. **Explicit NUMA configuration** via `spec.components.controlplane.numa`.
+   It defaults to 1; configure the physical domain count for multi-NUMA hosts
+   and exclude domains without dataplane instances through `disabledNuma`.
 2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: false` by
    default, hugepages, `securityContext`, hostPath config, fixed optional BIRD
    and generic dataplane-placed network sidecars.

@@ -28,7 +28,7 @@ import (
 )
 
 func serviceContextV2() BuildContextV2 {
-	return BuildContextV2{BoxType: "firewall", NumaCount: 2}
+	return BuildContextV2{BoxType: "firewall"}
 }
 
 func TestBuildServices_ListenerMatrix(t *testing.T) {
@@ -52,7 +52,7 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 		},
 		{
 			name:      "controlplane",
-			component: &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane"},
+			component: &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Numa: 2},
 			wantPorts: []ServicePortPlan{
 				{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC},
 				{Name: ListenerHTTP, Port: ServiceHTTPPort, TargetPortName: ListenerHTTP},
@@ -88,7 +88,6 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := ctxV2()
-			ctx.NumaCount = 2
 			tt.component.Image = helpers.ResolvedImage{Name: "component", Tag: "v2"}
 			if tt.component.Kind == helpers.KindOperator {
 				tt.component.Containers = []helpers.ResolvedContainer{{

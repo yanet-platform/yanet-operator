@@ -21,11 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// NFDNumaCountLabel is the Node Feature Discovery label that exposes
-// the number of NUMA domains on the host. The operator reads it to
-// decide how many controlplane Deployments to generate per node.
-const NFDNumaCountLabel = "feature.node.kubernetes.io/cpu-numa_nodes_count"
-
 // YanetSpec is the per-installation CR. Everything a "box" looks like
 // (which components are deployed and how they are patched) is defined
 // in YanetConfigV2.spec.boxTypes[<boxType>]. This CR is intentionally

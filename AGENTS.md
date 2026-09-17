@@ -109,7 +109,7 @@ yanet-operator/
 │   │   └── *_test.go
 │   ├── events/recorder.go         # SA1019 wrapper for EventRecorder
 │   └── names/const.go
-├── deploy/charts/yanet-operator/  # Helm chart (NFD optional dep, yanetconfig-v2 template)
+├── deploy/charts/yanet-operator/  # Helm chart (yanetconfig-v2 template)
 ├── deploy/examples/v2alpha1-*.yaml
 ├── .github/workflows/test.yml
 ├── Makefile
@@ -364,9 +364,9 @@ YanetConfig reconciler → aggregate namespace × boxType component roles
 ```
 
 ### Controlplane NUMA fan-out
-Controlplane gets one Deployment per NUMA domain on the node. NUMA count is
-read from the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`
-(falls back to 1 when absent). Each box-type NUMA role gets one shared
+Controlplane gets one Deployment per configured NUMA domain on the node.
+Set `spec.components.controlplane.numa` explicitly for multi-NUMA hosts;
+the default is 1. Each box-type NUMA role gets one shared
 `yanet-<boxType>-controlplane-numa{N}` Service with `internalTrafficPolicy=Local`
 and fixed `grpc:8080` / `http:8081` ports.
 

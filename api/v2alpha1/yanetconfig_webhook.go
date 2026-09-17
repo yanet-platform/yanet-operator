@@ -260,9 +260,7 @@ func validateConfigSources(components *ComponentsSpec) error {
 // leave the installation without any controlplane at all — use the
 // boxType or `enabled: false` to drop the component instead).
 //
-// The check against the fan-out count is only possible when `numa` is
-// pinned explicitly. With NFD auto-detection the count is a per-node
-// runtime property, so the equivalent guard lives in the reconciler.
+// An omitted `numa` uses the same single-domain default as the builder.
 func validateDisabledNuma(cp *ControlplaneSpec) error {
 	if cp.Numa != nil && *cp.Numa <= 0 {
 		return fmt.Errorf("spec.components.controlplane.numa must be greater than zero, got %d", *cp.Numa)
@@ -278,10 +276,10 @@ func validateDisabledNuma(cp *ControlplaneSpec) error {
 		}
 		seen[n] = struct{}{}
 	}
-	if cp.Numa == nil {
-		return nil
+	count := int32(1)
+	if cp.Numa != nil {
+		count = *cp.Numa
 	}
-	count := *cp.Numa
 	disabled := int32(0)
 	for index := range seen {
 		if index < count {

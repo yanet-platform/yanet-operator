@@ -106,7 +106,7 @@ Eventually(func() (int, error) {
 |---------|---------|--------|--------|
 | manifests | 90.9% | 90%+ | ✅ |
 | helpers | 86.4% | 70%+ | ✅ |
-| controller | 85.8% | 70%+ | ✅ |
+| controller | 85.7% | 70%+ | ✅ |
 
 Measured by `make test-docker-race` with Go 1.26.2 / Kubernetes 1.35.0 envtest on 2026-09-17. Use coverage
 to locate untested paths, not as proof that assertions catch regressions.

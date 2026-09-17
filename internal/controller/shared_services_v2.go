@@ -30,7 +30,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -58,11 +57,6 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 	if err := r.Client.List(ctx, installations); err != nil {
 		return fmt.Errorf("list YanetV2 objects for shared Services: %w", err)
 	}
-	nodes := &corev1.NodeList{}
-	if err := r.Client.List(ctx, nodes); err != nil {
-		return fmt.Errorf("list Nodes for shared Services: %w", err)
-	}
-
 	owner := *metav1.NewControllerRef(config, yanetv2alpha1.GroupVersion.WithKind("YanetConfigV2"))
 	desired := make(map[sharedServiceKeyV2]*corev1.Service)
 	blocked := make(map[sharedServiceKeyV2]struct{})
@@ -83,20 +77,9 @@ func (r *YanetConfigReconcilerV2) reconcileSharedServicesV2(
 			protectedScopes[scope] = struct{}{}
 			continue
 		}
-		numaCount := int32(1)
-		for nodeIndex := range nodes.Items {
-			node := &nodes.Items[nodeIndex]
-			if !labels.SelectorFromSet(yanet.Spec.NodeSelector).Matches(labels.Set(node.Labels)) {
-				continue
-			}
-			if nodeNuma := readNumaFromNode(node); nodeNuma > numaCount {
-				numaCount = nodeNuma
-			}
-		}
 		buildCtx := manifests.BuildContextV2{
 			Namespace: yanet.Namespace,
 			BoxType:   yanet.Spec.BoxType,
-			NumaCount: numaCount,
 		}
 		for _, ref := range refs {
 			component, resolveErr := helpers.ResolveBoxServiceComponent(

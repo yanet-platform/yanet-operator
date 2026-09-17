@@ -115,19 +115,6 @@ func TestBuildDeployments_Controlplane_ManagedListeners(t *testing.T) {
 	}
 }
 
-func TestBuildDeployments_Controlplane_NoNumaFallsBackToContext(t *testing.T) {
-	ctx := ctxV2()
-	ctx.NumaCount = 2
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
-		Image: helpers.ResolvedImage{Name: "cp", Tag: "v2"},
-	}
-	deps, _ := BuildDeployments(ctx, c)
-	if len(deps) != 2 {
-		t.Errorf("ctx NumaCount=2: got %d", len(deps))
-	}
-}
-
 func TestBuildDeployments_Controlplane_DefaultsToOne(t *testing.T) {
 	ctx := ctxV2()
 	c := &helpers.ResolvedComponent{
@@ -940,9 +927,9 @@ func TestBuildDeployments_Controlplane_NumaPlaceholderKeepsPhysicalIndices(t *te
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := ctxV2()
-			ctx.NumaCount = 4
 			component := &helpers.ResolvedComponent{
 				Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true,
+				Numa:         4,
 				Image:        helpers.ResolvedImage{Name: "controlplane", Tag: "v2"},
 				DisabledNuma: []int32{0, 2},
 				Config: &yanetv2alpha1.ConfigSource{

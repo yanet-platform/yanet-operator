@@ -197,7 +197,7 @@ func TestYanetConfigReconcileV2PruningChecksObservedServiceVersion(t *testing.T)
 	}
 }
 
-func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testing.T) {
+func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxIndependentlyOfNodes(t *testing.T) {
 	testContext := context.Background()
 	config := &yanetv2alpha1.YanetConfigV2{
 		ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName, UID: "config-uid"},
@@ -209,14 +209,16 @@ func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testi
 		}},
 	}}
 	config.Spec.BoxTypes[0].Operators = map[string]yanetv2alpha1.BoxOperator{"route": {}}
+	numa := int32(2)
+	config.Spec.Components.Controlplane.Numa = &numa
 	config.Spec.BoxTypes = append(config.Spec.BoxTypes, yanetv2alpha1.BoxType{
 		Name: "other", Components: config.Spec.BoxTypes[0].Components,
 	})
 	selected := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name: "selected", Labels: map[string]string{"pool": "", yanetv2alpha1.NFDNumaCountLabel: "2"},
+		Name: "selected", Labels: map[string]string{"pool": ""},
 	}}
 	missingLabel := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-		Name: "missing-label", Labels: map[string]string{yanetv2alpha1.NFDNumaCountLabel: "3"},
+		Name: "missing-label",
 	}}
 	objects := []client.Object{config, selected, missingLabel}
 	for _, installation := range []struct {
@@ -262,31 +264,24 @@ func TestYanetConfigReconcileV2ScopesNUMAByNamespaceBoxAndMatchingNodes(t *testi
 	if _, err := r.Reconcile(testContext, ctrl.Request{}); err != nil {
 		t.Fatalf("initial reconcile: %v", err)
 	}
-	assertServices([]string{
+	wantServices := []string{
 		"left/yanet-other-controlplane-numa0",
+		"left/yanet-other-controlplane-numa1",
 		"left/yanet-release-controlplane-numa0",
 		"left/yanet-release-controlplane-numa1",
 		"left/yanet-release-route",
 		"right/yanet-release-controlplane-numa0",
 		"right/yanet-release-controlplane-numa1",
-		"right/yanet-release-controlplane-numa2",
 		"right/yanet-release-route",
-	})
+	}
+	assertServices(wantServices)
 	if err := cl.Delete(testContext, selected); err != nil {
 		t.Fatalf("delete selected node: %v", err)
 	}
 	if _, err := r.Reconcile(testContext, ctrl.Request{}); err != nil {
 		t.Fatalf("reconcile after node deletion: %v", err)
 	}
-	assertServices([]string{
-		"left/yanet-other-controlplane-numa0",
-		"left/yanet-release-controlplane-numa0",
-		"left/yanet-release-route",
-		"right/yanet-release-controlplane-numa0",
-		"right/yanet-release-controlplane-numa1",
-		"right/yanet-release-controlplane-numa2",
-		"right/yanet-release-route",
-	})
+	assertServices(wantServices)
 }
 
 func TestYanetConfigReconcileV2HonorsStopPublishedBeforeServiceWrite(t *testing.T) {
@@ -361,13 +356,14 @@ func TestYanetConfigReconcileV2HonorsStopPublishedBeforeServiceWrite(t *testing.
 
 func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testing.T) {
 	configuredNuma := int32(2)
+	threeNuma := int32(3)
 	for _, tt := range []struct {
 		name       string
 		numa       *int32
 		boxEnabled bool
 		wantNuma   int
 	}{
-		{name: "detected NUMA", boxEnabled: true, wantNuma: 3},
+		{name: "three configured domains", numa: &threeNuma, boxEnabled: true, wantNuma: 3},
 		{name: "configured NUMA and disabled box sidecar", numa: &configuredNuma, wantNuma: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -402,7 +398,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 				},
 			}
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
-				Name: "test-node", Labels: map[string]string{yanetv2alpha1.NFDNumaCountLabel: "3"},
+				Name: "test-node",
 			}}
 			scheme := newSchemeForTest(t)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(config, installation, node).Build()
@@ -449,7 +445,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 			if err != nil {
 				t.Fatalf("resolve controlplane: %v", err)
 			}
-			buildCtx := manifests.BuildContextV2{Namespace: "yanet", BoxType: "release", NumaCount: 3}
+			buildCtx := manifests.BuildContextV2{Namespace: "yanet", BoxType: "release"}
 			deployments, err := manifests.BuildDeployments(buildCtx, controlplane)
 			if err != nil || len(deployments) != tt.wantNuma-1 {
 				t.Fatalf("workload disabledNUMA override changed: deployments=%d err=%v", len(deployments), err)

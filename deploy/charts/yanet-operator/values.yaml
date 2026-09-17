@@ -87,16 +87,6 @@ yanetconfig:
 extraManifests: {}
 
 # ============================================================
-# Node Feature Discovery (optional sub-chart).
-# When enabled the chart deploys NFD which exposes
-# feature.node.kubernetes.io/cpu-numa_nodes_count on every node.
-# The v2 reconciler reads this label to decide controlplane NUMA
-# fan-out. If you already run NFD in the cluster, leave this off.
-# ============================================================
-node-feature-discovery:
-  enabled: false
-
-# ============================================================
 # v2alpha1 cluster-wide YanetConfig (optional).
 #
 # When provided, the chart renders templates/yanetconfig-v2.yaml

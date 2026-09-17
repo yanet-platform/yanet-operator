@@ -51,7 +51,6 @@ type YanetConfigReconcilerV2 struct {
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigsv2/finalizers,verbs=update
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetsv2,verbs=get;list;watch
-//+kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile updates the singleton in-memory snapshot whenever the
@@ -122,7 +121,6 @@ func (r *YanetConfigReconcilerV2) SetupWithManager(mgr ctrl.Manager) error {
 		Named("yanetconfig-v2alpha1").
 		For(&yanetv2alpha1.YanetConfigV2{}).
 		Watches(&yanetv2alpha1.YanetV2{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigV2Singleton)).
-		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigV2Singleton)).
 		Owns(&corev1.Service{}).
 		Complete(r)
 }

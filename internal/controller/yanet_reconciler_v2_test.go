@@ -18,11 +18,13 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -98,6 +100,81 @@ func minimalConfigV2() yanetv2alpha1.YanetConfigSpec {
 				Dataplane:    &yanetv2alpha1.BoxDataplane{},
 			},
 		}},
+	}
+}
+
+func TestReconcileV2ConfiguredNumaWithoutNodeMetadata(t *testing.T) {
+	three := int32(3)
+	for _, tt := range []struct {
+		name         string
+		numa         *int32
+		disabled     []int32
+		wantDomains  []string
+		wantServices []string
+	}{
+		{
+			name: "default", wantDomains: []string{"0"},
+			wantServices: []string{"yanet-release-controlplane-numa0"},
+		},
+		{
+			name: "configured", numa: &three, wantDomains: []string{"0", "1", "2"},
+			wantServices: []string{"yanet-release-controlplane-numa0", "yanet-release-controlplane-numa1", "yanet-release-controlplane-numa2"},
+		},
+		{
+			name: "disabled physical domains", numa: &three, disabled: []int32{0, 2}, wantDomains: []string{"1"},
+			wantServices: []string{"yanet-release-controlplane-numa0", "yanet-release-controlplane-numa1", "yanet-release-controlplane-numa2"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			autoSync := true
+			yanet := &yanetv2alpha1.YanetV2{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "yanet", UID: "yanet-uid", Finalizers: []string{yanetFinalizer}},
+				Spec: yanetv2alpha1.YanetSpec{
+					BoxType: "release", AutoSync: &autoSync,
+					Components: &yanetv2alpha1.YanetComponentsOverride{
+						Controlplane: &yanetv2alpha1.YanetControlplaneOverride{DisabledNuma: tt.disabled},
+					},
+				},
+			}
+			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "test-node"}}
+			r, snapshot := makeReconcilerEnv(t, yanet, node)
+			snapshot.Config = minimalConfigV2()
+			snapshot.Config.Components.Controlplane.Numa = tt.numa
+			snapshot.Config.Components.Controlplane.Config = &yanetv2alpha1.ConfigSource{
+				HostPath: "/etc/yanet2", Args: []string{"-c", "/etc/yanet2/controlplane.d/numa{numa}.yaml"},
+			}
+			testContext := context.Background()
+			key := client.ObjectKeyFromObject(yanet)
+			if _, err := r.Reconcile(testContext, ctrl.Request{NamespacedName: key}); err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			deployments := &appsv1.DeploymentList{}
+			if err := r.List(testContext, deployments, client.InNamespace("yanet"), client.MatchingLabels{manifests.LabelComponent: "controlplane"}); err != nil {
+				t.Fatalf("list controlplanes: %v", err)
+			}
+			var domains []string
+			for _, deployment := range deployments.Items {
+				domain := deployment.Labels[manifests.LabelNuma]
+				domains = append(domains, domain)
+				wantArgs := []string{"-c", "/etc/yanet2/controlplane.d/numa" + domain + ".yaml"}
+				if !slices.Equal(deployment.Spec.Template.Spec.Containers[0].Args, wantArgs) {
+					t.Errorf("domain %s lost its physical config path: %v", domain, deployment.Spec.Template.Spec.Containers[0].Args)
+				}
+			}
+			slices.Sort(domains)
+			if !slices.Equal(domains, tt.wantDomains) {
+				t.Fatalf("rendered domains = %v, want %v", domains, tt.wantDomains)
+			}
+			if err := r.Get(testContext, key, yanet); err != nil {
+				t.Fatalf("read status: %v", err)
+			}
+			if got := yanet.Status.NodesStatus[node.Name].NumaCount; int(got) != len(tt.wantDomains) {
+				t.Errorf("status NUMA count = %d, want %d generated controlplanes", got, len(tt.wantDomains))
+			}
+			if !slices.Equal(yanet.Status.Services, tt.wantServices) {
+				t.Errorf("Service roles = %v, want %v", yanet.Status.Services, tt.wantServices)
+			}
+		})
 	}
 }
 
@@ -609,27 +686,6 @@ func TestReconcileV2_UnschedulableNodeSkipped(t *testing.T) {
 	_ = r.Client.List(context.Background(), deps, client.InNamespace("yanet"))
 	if len(deps.Items) != 0 {
 		t.Errorf("unschedulable node must be skipped, got %d deployments", len(deps.Items))
-	}
-}
-
-func TestReadNumaFromNode(t *testing.T) {
-	tests := []struct {
-		name string
-		labs map[string]string
-		want int32
-	}{
-		{"no label", nil, 0},
-		{"valid", map[string]string{yanetv2alpha1.NFDNumaCountLabel: "4"}, 4},
-		{"invalid", map[string]string{yanetv2alpha1.NFDNumaCountLabel: "abc"}, 0},
-		{"negative", map[string]string{yanetv2alpha1.NFDNumaCountLabel: "-1"}, 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			n := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Labels: tt.labs}}
-			if got := readNumaFromNode(n); got != tt.want {
-				t.Errorf("got %d, want %d", got, tt.want)
-			}
-		})
 	}
 }
 

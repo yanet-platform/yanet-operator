@@ -107,6 +107,9 @@ In `yanetconfigV2.spec.components`, each image's `registry` and `prefix`
 independently inherit `spec.images` when omitted; `""` explicitly clears that
 part. These fields are not installation container overrides. Controlplane
 `config.args` accepts `{numa}`; literal YAML paths retain the legacy NUMA suffix.
+Set `yanetconfigV2.spec.components.controlplane.numa` explicitly for multi-NUMA
+hosts before upgrading. It defaults to 1 and does not depend on node labels.
+Per-installation `disabledNuma` excludes domains without renumbering the rest.
 
 ## Values
 

@@ -480,15 +480,28 @@ func TestYanetConfigWebhook_DisabledNuma_AllDisabledRejected(t *testing.T) {
 	}
 }
 
-// With NFD auto-detection the fan-out count is a per-node runtime property, so
-// the webhook cannot decide whether the list drains every domain.
-func TestYanetConfigWebhook_DisabledNuma_AutoDetectionNotRejected(t *testing.T) {
-	cfg := validConfig()
-	cfg.Spec.Components.Controlplane.Numa = nil
-	cfg.Spec.Components.Controlplane.DisabledNuma = []int32{0, 1}
-	v := &YanetConfigCustomValidator{}
-	if _, err := v.ValidateCreate(context.Background(), cfg); err != nil {
-		t.Errorf("without a pinned numa count the list must be accepted: %v", err)
+func TestYanetConfigWebhook_DisabledNuma_DefaultCount(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		disabled []int32
+		wantErr  bool
+	}{
+		{name: "default domain disabled", disabled: []int32{0, 1}, wantErr: true},
+		{name: "out of range ignored", disabled: []int32{1, 1}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Spec.Components.Controlplane.Numa = nil
+			cfg.Spec.Components.Controlplane.DisabledNuma = tt.disabled
+			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "every one of the 1 NUMA domains") {
+					t.Fatalf("expected rejection of disabling the default NUMA domain, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("out-of-range indices must not disable the default domain: %v", err)
+			}
+		})
 	}
 }
 

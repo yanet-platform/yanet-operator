@@ -79,12 +79,8 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 helm-crds: manifests kustomize ## Build CRDs for Helm chart.
 	$(KUSTOMIZE) build config/crd > deploy/charts/yanet-operator/crds/yanet.yaml
 
-.PHONY: helm-deps
-helm-deps: ## Pull Helm chart sub-charts (e.g. node-feature-discovery) into charts/.
-	helm dependency update deploy/charts/yanet-operator
-
 .PHONY: helm-lint
-helm-lint: helm-deps ## Lint and template Helm chart with deps resolved.
+helm-lint: ## Lint and template Helm chart.
 	helm lint deploy/charts/yanet-operator
 	helm template test deploy/charts/yanet-operator --debug >/dev/null
 

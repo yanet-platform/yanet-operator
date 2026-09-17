@@ -29,10 +29,6 @@ jobs:
       with:
         version: 'latest'
     
-    - name: Update Helm dependencies
-      run: |
-        helm dependency update deploy/charts/yanet-operator
-
     - name: Lint Helm chart
       run: |
         helm lint deploy/charts/yanet-operator
@@ -40,11 +36,6 @@ jobs:
     - name: Template Helm chart
       run: |
         helm template test deploy/charts/yanet-operator --debug
-
-    - name: Template Helm chart with NFD enabled
-      run: |
-        helm template test deploy/charts/yanet-operator --debug \
-          --set node-feature-discovery.enabled=true
 
   package-and-push:
     name: Package and Push Helm Chart
@@ -79,10 +70,6 @@ jobs:
         sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
         echo "Synced appVersion to ${CHART_VERSION}"
     
-    - name: Update Helm dependencies
-      run: |
-        helm dependency update deploy/charts/yanet-operator
-
     - name: Package Helm chart
       run: |
         helm package deploy/charts/yanet-operator

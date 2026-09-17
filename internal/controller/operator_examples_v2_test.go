@@ -52,7 +52,7 @@ func TestOperatorPlacementExamples(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				build := manifests.BuildContextV2{YanetName: "example", Namespace: "test", BoxType: box.Name, NodeName: "test-node", NumaCount: 2}
+				build := manifests.BuildContextV2{YanetName: "example", Namespace: "test", BoxType: box.Name, NodeName: "test-node"}
 				spec := &api.YanetSpec{BoxType: box.Name}
 				if example.disableNetwork {
 					spec.Components = &api.YanetComponentsOverride{Operators: map[string]api.YanetComponentOverride{
