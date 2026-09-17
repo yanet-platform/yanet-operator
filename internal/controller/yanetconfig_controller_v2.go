@@ -42,6 +42,7 @@ import (
 // like the v1 path.
 type YanetConfigReconcilerV2 struct {
 	client.Client
+	APIReader      client.Reader
 	Scheme         *runtime.Scheme
 	GlobalConfigV2 *yanetv2alpha1.MutexYanetConfigSpec
 }
@@ -116,6 +117,7 @@ func refreshYanetConfigV2Snapshot(
 // Named() is required: controller-runtime derives the default name from
 // the Kind in For(), which collides with the v1alpha1 YanetConfigV2 reconciler.
 func (r *YanetConfigReconcilerV2) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("yanetconfig-v2alpha1").
 		For(&yanetv2alpha1.YanetConfigV2{}).

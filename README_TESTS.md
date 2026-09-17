@@ -106,9 +106,9 @@ Eventually(func() (int, error) {
 |---------|---------|--------|--------|
 | manifests | 90.9% | 90%+ | ✅ |
 | helpers | 86.4% | 70%+ | ✅ |
-| controller | 85.4% | 70%+ | ✅ |
+| controller | 85.8% | 70%+ | ✅ |
 
-Measured with Go 1.26.2 / Kubernetes 1.35.0 envtest on 2026-09-17. Use coverage
+Measured by `make test-docker-race` with Go 1.26.2 / Kubernetes 1.35.0 envtest on 2026-09-17. Use coverage
 to locate untested paths, not as proof that assertions catch regressions.
 
 ## 🚀 Test Suites
@@ -136,6 +136,7 @@ to locate untested paths, not as proof that assertions catch regressions.
 - Public reconcilers use an independent API server: fake clients cannot establish server defaulting.
 - Observe both persisted update requests and resource versions; an unnecessary PUT can leave the version unchanged.
 - Check no-op/throttle/autosync behavior, real image/field changes, patch removal, and dry-run failures.
+- Reproduce an informer cache miss after Service creation; read-before-write must use the direct API reader.
 
 The manager-backed Ginkgo suites below wait for manager shutdown before stopping
 envtest. Deployment-count assertions propagate API list errors instead of

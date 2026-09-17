@@ -300,8 +300,15 @@ func (r *YanetConfigReconcilerV2) applySharedServiceV2(
 		return fmt.Errorf("refusing to apply invalid shared Service %s/%s", desired.Namespace, desired.Name)
 	}
 	key := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
+	// A reconcile triggered by another watch can run before the Service informer
+	// observes our previous create/update. Use the API reader for read-before-write
+	// and conflict retries, rather than recreating a cache-missing Service.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
 	existing := &corev1.Service{}
-	err := r.Client.Get(ctx, key, existing)
+	err := reader.Get(ctx, key, existing)
 	if apierrors.IsNotFound(err) {
 		if r.sharedServicesStoppedV2() {
 			return nil
@@ -319,7 +326,7 @@ func (r *YanetConfigReconcilerV2) applySharedServiceV2(
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		fresh := &corev1.Service{}
-		if getErr := r.Client.Get(ctx, key, fresh); getErr != nil {
+		if getErr := reader.Get(ctx, key, fresh); getErr != nil {
 			return getErr
 		}
 		if ownershipErr := validateServiceOwnership(fresh, desired); ownershipErr != nil {

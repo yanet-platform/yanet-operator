@@ -27,8 +27,10 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -39,6 +41,14 @@ type defaultingObserverV2 struct {
 	client.Client
 	writes, dryRuns int
 	dryRunError     error
+	hideServices    bool
+}
+
+func (c *defaultingObserverV2) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, service := obj.(*corev1.Service); service && c.hideServices {
+		return apierrors.NewNotFound(schema.GroupResource{Resource: "services"}, key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
 }
 
 func (c *defaultingObserverV2) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
@@ -89,7 +99,7 @@ func TestV2APIServerDefaulting(t *testing.T) {
 	}
 	snapshot := &yanetv2alpha1.MutexYanetConfigSpec{}
 	r := &YanetV2Reconciler{Client: c, Scheme: scheme, GlobalConfigV2: snapshot}
-	cr := &YanetConfigReconcilerV2{Client: c, Scheme: scheme, GlobalConfigV2: snapshot}
+	cr := &YanetConfigReconcilerV2{Client: c, APIReader: apiClient, Scheme: scheme, GlobalConfigV2: snapshot}
 	reconcileConfig := func(t *testing.T) {
 		t.Helper()
 		if _, err := cr.Reconcile(testContext, ctrl.Request{}); err != nil {
@@ -186,6 +196,16 @@ func TestV2APIServerDefaulting(t *testing.T) {
 		snapshot.Lock.Lock()
 		snapshot.Config.UpdateWindow = 0
 		snapshot.Lock.Unlock()
+	})
+	t.Run("service-cache-miss-after-create", func(t *testing.T) {
+		before := services(t)[0]
+		c.writes, c.hideServices = 0, true
+		defer func() { c.hideServices = false }()
+		reconcileConfig(t)
+		if got := services(t)[0]; c.writes != 0 || got.ResourceVersion != before.ResourceVersion {
+			t.Fatalf("cache lag must not recreate or rewrite an existing Service: writes=%d, RV=%s -> %s",
+				c.writes, before.ResourceVersion, got.ResourceVersion)
+		}
 	})
 	t.Run("autosync-off", func(t *testing.T) {
 		if err := c.Get(testContext, client.ObjectKeyFromObject(yanet), yanet); err != nil {

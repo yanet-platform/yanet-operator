@@ -300,6 +300,8 @@ retryable errors. Conflict retries re-read ownership and reuse the normalized
 candidate for the actual update. Removed patch fields return to API defaults,
 while unchanged resources generate no persisted update. Shared Services declare
 `sessionAffinity: None` and managed metadata on creation to converge immediately.
+Service read-before-write and conflict retries use the direct API reader: the
+informer cache can still miss a Service created by the preceding reconcile.
 
 Key files:
 - [`internal/helpers/resolve_v2.go`](internal/helpers/resolve_v2.go) — `ResolveBoxComponent`, `EnabledComponentsForBox`, `FindBoxType`, `FindOperator`, `ShortNodeKey`.
