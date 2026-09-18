@@ -49,11 +49,9 @@ func clusterConfig(boxTypes ...string) *YanetConfigV2 {
 				Controlplane: ControlplaneSpec{Image: ImageRef{Name: "cp", Tag: "v1"}},
 				Dataplane: DataplaneSpec{
 					Image: ImageRef{Name: "dp", Tag: "v1"},
-					Sidecars: &DataplaneSidecarsSpec{
-						Bird: &DataplaneSidecarSpec{Image: ImageRef{Name: "bird", Tag: "v1"}},
-						NetlinkDataplaneSidecar: &DataplaneSidecarSpec{
-							Image: ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v1"},
-						},
+					Sidecars: []SidecarSpec{
+						{Name: "bird", Image: ImageRef{Name: "bird", Tag: "v1"}},
+						{Name: "discovery", Image: ImageRef{Name: "discovery", Tag: "v1"}},
 					},
 				},
 				Operators: []OperatorSpec{{
@@ -71,9 +69,8 @@ func clusterConfig(boxTypes ...string) *YanetConfigV2 {
 			Name: boxType,
 			Components: BoxComponents{
 				Controlplane: &BoxComponent{},
-				Dataplane: &BoxDataplane{Sidecars: &BoxDataplaneSidecars{
-					Bird:                    &BoxDataplaneSidecar{},
-					NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+				Dataplane: &BoxDataplane{Sidecars: map[string]BoxDataplaneSidecar{
+					"bird": {}, "discovery": {},
 				}},
 			},
 			Operators: map[string]BoxOperator{"antiddos": {}},
@@ -126,15 +123,15 @@ func TestYanetWebhook_BoxTypeValidation(t *testing.T) {
 func TestYanetWebhook_InvalidOverrideRejectedWithoutConfig(t *testing.T) {
 	yanet := makeYanet("edge", "yanet", "release")
 	yanet.Spec.Components = &YanetComponentsOverride{
-		Dataplane: &YanetComponentOverride{Containers: map[string]YanetContainerOverride{
+		Dataplane: &YanetDataplaneOverride{YanetComponentOverride: YanetComponentOverride{Containers: map[string]YanetContainerOverride{
 			DataplaneContainerName: {Enabled: boolPointer(false)},
-		}},
+		}}},
 	}
 	warnings, err := (&YanetCustomValidator{Client: newClientWith(t)}).ValidateCreate(
 		context.Background(),
 		yanet,
 	)
-	if err == nil || !strings.Contains(err.Error(), "spec.components.dataplane.enabled") {
+	if err == nil || !strings.Contains(err.Error(), "only supported for dataplane native sidecars") {
 		t.Fatalf("invalid local override shape must be rejected, got warnings=%v err=%v", warnings, err)
 	}
 }
@@ -180,30 +177,30 @@ func TestYanetWebhook_Overrides(t *testing.T) {
 		},
 		{
 			name: "dataplane sidecar disable and image",
-			components: &YanetComponentsOverride{Dataplane: &YanetComponentOverride{
-				Containers: map[string]YanetContainerOverride{
-					BirdSidecarContainerName: {
+			components: &YanetComponentsOverride{Dataplane: &YanetDataplaneOverride{
+				Sidecars: map[string]YanetContainerOverride{
+					"bird": {
 						Enabled: boolPointer(false),
 					},
-					NetlinkDataplaneSidecarContainerName: {Tag: "v2"},
+					"discovery": {Tag: "v2"},
 				},
 			}},
 		},
 		{
 			name: "unknown dataplane container",
-			components: &YanetComponentsOverride{Dataplane: &YanetComponentOverride{
+			components: &YanetComponentsOverride{Dataplane: &YanetDataplaneOverride{YanetComponentOverride: YanetComponentOverride{
 				Containers: map[string]YanetContainerOverride{"ghost": {Tag: "v2"}},
-			}},
+			}}},
 			wantErr: "ghost",
 		},
 		{
 			name: "primary dataplane container enable",
-			components: &YanetComponentsOverride{Dataplane: &YanetComponentOverride{
+			components: &YanetComponentsOverride{Dataplane: &YanetDataplaneOverride{YanetComponentOverride: YanetComponentOverride{
 				Containers: map[string]YanetContainerOverride{
 					DataplaneContainerName: {Enabled: boolPointer(false)},
 				},
-			}},
-			wantErr: "spec.components.dataplane.enabled",
+			}}},
+			wantErr: "only supported for dataplane native sidecars",
 		},
 		{
 			name: "wrong hardcoded container",
@@ -239,13 +236,13 @@ func TestYanetWebhook_Overrides(t *testing.T) {
 
 func TestYanetWebhook_DataplaneSidecarOverrideRequiresBoxWiring(t *testing.T) {
 	config := clusterConfig("release")
-	config.Spec.BoxTypes[0].Components.Dataplane.Sidecars.Bird = nil
+	delete(config.Spec.BoxTypes[0].Components.Dataplane.Sidecars, "bird")
 	validator := &YanetCustomValidator{Client: newClientWith(t, config)}
 	yanet := makeYanet("edge", "yanet", "release")
 	yanet.Spec.Components = &YanetComponentsOverride{
-		Dataplane: &YanetComponentOverride{
-			Containers: map[string]YanetContainerOverride{
-				BirdSidecarContainerName: {Enabled: boolPointer(true)},
+		Dataplane: &YanetDataplaneOverride{
+			Sidecars: map[string]YanetContainerOverride{
+				"bird": {Enabled: boolPointer(true)},
 			},
 		},
 	}

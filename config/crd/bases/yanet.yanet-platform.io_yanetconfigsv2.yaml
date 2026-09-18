@@ -97,18 +97,6 @@ spec:
                         Components defines which fixed workload components are
                         enabled and which patches each receives.
                       properties:
-                        announcer:
-                          description: BoxComponent is the per-component slot in a
-                            boxType.
-                          properties:
-                            patches:
-                              description: |-
-                                Patches lists patch names from YanetConfigV2.spec.patches[].
-                                Patches are applied in declared order.
-                              items:
-                                type: string
-                              type: array
-                          type: object
                         birdAdapter:
                           description: BoxComponent is the per-component slot in a
                             boxType.
@@ -135,7 +123,7 @@ spec:
                           type: object
                         dataplane:
                           description: |-
-                            BoxDataplane is the per-box slot for the dataplane Deployment and its fixed
+                            BoxDataplane is the per-box slot for the dataplane Deployment and its declared
                             native sidecars. Patches apply to the whole Deployment, including sidecars.
                           properties:
                             patches:
@@ -146,30 +134,25 @@ spec:
                                 type: string
                               type: array
                             sidecars:
+                              additionalProperties:
+                                description: |-
+                                  BoxDataplaneSidecar selects a sidecar for a box type. A present slot defaults
+                                  to enabled; enabled=false keeps the declaration explicit while omitting the
+                                  sidecar from the rendered Pod.
+                                properties:
+                                  enabled:
+                                    default: true
+                                    type: boolean
+                                  patches:
+                                    description: Patches address this sidecar's logical
+                                      container and volume names.
+                                    items:
+                                      type: string
+                                    type: array
+                                type: object
                               description: |-
                                 Sidecars selects native sidecars declared in
                                 YanetConfigV2.spec.components.dataplane.sidecars.
-                              properties:
-                                bird:
-                                  description: |-
-                                    BoxDataplaneSidecar selects a sidecar for a box type. A present slot defaults
-                                    to enabled; enabled=false keeps the declaration explicit while omitting the
-                                    sidecar from the rendered Pod.
-                                  properties:
-                                    enabled:
-                                      default: true
-                                      type: boolean
-                                  type: object
-                                netlinkDataplaneSidecar:
-                                  description: |-
-                                    BoxDataplaneSidecar selects a sidecar for a box type. A present slot defaults
-                                    to enabled; enabled=false keeps the declaration explicit while omitting the
-                                    sidecar from the rendered Pod.
-                                  properties:
-                                    enabled:
-                                      default: true
-                                      type: boolean
-                                  type: object
                               type: object
                           type: object
                       type: object
@@ -186,17 +169,6 @@ spec:
                             items:
                               type: string
                             type: array
-                          placement:
-                            default: standalone
-                            description: |-
-                              Placement defaults to a separate Deployment. Dataplane placement composes
-                              the operator's containers as restartable init sidecars in the private
-                              dataplane network namespace. Changing placement requires draining the old
-                              workloads first; it is never an apply-then-prune migration.
-                            enum:
-                            - standalone
-                            - dataplane
-                            type: string
                         type: object
                       description: Operators is keyed by OperatorSpec.Name.
                       type: object
@@ -210,100 +182,14 @@ spec:
                 description: |-
                   Components is the palette of available workload components plus a
                   dynamic operators[] array. The dataplane slot describes one Pod with
-                  fixed optional native sidecars.
+                  explicitly declared native sidecars.
                 properties:
-                  announcer:
-                    description: Announcer requires an enabled managed BIRD sidecar
-                      and dataplane when enabled.
-                    properties:
-                      config:
-                        description: |-
-                          ConfigSource describes where the configuration of a yanet component
-                          comes from. Exactly one of Inline, HostPath or URL must be specified.
-
-                            - Inline: configuration is embedded into the CR; the operator creates a
-                              ConfigMap (named deterministically by content hash) and mounts it into
-                              the Pod at the per-component default directory (/etc/bird for bird,
-                              /etc/yanet2 for everything else).
-                            - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
-                              the per-component default directory. The component binary finds its
-                              config file inside that directory by its own default name (e.g.
-                              controlplane.conf). This is the default for production hosts.
-                            - URL: an HTTP(S) endpoint that returns the configuration body. The
-                              operator creates an emptyDir shared with the component. Downloader
-                              generation is deferred; a strategic patch must currently add the init
-                              container that populates the volume.
-
-                          Args, when set, are passed to the component binary verbatim. For HostPath
-                          sources the whole directory is mounted, so args can reference any file in
-                          that directory. Inline content is available as <mountDir>/config.
-
-                          Validation that exactly one of Inline/HostPath/URL is filled is enforced
-                          by the webhook.
-                        properties:
-                          args:
-                            description: |-
-                              Args defines command-line arguments passed to the component verbatim.
-                              Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
-                              "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
-                              "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
-                            items:
-                              type: string
-                            type: array
-                          hostPath:
-                            description: |-
-                              HostPath is the HOST directory to mount into the container via a
-                              hostPath volume. The directory is mounted read-only at the
-                              per-component default path (/etc/bird for bird, /etc/yanet2 for
-                              everything else). The component binary reads its config file from
-                              inside that directory using its own default file name.
-                            type: string
-                          inline:
-                            description: |-
-                              Inline is the literal configuration body. When set, the operator
-                              creates a ConfigMap owned by the CR and mounts it into the Pod.
-                            type: string
-                          url:
-                            description: |-
-                              URL is an HTTP(S) endpoint that returns the configuration body.
-                              The operator creates an emptyDir volume shared with the component;
-                              a strategic patch must currently add the downloader init container.
-                            type: string
-                        type: object
-                      image:
-                        description: |-
-                          ImageRef identifies a palette image. Registry and prefix default to
-                          YanetConfigV2.spec.images but can be overridden independently for each image.
-                        properties:
-                          name:
-                            description: Name is the image name without registry/prefix/tag.
-                            minLength: 1
-                            type: string
-                          prefix:
-                            description: |-
-                              Prefix overrides the global prefix. Nil inherits the global value;
-                              an explicit empty string omits the prefix segment.
-                            type: string
-                          registry:
-                            description: |-
-                              Registry overrides the global registry. Nil inherits the global value;
-                              an explicit empty string omits the registry segment.
-                            type: string
-                          tag:
-                            description: Tag is the image tag.
-                            type: string
-                        required:
-                        - name
-                        type: object
-                    required:
-                    - image
-                    type: object
                   birdAdapter:
                     description: |-
                       BirdAdapter is a SEPARATE Deployment (not a sidecar to bird),
                       so the adapter can be updated without restarting bird.
                       bird ↔ birdAdapter share the bird unix socket via a hostPath.
-                      An enabled adapter requires an enabled managed BIRD sidecar and dataplane.
+                      Its socket mounts are configured explicitly through patches.
                     properties:
                       config:
                         description: |-
@@ -312,8 +198,7 @@ spec:
 
                             - Inline: configuration is embedded into the CR; the operator creates a
                               ConfigMap (named deterministically by content hash) and mounts it into
-                              the Pod at the per-component default directory (/etc/bird for bird,
-                              /etc/yanet2 for everything else).
+                              the Pod at /etc/yanet2 unless a patch customizes the mount.
                             - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
                               the per-component default directory. The component binary finds its
                               config file inside that directory by its own default name (e.g.
@@ -343,8 +228,8 @@ spec:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
                               hostPath volume. The directory is mounted read-only at the
-                              per-component default path (/etc/bird for bird, /etc/yanet2 for
-                              everything else). The component binary reads its config file from
+                              default path /etc/yanet2, unless customized by a patch.
+                              The component binary reads its config file from
                               inside that directory using its own default file name.
                             type: string
                           inline:
@@ -409,8 +294,8 @@ spec:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
                               hostPath volume. The directory is mounted read-only at the
-                              per-component default path (/etc/bird for bird, /etc/yanet2 for
-                              everything else). The component binary reads its config file from
+                              default path /etc/yanet2, unless customized by a patch.
+                              The component binary reads its config file from
                               inside that directory using its own default file name.
                             type: string
                           inline:
@@ -483,7 +368,7 @@ spec:
                   dataplane:
                     description: |-
                       DataplaneSpec describes one dataplane Pod: the DPDK process, hugepages and
-                      fixed optional native sidecars that share its network namespace.
+                      declared native sidecars that share its private network namespace.
                     properties:
                       config:
                         description: |-
@@ -492,8 +377,7 @@ spec:
 
                             - Inline: configuration is embedded into the CR; the operator creates a
                               ConfigMap (named deterministically by content hash) and mounts it into
-                              the Pod at the per-component default directory (/etc/bird for bird,
-                              /etc/yanet2 for everything else).
+                              the Pod at /etc/yanet2 unless a patch customizes the mount.
                             - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
                               the per-component default directory. The component binary finds its
                               config file inside that directory by its own default name (e.g.
@@ -523,8 +407,8 @@ spec:
                             description: |-
                               HostPath is the HOST directory to mount into the container via a
                               hostPath volume. The directory is mounted read-only at the
-                              per-component default path (/etc/bird for bird, /etc/yanet2 for
-                              everything else). The component binary reads its config file from
+                              default path /etc/yanet2, unless customized by a patch.
+                              The component binary reads its config file from
                               inside that directory using its own default file name.
                             type: string
                           inline:
@@ -539,12 +423,6 @@ spec:
                               a strategic patch must currently add the downloader init container.
                             type: string
                         type: object
-                      hostNetwork:
-                        default: false
-                        description: |-
-                          HostNetwork defaults to false. Set it explicitly only for legacy
-                          deployments that intentionally run the dataplane in the host network.
-                        type: boolean
                       hugepages:
                         description: Hugepages requested by the Pod.
                         properties:
@@ -587,185 +465,119 @@ spec:
                         type: object
                       sidecars:
                         description: |-
-                          Sidecars is the palette of native sidecars available to box types. A
-                          sidecar runs only when the selected box type wires its corresponding slot.
-                        properties:
-                          bird:
-                            description: Bird runs the BIRD2 daemon in the dataplane
-                              network namespace.
-                            properties:
-                              config:
-                                description: |-
-                                  ConfigSource describes where the configuration of a yanet component
-                                  comes from. Exactly one of Inline, HostPath or URL must be specified.
+                          Sidecars is the ordered palette of single-container native sidecars.
+                          Each declaration reserves a gRPC/HTTP pair at 8080+2*i / 8081+2*i,
+                          including unselected and disabled entries. The box type selects names;
+                          it never changes their declared order or port indices.
+                        items:
+                          description: |-
+                            SidecarSpec describes exactly one native sidecar container in the dataplane.
+                            Names are unique across sidecars and standalone operators.
+                          properties:
+                            config:
+                              description: |-
+                                ConfigSource describes where the configuration of a yanet component
+                                comes from. Exactly one of Inline, HostPath or URL must be specified.
 
-                                    - Inline: configuration is embedded into the CR; the operator creates a
-                                      ConfigMap (named deterministically by content hash) and mounts it into
-                                      the Pod at the per-component default directory (/etc/bird for bird,
-                                      /etc/yanet2 for everything else).
-                                    - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
-                                      the per-component default directory. The component binary finds its
-                                      config file inside that directory by its own default name (e.g.
-                                      controlplane.conf). This is the default for production hosts.
-                                    - URL: an HTTP(S) endpoint that returns the configuration body. The
-                                      operator creates an emptyDir shared with the component. Downloader
-                                      generation is deferred; a strategic patch must currently add the init
-                                      container that populates the volume.
+                                  - Inline: configuration is embedded into the CR; the operator creates a
+                                    ConfigMap (named deterministically by content hash) and mounts it into
+                                    the Pod at /etc/yanet2 unless a patch customizes the mount.
+                                  - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
+                                    the per-component default directory. The component binary finds its
+                                    config file inside that directory by its own default name (e.g.
+                                    controlplane.conf). This is the default for production hosts.
+                                  - URL: an HTTP(S) endpoint that returns the configuration body. The
+                                    operator creates an emptyDir shared with the component. Downloader
+                                    generation is deferred; a strategic patch must currently add the init
+                                    container that populates the volume.
 
-                                  Args, when set, are passed to the component binary verbatim. For HostPath
-                                  sources the whole directory is mounted, so args can reference any file in
-                                  that directory. Inline content is available as <mountDir>/config.
+                                Args, when set, are passed to the component binary verbatim. For HostPath
+                                sources the whole directory is mounted, so args can reference any file in
+                                that directory. Inline content is available as <mountDir>/config.
 
-                                  Validation that exactly one of Inline/HostPath/URL is filled is enforced
-                                  by the webhook.
-                                properties:
-                                  args:
-                                    description: |-
-                                      Args defines command-line arguments passed to the component verbatim.
-                                      Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
-                                      "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
-                                      "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
-                                    items:
-                                      type: string
-                                    type: array
-                                  hostPath:
-                                    description: |-
-                                      HostPath is the HOST directory to mount into the container via a
-                                      hostPath volume. The directory is mounted read-only at the
-                                      per-component default path (/etc/bird for bird, /etc/yanet2 for
-                                      everything else). The component binary reads its config file from
-                                      inside that directory using its own default file name.
+                                Validation that exactly one of Inline/HostPath/URL is filled is enforced
+                                by the webhook.
+                              properties:
+                                args:
+                                  description: |-
+                                    Args defines command-line arguments passed to the component verbatim.
+                                    Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
+                                    "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
+                                    "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
+                                  items:
                                     type: string
-                                  inline:
-                                    description: |-
-                                      Inline is the literal configuration body. When set, the operator
-                                      creates a ConfigMap owned by the CR and mounts it into the Pod.
-                                    type: string
-                                  url:
-                                    description: |-
-                                      URL is an HTTP(S) endpoint that returns the configuration body.
-                                      The operator creates an emptyDir volume shared with the component;
-                                      a strategic patch must currently add the downloader init container.
-                                    type: string
-                                type: object
-                              image:
-                                description: |-
-                                  ImageRef identifies a palette image. Registry and prefix default to
-                                  YanetConfigV2.spec.images but can be overridden independently for each image.
-                                properties:
-                                  name:
-                                    description: Name is the image name without registry/prefix/tag.
-                                    minLength: 1
-                                    type: string
-                                  prefix:
-                                    description: |-
-                                      Prefix overrides the global prefix. Nil inherits the global value;
-                                      an explicit empty string omits the prefix segment.
-                                    type: string
-                                  registry:
-                                    description: |-
-                                      Registry overrides the global registry. Nil inherits the global value;
-                                      an explicit empty string omits the registry segment.
-                                    type: string
-                                  tag:
-                                    description: Tag is the image tag.
-                                    type: string
-                                required:
-                                - name
-                                type: object
-                            required:
-                            - image
-                            type: object
-                          netlinkDataplaneSidecar:
-                            description: |-
-                              NetlinkDataplaneSidecar restores dataplane interfaces from netplan and
-                              publishes neighbour updates to the gateway from the dataplane network
-                              namespace. Its common gRPC metrics service self-registers with the gateway;
-                              it does not expose a reverse-route configuration RPC.
-                            properties:
-                              config:
-                                description: |-
-                                  ConfigSource describes where the configuration of a yanet component
-                                  comes from. Exactly one of Inline, HostPath or URL must be specified.
-
-                                    - Inline: configuration is embedded into the CR; the operator creates a
-                                      ConfigMap (named deterministically by content hash) and mounts it into
-                                      the Pod at the per-component default directory (/etc/bird for bird,
-                                      /etc/yanet2 for everything else).
-                                    - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
-                                      the per-component default directory. The component binary finds its
-                                      config file inside that directory by its own default name (e.g.
-                                      controlplane.conf). This is the default for production hosts.
-                                    - URL: an HTTP(S) endpoint that returns the configuration body. The
-                                      operator creates an emptyDir shared with the component. Downloader
-                                      generation is deferred; a strategic patch must currently add the init
-                                      container that populates the volume.
-
-                                  Args, when set, are passed to the component binary verbatim. For HostPath
-                                  sources the whole directory is mounted, so args can reference any file in
-                                  that directory. Inline content is available as <mountDir>/config.
-
-                                  Validation that exactly one of Inline/HostPath/URL is filled is enforced
-                                  by the webhook.
-                                properties:
-                                  args:
-                                    description: |-
-                                      Args defines command-line arguments passed to the component verbatim.
-                                      Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
-                                      "/etc/yanet2/controlplane.yaml"] for controlplane and ["server", "-c",
-                                      "/etc/yanet2/bird-adapter.yaml"] for bird-adapter.
-                                    items:
-                                      type: string
-                                    type: array
-                                  hostPath:
-                                    description: |-
-                                      HostPath is the HOST directory to mount into the container via a
-                                      hostPath volume. The directory is mounted read-only at the
-                                      per-component default path (/etc/bird for bird, /etc/yanet2 for
-                                      everything else). The component binary reads its config file from
-                                      inside that directory using its own default file name.
-                                    type: string
-                                  inline:
-                                    description: |-
-                                      Inline is the literal configuration body. When set, the operator
-                                      creates a ConfigMap owned by the CR and mounts it into the Pod.
-                                    type: string
-                                  url:
-                                    description: |-
-                                      URL is an HTTP(S) endpoint that returns the configuration body.
-                                      The operator creates an emptyDir volume shared with the component;
-                                      a strategic patch must currently add the downloader init container.
-                                    type: string
-                                type: object
-                              image:
-                                description: |-
-                                  ImageRef identifies a palette image. Registry and prefix default to
-                                  YanetConfigV2.spec.images but can be overridden independently for each image.
-                                properties:
-                                  name:
-                                    description: Name is the image name without registry/prefix/tag.
-                                    minLength: 1
-                                    type: string
-                                  prefix:
-                                    description: |-
-                                      Prefix overrides the global prefix. Nil inherits the global value;
-                                      an explicit empty string omits the prefix segment.
-                                    type: string
-                                  registry:
-                                    description: |-
-                                      Registry overrides the global registry. Nil inherits the global value;
-                                      an explicit empty string omits the registry segment.
-                                    type: string
-                                  tag:
-                                    description: Tag is the image tag.
-                                    type: string
-                                required:
-                                - name
-                                type: object
-                            required:
-                            - image
-                            type: object
-                        type: object
+                                  type: array
+                                hostPath:
+                                  description: |-
+                                    HostPath is the HOST directory to mount into the container via a
+                                    hostPath volume. The directory is mounted read-only at the
+                                    default path /etc/yanet2, unless customized by a patch.
+                                    The component binary reads its config file from
+                                    inside that directory using its own default file name.
+                                  type: string
+                                inline:
+                                  description: |-
+                                    Inline is the literal configuration body. When set, the operator
+                                    creates a ConfigMap owned by the CR and mounts it into the Pod.
+                                  type: string
+                                url:
+                                  description: |-
+                                    URL is an HTTP(S) endpoint that returns the configuration body.
+                                    The operator creates an emptyDir volume shared with the component;
+                                    a strategic patch must currently add the downloader init container.
+                                  type: string
+                              type: object
+                            image:
+                              description: |-
+                                ImageRef identifies a palette image. Registry and prefix default to
+                                YanetConfigV2.spec.images but can be overridden independently for each image.
+                              properties:
+                                name:
+                                  description: Name is the image name without registry/prefix/tag.
+                                  minLength: 1
+                                  type: string
+                                prefix:
+                                  description: |-
+                                    Prefix overrides the global prefix. Nil inherits the global value;
+                                    an explicit empty string omits the prefix segment.
+                                  type: string
+                                registry:
+                                  description: |-
+                                    Registry overrides the global registry. Nil inherits the global value;
+                                    an explicit empty string omits the registry segment.
+                                  type: string
+                                tag:
+                                  description: Tag is the image tag.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            listeners:
+                              description: |-
+                                Listeners declares Service exposure, defaulting to grpc. An explicit
+                                empty list creates no Service but retains the slot and host-config env.
+                              items:
+                                description: OperatorListener is a supported application
+                                  listener.
+                                enum:
+                                - grpc
+                                - http
+                                type: string
+                              maxItems: 2
+                              type: array
+                              x-kubernetes-list-type: set
+                            name:
+                              maxLength: 63
+                              minLength: 1
+                              pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                              type: string
+                          required:
+                          - image
+                          - name
+                          type: object
+                        maxItems: 28728
+                        type: array
+                        x-kubernetes-list-type: atomic
                     required:
                     - image
                     type: object
@@ -774,9 +586,8 @@ spec:
                       Operators are dynamic, keyed by Name. Each is rendered as one
                       Deployment and one Service.
                     items:
-                      description: |-
-                        OperatorSpec describes one dynamic operator, deployed independently or as
-                        native sidecars in the dataplane Pod according to its box placement.
+                      description: OperatorSpec describes one independently deployed
+                        operator container group.
                       properties:
                         containers:
                           description: |-
@@ -803,8 +614,8 @@ spec:
                                     description: |-
                                       HostPath is the HOST directory to mount into the container via a
                                       hostPath volume. The directory is mounted read-only at the
-                                      per-component default path (/etc/bird for bird, /etc/yanet2 for
-                                      everything else). The component binary reads its config file from
+                                      default path /etc/yanet2, unless customized by a patch.
+                                      The component binary reads its config file from
                                       inside that directory using its own default file name.
                                     type: string
                                   inline:
@@ -868,8 +679,8 @@ spec:
                           type: array
                         listeners:
                           description: |-
-                            Listeners are owned by the first container. Omitted defaults to grpc,
-                            except the operator named metrics defaults to http. An empty list means
+                            Listeners are owned by the first container. Omitted defaults to grpc.
+                            An empty list means
                             no listener and no Service. Explicit lists are rendered in grpc/http order.
                           items:
                             description: OperatorListener is a supported application
@@ -897,33 +708,6 @@ spec:
                 - controlplane
                 - dataplane
                 type: object
-              hostNetworkPortRange:
-                description: |-
-                  HostNetworkPortRange is the inclusive range used for application
-                  listeners in workloads whose final patched PodSpec has hostNetwork=true.
-                  Service ports stay fixed; only their per-Pod target ports are allocated
-                  from this range. The field may be omitted when no service-backed workload
-                  uses the host network.
-                properties:
-                  end:
-                    description: End is the last port in the inclusive range.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1
-                    type: integer
-                  start:
-                    description: Start is the first port in the inclusive range.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1
-                    type: integer
-                required:
-                - end
-                - start
-                type: object
-                x-kubernetes-validations:
-                - message: start must not exceed end
-                  rule: self.start <= self.end
               images:
                 description: |-
                   Images defines global image settings shared by all generated

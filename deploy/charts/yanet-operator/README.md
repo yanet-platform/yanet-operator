@@ -9,7 +9,7 @@ Requires Kubernetes 1.33+ for named Service target ports on native sidecars.
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.1.6 \
+  --version 0.1.12 \
   --namespace yanet-system \
   --create-namespace
 ```
@@ -84,10 +84,24 @@ creates the cluster-scoped `YanetConfigV2` singleton with the fixed name
 configuration and recreate the CRD before upgrading because Kubernetes cannot
 change a CRD's scope in place. Recreate `config` manually, or let Helm create it
 by setting `yanetconfigV2`; the chart does not adopt an existing object.
-Set `spec.components.dataplane.hostNetwork: true` in exported legacy specs if
-the migration must preserve host networking; omission now selects the pod
-network. Rename a legacy `birdAdapter` container override key to the rendered
-name `bird-adapter`.
+Rename a legacy `birdAdapter` container override key to the rendered name
+`bird-adapter`.
+
+Chart 0.1.12 changes the v2 workload schema. Declare native sidecars as the ordered
+atomic `components.dataplane.sidecars[]` list, one container per entry; select them
+through box-type sidecar maps and override them through installation
+`components.dataplane.sidecars.<name>`. Standalone groups remain in `operators[]`;
+announcer is an ordinary operator. Remove old placement/host-network fields and
+intermediate endpoint patches. Coordinate specs, CRDs and controller; this is not
+an automatic conversion. All v2 Pods require private networking and reject hostPort.
+The v1 API and controller remain unchanged.
+
+Sidecar index `i` reserves `8080+2*i` / `8081+2*i` even when disabled or unselected.
+External Service ports stay 8080/8081. `listeners: []` disables the Service, not the
+slot or host-config env. Metrics requires explicit `[http]`. Managed HostPath
+configs receive runtime bind, advertise and complete named NUMA gateway env after
+patches; ConfigMap content stays opaque. Deploy compatible runtime images and
+prepare host gateway identities/TLS before enabling the new profile.
 
 With webhooks enabled, chart-managed `yanetconfigV2` requires
 `webhook.failurePolicy: Ignore`. Helm
@@ -98,10 +112,11 @@ Before enabling the native v2 BIRD sidecar during an upgrade, stop the old
 operator and delete its standalone v2 BIRD Deployments. Both variants own the
 node-local `/run/bird` control-socket directory and must not overlap.
 
-For host-port reallocations, preflight refuses conflicts with live workloads.
-Stop the conflicting old workloads and wait for their Pods to terminate before
-retrying; stopping the operator alone is insufficient. The manager ClusterRole
-includes read-only `get/list/watch` access to `apps/replicasets` for this guard.
+Drain workloads before changing networking or moving a role between standalone
+and dataplane. Use installation `enabled: false` and `autoSync: true`, then wait for
+observed scale-down and terminated Pods. `stop: true` only pauses reconciliation.
+Preflight retains producer and shared-Service cutover guards using live
+Deployments, ReplicaSets and Pods. It no longer allocates node-wide ports.
 
 In `yanetconfigV2.spec.components`, each image's `registry` and `prefix`
 independently inherit `spec.images` when omitted; `""` explicitly clears that

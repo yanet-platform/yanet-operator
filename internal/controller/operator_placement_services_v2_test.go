@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -21,12 +22,47 @@ import (
 )
 
 func setMonitorPlacementV2(config *api.YanetConfigV2, colocated bool) {
-	slot := config.Spec.BoxTypes[0].Operators["monalive"]
-	slot.Placement = api.OperatorPlacementStandalone
+	moveMonitorRoleV2(&config.Spec, colocated)
+}
+
+// Move the declaration itself; placement is no longer a public API field.
+func moveMonitorRoleV2(config *api.YanetConfigSpec, colocated bool) {
 	if colocated {
-		slot.Placement = api.OperatorPlacementDataplane
+		for index, operator := range config.Components.Operators {
+			if operator.Name != "monalive" {
+				continue
+			}
+			container := operator.Containers[0]
+			sidecar := api.SidecarSpec{Name: operator.Name, Image: container.Image, Config: container.Config, Listeners: operator.Listeners}
+			config.Components.Dataplane.Sidecars = slices.Insert(config.Components.Dataplane.Sidecars, 1, sidecar)
+			config.Components.Operators = slices.Delete(config.Components.Operators, index, index+1)
+			for index := range config.BoxTypes {
+				box := &config.BoxTypes[index]
+				slot := box.Operators["monalive"]
+				box.Components.Dataplane.Sidecars["monalive"] = api.BoxDataplaneSidecar{Patches: slot.Patches}
+				delete(box.Operators, "monalive")
+			}
+			return
+		}
+		return
 	}
-	config.Spec.BoxTypes[0].Operators["monalive"] = slot
+	for index, sidecar := range config.Components.Dataplane.Sidecars {
+		if sidecar.Name == "monalive" {
+			config.Components.Operators = append(config.Components.Operators, api.OperatorSpec{Name: sidecar.Name, Listeners: sidecar.Listeners,
+				Containers: []api.OperatorContainer{{Name: sidecar.Name, Image: sidecar.Image, Config: sidecar.Config}}})
+			config.Components.Dataplane.Sidecars = slices.Delete(config.Components.Dataplane.Sidecars, index, index+1)
+			for index := range config.BoxTypes {
+				box := &config.BoxTypes[index]
+				slot := box.Components.Dataplane.Sidecars["monalive"]
+				if box.Operators == nil {
+					box.Operators = map[string]api.BoxOperator{}
+				}
+				box.Operators["monalive"] = api.BoxOperator{Patches: slot.Patches}
+				delete(box.Components.Dataplane.Sidecars, "monalive")
+			}
+			return
+		}
+	}
 }
 
 func TestOperatorPlacementServiceCutoverWaitsForScopeDrain(t *testing.T) {
@@ -71,7 +107,6 @@ func TestOperatorPlacementServiceCutoverWaitsForScopeDrain(t *testing.T) {
 					t.Fatal(err)
 				}
 				setMonitorPlacementV2(config, !reverse)
-				config.Spec.BoxTypes[1].Operators["monalive"] = config.Spec.BoxTypes[0].Operators["monalive"]
 				if err := r.Update(testContext, config); err != nil {
 					t.Fatal(err)
 				}
@@ -99,7 +134,7 @@ func TestOperatorPlacementServiceCutoverWaitsForScopeDrain(t *testing.T) {
 				if other.Spec.Selector[manifests.LabelComponent] == before.Spec.Selector[manifests.LabelComponent] {
 					t.Fatal("a drained box in the same namespace must not be blocked")
 				}
-				if snapshot.Config.BoxTypes[0].Operators["monalive"].Placement != config.Spec.BoxTypes[0].Operators["monalive"].Placement {
+				if !reflect.DeepEqual(snapshot.Config.Components.Dataplane.Sidecars, config.Spec.Components.Dataplane.Sidecars) {
 					t.Fatal("Service gate blocked publication of the new config snapshot")
 				}
 				if _, err := reviewReconcileV2(testContext, r, yanet); err == nil {

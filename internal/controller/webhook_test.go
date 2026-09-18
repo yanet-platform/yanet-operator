@@ -184,14 +184,17 @@ var _ = Describe("Validating webhooks", func() {
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 		})
 
-		It("rejects an invalid host-network port range", func() {
+		It("rejects duplicate ordered sidecar names", func() {
 			s := minimalV2ConfigSpec()
-			s.HostNetworkPortRange = &yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 19999}
+			s.Components.Dataplane.Sidecars = []yanetv2alpha1.SidecarSpec{
+				{Name: "duplicate", Image: yanetv2alpha1.ImageRef{Name: "test"}},
+				{Name: "duplicate", Image: yanetv2alpha1.ImageRef{Name: "test"}},
+			}
 			cfg := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
 				Spec:       s,
 			}
-			expectWebhookRejection(k8sClient.Create(ctx, cfg), "must not exceed")
+			expectWebhookRejection(k8sClient.Create(ctx, cfg), "duplicates a role")
 		})
 
 		It("rejects a boxType referencing an undeclared patch", func() {

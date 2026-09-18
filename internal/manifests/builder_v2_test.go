@@ -108,9 +108,8 @@ func TestBuildDeployments_Controlplane_ManagedListeners(t *testing.T) {
 			container.Ports[1].Name != "http" || container.Ports[1].ContainerPort != 8081 {
 			t.Errorf("deployment[%d] ports = %+v", i, container.Ports)
 		}
-		env := envValues(container.Env)
-		if env[EnvKubernetesGRPCPort] != "8080" || env[EnvKubernetesHTTPPort] != "8081" {
-			t.Errorf("deployment[%d] managed listener env = %v", i, env)
+		if len(container.Env) != 0 {
+			t.Errorf("deployment[%d] without a host config received network env: %v", i, container.Env)
 		}
 	}
 }
@@ -203,19 +202,6 @@ func TestBuildDeployments_Dataplane_InvalidHugepagesReturnsError(t *testing.T) {
 	}
 }
 
-func TestBuildDeployments_Dataplane_HostNetworkOverride(t *testing.T) {
-	false_ := false
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
-		Image:       helpers.ResolvedImage{Name: "dp", Tag: "v2"},
-		HostNetwork: &false_,
-	}
-	deps, _ := BuildDeployments(ctxV2(), c)
-	if deps[0].Spec.Template.Spec.HostNetwork {
-		t.Errorf("hostNetwork override to false ignored")
-	}
-}
-
 // hasMount reports whether the container mounts the given path (and,
 // when wantRO, that it is read-only).
 func hasMount(mounts []corev1.VolumeMount, path string, wantRO bool) bool {
@@ -298,12 +284,13 @@ func TestBuildDeployments_Dataplane_NativeSidecars(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
-		NativeSidecars: []helpers.ResolvedContainer{
+		Sidecars: []*helpers.ResolvedComponent{
 			{
-				Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				Kind: helpers.KindSidecar, Name: "discovery", Enabled: true,
+				Patches: []string{"network"},
 				Image: helpers.ResolvedImage{
 					Registry: "ghcr.io/yanet-platform/yanet2",
-					Name:     "netlink-dataplane-sidecar",
+					Name:     "discovery",
 					Tag:      "v2",
 				},
 				Config: &yanetv2alpha1.ConfigSource{
@@ -312,13 +299,18 @@ func TestBuildDeployments_Dataplane_NativeSidecars(t *testing.T) {
 				},
 			},
 			{
-				Name:   yanetv2alpha1.BirdSidecarContainerName,
+				Kind: helpers.KindSidecar, Name: "bird", Enabled: true, PortIndex: 1,
+				ListenerNames: []string{}, Patches: []string{"bird-socket"},
 				Image:  helpers.ResolvedImage{Name: "bird", Tag: "v2"},
 				Config: &yanetv2alpha1.ConfigSource{Inline: "router id 192.0.2.1;"},
 			},
 		},
 	}
-	deployments, err := BuildDeployments(ctxV2(), c)
+	registry := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+		patch("network", `{"spec":{"template":{"spec":{"containers":[{"name":"discovery","securityContext":{"privileged":true},"volumeMounts":[{"name":"netplan","mountPath":"/etc/netplan","readOnly":true}]}],"volumes":[{"name":"netplan","hostPath":{"path":"/etc/netplan"}}]}}}}`),
+		patch("bird-socket", `{"spec":{"template":{"spec":{"containers":[{"name":"bird","volumeMounts":[{"name":"socket","mountPath":"/run/bird"}],"ports":[{"name":"bgp","containerPort":179,"protocol":"TCP"},{"name":"bfd","containerPort":3784,"protocol":"UDP"},{"name":"bfd-multihop","containerPort":4784,"protocol":"UDP"}]}],"volumes":[{"name":"socket","hostPath":{"path":"/run/bird"}}]}}}}`),
+	})
+	deployments, err := RenderDeployments(ctxV2(), c, registry)
 	if err != nil {
 		t.Fatalf("BuildDeployments: %v", err)
 	}
@@ -330,7 +322,7 @@ func TestBuildDeployments_Dataplane_NativeSidecars(t *testing.T) {
 		t.Fatalf("native sidecars = %+v", pod.InitContainers)
 	}
 	netlink := &pod.InitContainers[0]
-	if netlink.Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+	if !strings.HasSuffix(netlink.Name, "-discovery") {
 		t.Fatalf("first native sidecar = %q, want netlink", netlink.Name)
 	}
 	if netlink.RestartPolicy == nil || *netlink.RestartPolicy != corev1.ContainerRestartPolicyAlways {
@@ -349,24 +341,18 @@ func TestBuildDeployments_Dataplane_NativeSidecars(t *testing.T) {
 	if !hasMount(netlink.VolumeMounts, "/etc/netplan", true) {
 		t.Fatalf("netlink sidecar must mount /etc/netplan read-only: %+v", netlink.VolumeMounts)
 	}
-	if len(netlink.Ports) != 1 || netlink.Ports[0].Name != NetlinkGRPCTargetPort ||
+	if len(netlink.Ports) != 1 || netlink.Ports[0].Name != BuildServices(ctxV2(), c.Sidecars[0])[0].Ports[0].TargetPortName ||
 		netlink.Ports[0].ContainerPort != ServiceGRPCPort {
 		t.Fatalf("netlink listener = %+v", netlink.Ports)
 	}
-	if envValues(netlink.Env)[EnvKubernetesGRPCPort] != "8080" {
-		t.Fatalf("netlink listener env = %+v", netlink.Env)
-	}
-	if len(netlink.Env) < 3 || netlink.Env[0].Name != EnvKubernetesGRPCPort {
-		t.Fatalf("managed listener env must precede endpoint expansion: %+v", netlink.Env)
-	}
-	if envValues(netlink.Env)[envNetlinkServerEndpoint] != "[::]:$(YANET_KUBERNETES_GRPC_PORT)" ||
-		envValues(netlink.Env)[envNetlinkServerAdvertiseEndpoint] !=
-			"yanet-firewall-netlink-dataplane-sidecar:8080" {
+	if envValues(netlink.Env)["YANET_SERVER_ENDPOINT"] != "[::]:8080" ||
+		envValues(netlink.Env)["YANET_SERVER_ADVERTISE_ENDPOINT"] !=
+			"yanet-firewall-discovery.yanet.svc.cluster.local:8080" {
 		t.Fatalf("netlink server env = %+v", netlink.Env)
 	}
 
 	bird := &pod.InitContainers[1]
-	if bird.Name != yanetv2alpha1.BirdSidecarContainerName {
+	if !strings.HasSuffix(bird.Name, "-bird") {
 		t.Fatalf("second native sidecar = %q, want BIRD", bird.Name)
 	}
 	if bird.RestartPolicy == nil || *bird.RestartPolicy != corev1.ContainerRestartPolicyAlways {
@@ -396,45 +382,22 @@ func TestConfigureListenersRejectsTargetPortNameCollision(t *testing.T) {
 		Kind:  helpers.KindDataplane,
 		Name:  "dataplane",
 		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
-		NativeSidecars: []helpers.ResolvedContainer{{
-			Name:  yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+		Sidecars: []*helpers.ResolvedComponent{{
+			Kind: helpers.KindSidecar, Name: "discovery", Enabled: true,
 			Image: helpers.ResolvedImage{Name: "netlink", Tag: "v2"},
 		}},
 	}
-	deployments, err := BuildDeployments(ctxV2(), component)
+	deployments, err := RenderDeployments(ctxV2(), component, nil)
 	if err != nil {
 		t.Fatalf("BuildDeployments: %v", err)
 	}
 	deployment := deployments[0]
 	deployment.Spec.Template.Spec.Containers[0].Ports = []corev1.ContainerPort{{
-		Name:          NetlinkGRPCTargetPort,
+		Name:          deployment.Spec.Template.Spec.InitContainers[0].Ports[0].Name,
 		ContainerPort: 9000,
 	}}
-	if err := ConfigureListeners(deployment, component, nil); err == nil {
+	if err := ConfigureListeners(deployment, component); err == nil {
 		t.Fatal("duplicate netlink target port name must be rejected")
-	}
-}
-
-func TestBuildDeployments_Dataplane_NativeSidecarHostNetwork(t *testing.T) {
-	hostNetwork := true
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
-		Image:       helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
-		HostNetwork: &hostNetwork,
-		NativeSidecars: []helpers.ResolvedContainer{{
-			Name:  yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
-			Image: helpers.ResolvedImage{Name: "netlink-dataplane-sidecar", Tag: "v2"},
-		}},
-	}
-	deployments, err := BuildDeployments(ctxV2(), c)
-	if err != nil {
-		t.Fatalf("BuildDeployments: %v", err)
-	}
-	if !deployments[0].Spec.Template.Spec.HostNetwork {
-		t.Fatal("explicit hostNetwork=true must be preserved")
-	}
-	if deployments[0].Spec.Template.Spec.DNSPolicy != corev1.DNSClusterFirstWithHostNet {
-		t.Fatalf("host-network DNS policy = %q, want ClusterFirstWithHostNet", deployments[0].Spec.Template.Spec.DNSPolicy)
 	}
 }
 
@@ -474,8 +437,7 @@ func TestBuildDeployments_Controlplane_ShmemBaseline(t *testing.T) {
 	}
 }
 
-// TestBuildDeployments_BirdSocketMounts checks that bird-adapter and announcer
-// get the node-local BIRD socket read-only.
+// TestBuildDeployments_BirdSocketMounts checks explicit read-only socket mounts.
 func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 	cases := []struct {
 		kind   helpers.ComponentKind
@@ -483,16 +445,23 @@ func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 		wantRO bool
 	}{
 		{helpers.KindBirdAdapter, "birdAdapter", true},
-		{helpers.KindAnnouncer, "announcer", true},
+		{helpers.KindOperator, "announcer", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &helpers.ResolvedComponent{
 				Kind: tc.kind, Name: tc.name, Enabled: true,
-				Image:  helpers.ResolvedImage{Name: tc.name, Tag: "v1"},
-				Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/x"},
+				Image:   helpers.ResolvedImage{Name: tc.name, Tag: "v1"},
+				Config:  &yanetv2alpha1.ConfigSource{HostPath: "/etc/x"},
+				Patches: []string{"socket"},
 			}
-			deps, err := BuildDeployments(ctxV2(), c)
+			containerName := "bird-adapter"
+			if tc.kind == helpers.KindOperator {
+				containerName = "announcer"
+				c.Containers = []helpers.ResolvedContainer{{Name: containerName, Image: c.Image, Config: c.Config}}
+			}
+			registry := NewPatchRegistry([]yanetv2alpha1.NamedPatch{patch("socket", fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":%q,"volumeMounts":[{"name":"run-bird","mountPath":"/run/bird","readOnly":true}]}],"volumes":[{"name":"run-bird","hostPath":{"path":"/run/bird"}}]}}}}`, containerName))})
+			deps, err := RenderDeployments(ctxV2(), c, registry)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -525,8 +494,9 @@ func TestBuildDeployments_BirdSocketMounts(t *testing.T) {
 
 func TestBuildDeployments_DisabledHasZeroReplicas(t *testing.T) {
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: false,
-		Image: helpers.ResolvedImage{Name: "announcer", Tag: "x"},
+		Kind: helpers.KindOperator, Name: "announcer", Enabled: false,
+		Image:      helpers.ResolvedImage{Name: "announcer", Tag: "x"},
+		Containers: []helpers.ResolvedContainer{{Name: "announcer", Image: helpers.ResolvedImage{Name: "announcer", Tag: "x"}}},
 	}
 	deps, _ := BuildDeployments(ctxV2(), c)
 	if r := deps[0].Spec.Replicas; r == nil || *r != 0 {
@@ -625,8 +595,8 @@ func TestBuildDeployments_Operator_ManagedListener(t *testing.T) {
 		container.Ports[0].ContainerPort != ServiceGRPCPort {
 		t.Fatalf("listener ports = %+v", container.Ports)
 	}
-	if envValues(container.Env)[EnvKubernetesGRPCPort] != "8080" {
-		t.Fatalf("listener env = %+v", container.Env)
+	if len(container.Env) != 0 {
+		t.Fatalf("operator without a host config received network env = %+v", container.Env)
 	}
 }
 
@@ -634,21 +604,17 @@ func TestBuildDeployments_Operator_ManagedListener(t *testing.T) {
 
 func TestBuildDeployments_Config_HostPath(t *testing.T) {
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
-		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "x"},
-		NativeSidecars: []helpers.ResolvedContainer{{
-			Name:   yanetv2alpha1.BirdSidecarContainerName,
-			Image:  helpers.ResolvedImage{Name: "bird", Tag: "x"},
-			Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/bird"},
-		}},
+		Kind: helpers.KindSidecar, Name: "worker", Enabled: true,
+		Image:  helpers.ResolvedImage{Name: "worker", Tag: "x"},
+		Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/worker"},
 	}
 	deps, _ := BuildDeployments(ctxV2(), c)
 	pod := deps[0].Spec.Template.Spec
-	if pod.Volumes[4].HostPath == nil || pod.Volumes[4].HostPath.Path != "/etc/bird" {
+	if pod.Volumes[0].HostPath == nil || pod.Volumes[0].HostPath.Path != "/etc/worker" {
 		t.Errorf("hostPath config volume not set: %+v", pod.Volumes)
 	}
-	if mp := pod.InitContainers[0].VolumeMounts[0].MountPath; mp != "/etc/bird" {
-		t.Errorf("bird mount path = %q, want /etc/bird", mp)
+	if mp := pod.Containers[0].VolumeMounts[0].MountPath; mp != "/etc/yanet2" {
+		t.Errorf("default config mount path = %q, want /etc/yanet2", mp)
 	}
 }
 
@@ -680,7 +646,7 @@ func TestBuildDeployments_Config_Inline_GeneratesConfigMap(t *testing.T) {
 
 func TestBuildDeployments_Config_URL_EmptyDir(t *testing.T) {
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: true,
+		Kind: helpers.KindSidecar, Name: "worker", Enabled: true,
 		Image:  helpers.ResolvedImage{Name: "an", Tag: "x"},
 		Config: &yanetv2alpha1.ConfigSource{URL: "https://x/y"},
 	}
@@ -717,7 +683,7 @@ func TestBuildDeployments_NoNodeName_NoNodeSelector(t *testing.T) {
 	ctx := ctxV2()
 	ctx.NodeName = ""
 	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindAnnouncer, Name: "announcer", Enabled: true,
+		Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "announcer", Tag: "x"},
 	}
 	deps, _ := BuildDeployments(ctx, c)

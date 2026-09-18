@@ -12,25 +12,21 @@ import (
 
 func TestOperatorPlacementAdmission(t *testing.T) {
 	for _, tt := range []struct {
-		placement string
 		listeners string
 		wantErr   bool
 	}{
-		{placement: "standalone", listeners: `null`},
-		{placement: "dataplane", listeners: `["grpc","http"]`},
-		{placement: "dataplane", listeners: `[]`},
-		{placement: "unknown", listeners: `["grpc"]`, wantErr: true},
-		{placement: "dataplane", listeners: `["grpc","grpc"]`, wantErr: true},
-		{placement: "dataplane", listeners: `["tcp"]`, wantErr: true},
+		{listeners: `null`},
+		{listeners: `["grpc","http"]`},
+		{listeners: `[]`},
+		{listeners: `["grpc","grpc"]`, wantErr: true},
+		{listeners: `["tcp"]`, wantErr: true},
 	} {
-		t.Run(tt.placement+tt.listeners, func(t *testing.T) {
+		t.Run(tt.listeners, func(t *testing.T) {
 			cfg := validConfig()
-			if err := json.Unmarshal([]byte(fmt.Sprintf(`[{"name":"monalive","containers":[{"name":"worker","image":{"name":"monalive"}}],"listeners":%s}]`, tt.listeners)), &cfg.Spec.Components.Operators); err != nil {
+			if err := json.Unmarshal([]byte(fmt.Sprintf(`[{"name":"monalive","image":{"name":"monalive"},"listeners":%s}]`, tt.listeners)), &cfg.Spec.Components.Dataplane.Sidecars); err != nil {
 				t.Fatal(err)
 			}
-			if err := json.Unmarshal([]byte(fmt.Sprintf(`{"monalive":{"placement":%q}}`, tt.placement)), &cfg.Spec.BoxTypes[0].Operators); err != nil {
-				t.Fatal(err)
-			}
+			cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]BoxDataplaneSidecar{"monalive": {}}
 			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validation error = %v, want error %t", err, tt.wantErr)
@@ -54,9 +50,9 @@ func TestOperatorPlacementPatchScope(t *testing.T) {
 	} {
 		t.Run(tt.patch, func(t *testing.T) {
 			cfg := validConfig()
-			cfg.Spec.Components.Operators = []OperatorSpec{{Name: "monalive", Containers: []OperatorContainer{{Name: "worker", Image: ImageRef{Name: "worker"}}}}}
+			cfg.Spec.Components.Dataplane.Sidecars = []SidecarSpec{{Name: "worker", Image: ImageRef{Name: "worker"}}}
 			cfg.Spec.Patches = append(cfg.Spec.Patches, NamedPatch{Name: "colocated", Patch: runtime.RawExtension{Raw: []byte(tt.patch)}})
-			cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"monalive": {Placement: OperatorPlacementDataplane, Patches: []string{"colocated"}}}
+			cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]BoxDataplaneSidecar{"worker": {Patches: []string{"colocated"}}}
 			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validation error = %v, wantErr=%t", err, tt.wantErr)
@@ -85,23 +81,19 @@ func TestOperatorListenersEmptyRoundTrip(t *testing.T) {
 
 func TestOperatorPlacementEffectiveHostNetwork(t *testing.T) {
 	for _, tt := range []struct {
-		name        string
-		hostNetwork bool
-		patches     []string
-		wantErr     bool
+		name    string
+		patches []string
+		wantErr bool
 	}{
 		{name: "private palette"},
-		{name: "host palette overridden", hostNetwork: true, patches: []string{"private"}},
-		{name: "last patch selects private", hostNetwork: true, patches: []string{"host", "private"}},
-		{name: "host palette remains host", hostNetwork: true, wantErr: true},
+		{name: "last patch selects private", patches: []string{"host", "private"}},
 		{name: "private palette overridden", patches: []string{"host"}, wantErr: true},
 		{name: "last patch selects host", patches: []string{"private", "host"}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
-			cfg.Spec.Components.Dataplane.HostNetwork = boolPointer(tt.hostNetwork)
-			cfg.Spec.Components.Operators = []OperatorSpec{{Name: "netconfig", Containers: []OperatorContainer{{Name: "worker", Image: ImageRef{Name: "netconfig"}}}}}
-			cfg.Spec.BoxTypes[0].Operators = map[string]BoxOperator{"netconfig": {Placement: OperatorPlacementDataplane}}
+			cfg.Spec.Components.Dataplane.Sidecars = []SidecarSpec{{Name: "netconfig", Image: ImageRef{Name: "netconfig"}}}
+			cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]BoxDataplaneSidecar{"netconfig": {}}
 			cfg.Spec.BoxTypes[0].Components.Dataplane.Patches = tt.patches
 			cfg.Spec.Patches = append(cfg.Spec.Patches,
 				makePatch("private", `{"spec":{"template":{"spec":{"hostNetwork":false}}}}`),

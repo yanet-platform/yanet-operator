@@ -103,16 +103,19 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validatePatchUniqueness(spec.Patches); err != nil {
 		return err
 	}
+	if err := dryRunPatches(spec.Patches); err != nil {
+		return err
+	}
 	if err := validateOperatorUniqueness(spec.Components.Operators); err != nil {
+		return err
+	}
+	if err := validateSidecarUniqueness(&spec.Components); err != nil {
 		return err
 	}
 	if err := validateBoxTypeUniqueness(spec.BoxTypes); err != nil {
 		return err
 	}
 	if err := validateBoxTypeRefs(spec); err != nil {
-		return err
-	}
-	if err := validateHostNetworkPortRange(spec.HostNetworkPortRange); err != nil {
 		return err
 	}
 	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
@@ -125,9 +128,6 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 		return err
 	}
 	if err := validateDisabledNuma(&spec.Components.Controlplane); err != nil {
-		return err
-	}
-	if err := dryRunPatches(spec.Patches); err != nil {
 		return err
 	}
 	return nil
@@ -146,31 +146,13 @@ func validateComponentImages(components *ComponentsSpec) error {
 	if err := validate("spec.components.dataplane.image", components.Dataplane.Image); err != nil {
 		return err
 	}
-	if components.Dataplane.Sidecars != nil {
-		if components.Dataplane.Sidecars.Bird != nil {
-			if err := validate(
-				"spec.components.dataplane.sidecars.bird.image",
-				components.Dataplane.Sidecars.Bird.Image,
-			); err != nil {
-				return err
-			}
-		}
-		if components.Dataplane.Sidecars.NetlinkDataplaneSidecar != nil {
-			if err := validate(
-				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar.image",
-				components.Dataplane.Sidecars.NetlinkDataplaneSidecar.Image,
-			); err != nil {
-				return err
-			}
+	for i, sidecar := range components.Dataplane.Sidecars {
+		if err := validate(fmt.Sprintf("spec.components.dataplane.sidecars[%d:%s].image", i, sidecar.Name), sidecar.Image); err != nil {
+			return err
 		}
 	}
 	if components.BirdAdapter != nil {
 		if err := validate("spec.components.birdAdapter.image", components.BirdAdapter.Image); err != nil {
-			return err
-		}
-	}
-	if components.Announcer != nil {
-		if err := validate("spec.components.announcer.image", components.Announcer.Image); err != nil {
 			return err
 		}
 	}
@@ -213,31 +195,13 @@ func validateConfigSources(components *ComponentsSpec) error {
 	if err := validate("spec.components.dataplane.config", components.Dataplane.Config); err != nil {
 		return err
 	}
-	if components.Dataplane.Sidecars != nil {
-		if components.Dataplane.Sidecars.Bird != nil {
-			if err := validate(
-				"spec.components.dataplane.sidecars.bird.config",
-				components.Dataplane.Sidecars.Bird.Config,
-			); err != nil {
-				return err
-			}
-		}
-		if components.Dataplane.Sidecars.NetlinkDataplaneSidecar != nil {
-			if err := validate(
-				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar.config",
-				components.Dataplane.Sidecars.NetlinkDataplaneSidecar.Config,
-			); err != nil {
-				return err
-			}
+	for i, sidecar := range components.Dataplane.Sidecars {
+		if err := validate(fmt.Sprintf("spec.components.dataplane.sidecars[%d:%s].config", i, sidecar.Name), sidecar.Config); err != nil {
+			return err
 		}
 	}
 	if components.BirdAdapter != nil {
 		if err := validate("spec.components.birdAdapter.config", components.BirdAdapter.Config); err != nil {
-			return err
-		}
-	}
-	if components.Announcer != nil {
-		if err := validate("spec.components.announcer.config", components.Announcer.Config); err != nil {
 			return err
 		}
 	}
@@ -321,12 +285,9 @@ func validatePatchUniqueness(patches []NamedPatch) error {
 
 func validateOperatorUniqueness(ops []OperatorSpec) error {
 	reservedNames := map[string]struct{}{
-		"controlplane":              {},
-		"dataplane":                 {},
-		"bird":                      {},
-		"bird-adapter":              {},
-		"netlink-dataplane-sidecar": {},
-		"announcer":                 {},
+		"controlplane": {},
+		"dataplane":    {},
+		"bird-adapter": {},
 	}
 	seen := make(map[string]struct{}, len(ops))
 	for i := range ops {
@@ -390,6 +351,29 @@ func validateBoxTypeUniqueness(boxes []BoxType) error {
 	return nil
 }
 
+func validateSidecarUniqueness(components *ComponentsSpec) error {
+	if len(components.Dataplane.Sidecars) > MaxDataplaneSidecars {
+		return fmt.Errorf("spec.components.dataplane.sidecars exhausts the listener port range")
+	}
+	seen := map[string]bool{"controlplane": true, "dataplane": true, "bird-adapter": true}
+	for _, operator := range components.Operators {
+		seen[operator.Name] = true
+	}
+	for index, sidecar := range components.Dataplane.Sidecars {
+		if errs := k8svalidation.IsDNS1123Label(sidecar.Name); len(errs) > 0 {
+			return fmt.Errorf("spec.components.dataplane.sidecars[%d].name %q is invalid: %s", index, sidecar.Name, strings.Join(errs, "; "))
+		}
+		if seen[sidecar.Name] {
+			return fmt.Errorf("spec.components.dataplane.sidecars[%d].name %q duplicates a role or is reserved", index, sidecar.Name)
+		}
+		seen[sidecar.Name] = true
+		if err := ValidateListeners(sidecar.Name, sidecar.Listeners); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateBoxTypeRefs ensures every patch name listed in a boxType
 // component or operator slot exists in the patch registry, and every
 // operator key in box.operators[] exists in components.operators[].
@@ -424,7 +408,7 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 		if err := assertPatchesExist(path+".components.dataplane.patches", box.Components.Dataplane.Patches, patchSet); err != nil {
 			return err
 		}
-		if err := validateDataplaneSidecarRefs(path, &spec.Components.Dataplane, box.Components.Dataplane); err != nil {
+		if err := validateDataplaneSidecarRefs(path, spec, box.Components.Dataplane, patchSet); err != nil {
 			return err
 		}
 		if box.Components.BirdAdapter != nil {
@@ -435,36 +419,8 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 				return err
 			}
 		}
-		if box.Components.Announcer != nil {
-			if spec.Components.Announcer == nil {
-				return fmt.Errorf("%s.components.announcer has no matching spec.components.announcer", path)
-			}
-			if err := assertPatchesExist(path+".components.announcer.patches", box.Components.Announcer.Patches, patchSet); err != nil {
-				return err
-			}
-		}
-		if err := ValidateYanetBirdDependencies(&YanetSpec{BoxType: box.Name}, &spec.Components, box); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		if err := validateBoxDataplaneNetwork(spec, box); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
 		// operators
 		for opName, opSlot := range box.Operators {
-			if err := ValidateOperatorPlacement(opSlot.Placement); err != nil {
-				return fmt.Errorf("%s.operators[%s]: %w", path, opName, err)
-			}
-			if opSlot.Placement == OperatorPlacementDataplane {
-				for _, name := range opSlot.Patches {
-					for _, patch := range spec.Patches {
-						if patch.Name == name {
-							if err := ValidateColocatedOperatorPatch(patch.Patch.Raw); err != nil {
-								return fmt.Errorf("%s.operators[%s] patch %q: %w", path, opName, name, err)
-							}
-						}
-					}
-				}
-			}
 			if _, ok := operatorSet[opName]; !ok {
 				return fmt.Errorf("%s.operators[%s]: operator is not declared in spec.components.operators", path, opName)
 			}
@@ -472,92 +428,75 @@ func validateBoxTypeRefs(spec *YanetConfigSpec) error {
 				return err
 			}
 		}
+		if err := validateBoxPrivateNetwork(spec, box); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
 	}
 	return nil
 }
 
-// validateBoxDataplaneNetwork checks the effective network setting, not the
-// palette default: ordered dataplane patches may override it for this box.
-// Container composition does not affect hostNetwork; full rendering remains in
-// the reconciler, which independently enforces the final Pod invariant.
-func validateBoxDataplaneNetwork(spec *YanetConfigSpec, box *BoxType) error {
-	colocated := false
-	for _, operator := range box.Operators {
-		if operator.Placement == OperatorPlacementDataplane {
-			colocated = true
-			break
-		}
-	}
-	if !colocated {
-		return nil
-	}
-	deployment := appsv1.Deployment{}
-	if spec.Components.Dataplane.HostNetwork != nil {
-		deployment.Spec.Template.Spec.HostNetwork = *spec.Components.Dataplane.HostNetwork
-	}
-	merged, err := json.Marshal(&deployment)
-	if err != nil {
-		return fmt.Errorf("marshal dataplane network skeleton: %w", err)
-	}
+// validateBoxPrivateNetwork checks ordered patch results for every wired role.
+// The renderer repeats this check on the fully composed Pod before any writes.
+func validateBoxPrivateNetwork(spec *YanetConfigSpec, box *BoxType) error {
 	registry := make(map[string][]byte, len(spec.Patches))
 	for _, patch := range spec.Patches {
 		registry[patch.Name] = patch.Patch.Raw
 	}
-	// References have already been checked by validateBoxTypeRefs.
-	for _, name := range box.Components.Dataplane.Patches {
-		merged, err = strategicpatch.StrategicMergePatch(merged, registry[name], appsv1.Deployment{})
-		if err != nil {
-			return fmt.Errorf("dataplane patch %q: %w", name, err)
+	groups := map[string][]string{
+		"controlplane": box.Components.Controlplane.Patches,
+		"dataplane":    box.Components.Dataplane.Patches,
+	}
+	if box.Components.BirdAdapter != nil {
+		groups["birdAdapter"] = box.Components.BirdAdapter.Patches
+	}
+	for name, operator := range box.Operators {
+		groups[name] = operator.Patches
+	}
+	for name, sidecar := range box.Components.Dataplane.Sidecars {
+		groups[name] = sidecar.Patches
+	}
+	for role, names := range groups {
+		merged := []byte(`{}`)
+		for _, name := range names {
+			var err error
+			merged, err = strategicpatch.StrategicMergePatch(merged, registry[name], appsv1.Deployment{})
+			if err != nil {
+				return fmt.Errorf("%s patch %q: %w", role, name, err)
+			}
+		}
+		var effective appsv1.Deployment
+		if err := json.Unmarshal(merged, &effective); err != nil {
+			return fmt.Errorf("decode patched %s: %w", role, err)
+		}
+		if err := ValidatePrivatePodNetwork(&effective.Spec.Template.Spec); err != nil {
+			return fmt.Errorf("%s: %w", role, err)
 		}
 	}
-	// Decode into a fresh value so a patch deleting hostNetwork resets it.
-	var effective appsv1.Deployment
-	if err := json.Unmarshal(merged, &effective); err != nil {
-		return fmt.Errorf("decode patched dataplane network: %w", err)
-	}
-	if effective.Spec.Template.Spec.HostNetwork {
-		return fmt.Errorf("dataplane placement requires a private network namespace")
-	}
 	return nil
 }
 
-func validateDataplaneSidecarRefs(path string, palette *DataplaneSpec, box *BoxDataplane) error {
-	if box.Sidecars == nil {
-		return nil
+func validateDataplaneSidecarRefs(path string, spec *YanetConfigSpec, box *BoxDataplane, patchSet map[string]struct{}) error {
+	declared := make(map[string]bool, len(spec.Components.Dataplane.Sidecars))
+	for _, sidecar := range spec.Components.Dataplane.Sidecars {
+		declared[sidecar.Name] = true
 	}
-	if box.Sidecars.Bird != nil && (palette.Sidecars == nil || palette.Sidecars.Bird == nil) {
-		return fmt.Errorf(
-			"%s.components.dataplane.sidecars.bird has no matching spec.components.dataplane.sidecars.bird",
-			path,
-		)
-	}
-	if box.Sidecars.NetlinkDataplaneSidecar != nil &&
-		(palette.Sidecars == nil || palette.Sidecars.NetlinkDataplaneSidecar == nil) {
-		return fmt.Errorf(
-			"%s.components.dataplane.sidecars.netlinkDataplaneSidecar has no matching "+
-				"spec.components.dataplane.sidecars.netlinkDataplaneSidecar",
-			path,
-		)
-	}
-	return nil
-}
-
-func validateHostNetworkPortRange(portRange *HostNetworkPortRange) error {
-	if portRange == nil {
-		return nil
-	}
-	if portRange.Start <= 0 || portRange.Start > 65535 {
-		return fmt.Errorf("spec.hostNetworkPortRange.start must be in 1..65535, got %d", portRange.Start)
-	}
-	if portRange.End <= 0 || portRange.End > 65535 {
-		return fmt.Errorf("spec.hostNetworkPortRange.end must be in 1..65535, got %d", portRange.End)
-	}
-	if portRange.Start > portRange.End {
-		return fmt.Errorf(
-			"spec.hostNetworkPortRange.start %d must not exceed end %d",
-			portRange.Start,
-			portRange.End,
-		)
+	for name, slot := range box.Sidecars {
+		field := path + ".components.dataplane.sidecars[" + name + "]"
+		if !declared[name] {
+			return fmt.Errorf("%s has no matching spec.components.dataplane.sidecars entry", field)
+		}
+		if err := assertPatchesExist(field+".patches", slot.Patches, patchSet); err != nil {
+			return err
+		}
+		for _, patchName := range slot.Patches {
+			for _, patch := range spec.Patches {
+				if patch.Name == patchName {
+					if err := ValidateSidecarPatch(patch.Patch.Raw); err != nil {
+						return fmt.Errorf("%s patch %q: %w", field, patchName, err)
+					}
+				}
+			}
+		}
 	}
 	return nil
 }

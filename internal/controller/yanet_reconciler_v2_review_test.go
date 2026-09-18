@@ -482,13 +482,7 @@ func TestReconcileV2Review_RunningPodKeepsInlineConfig(t *testing.T) {
 func TestReconcileV2Review_RenderingDoesNotMutateSnapshot(t *testing.T) {
 	yanet := reviewYanetV2()
 	r, snapshot := makeReconcilerEnv(t, yanet, reviewNodeV2())
-	snapshot.Config = minimalConfigV2()
-	snapshot.Config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
-		Bird: &yanetv2alpha1.DataplaneSidecarSpec{Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"}},
-	}
-	snapshot.Config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
-		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
-	}
+	snapshot.Config = sidecarConfigV2()
 	before := snapshot.Config.DeepCopy()
 	if _, err := reviewReconcileV2(context.Background(), r, yanet); err != nil {
 		t.Fatal(err)

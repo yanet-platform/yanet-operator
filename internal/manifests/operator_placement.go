@@ -36,9 +36,9 @@ func colocatedTargetPort(operator, listener string) string {
 	return operatorContainerPrefix + shortHashStr(operator) + "-" + listener[:1]
 }
 
-// RenderDeployments is the shared preflight/apply rendering path. Colocated
-// operators use the existing operator/config renderer, but never become their
-// own Deployment. Operator patches address logical names before namespacing;
+// RenderDeployments is the shared preflight/apply rendering path. Single-container
+// sidecars use the shared image/config renderer but never become their own
+// Deployment. Sidecar patches address logical names before namespacing;
 // dataplane patches run after composition, with ownership restored afterwards.
 func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent, registry PatchRegistry) ([]*appsv1.Deployment, error) {
 	if component.IsColocated() {
@@ -49,31 +49,34 @@ func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent,
 		return nil, err
 	}
 	for _, deployment := range deployments {
-		for _, operator := range component.ColocatedOperators {
-			if err := composeOperator(ctx, deployment, operator, registry); err != nil {
-				return nil, fmt.Errorf("compose operator %q: %w", operator.Name, err)
+		for _, sidecar := range component.Sidecars {
+			if err := composeSidecar(ctx, deployment, sidecar, registry); err != nil {
+				return nil, fmt.Errorf("compose sidecar %q: %w", sidecar.Name, err)
 			}
 		}
 		identity := CaptureWorkloadIdentity(deployment)
 		if err := ApplyPatches(deployment, component.Patches, registry); err != nil {
 			return nil, err
 		}
-		RestoreWorkloadIdentity(deployment, identity)
-		if len(component.ColocatedOperators) > 0 && deployment.Spec.Template.Spec.HostNetwork {
-			return nil, fmt.Errorf("dataplane-placed operators require a private network namespace; hostNetwork is unsupported")
-		}
-		if err := ConfigureListeners(deployment, component, nil); err != nil {
-			return nil, err
-		}
-		if err := ValidatePodContainerNames(deployment); err != nil {
-			return nil, err
-		}
-		if len(component.ColocatedOperators) > 0 || component.Kind == helpers.KindOperator {
-			if err := ValidateComposedPod(deployment); err != nil {
+		if component.Kind == helpers.KindDataplane {
+			if err := validateSidecarComposition(&deployment.Spec.Template.Spec, component); err != nil {
 				return nil, err
 			}
 		}
-		if len(component.ColocatedOperators) > 0 {
+		RestoreWorkloadIdentity(deployment, identity)
+		if err := api.ValidatePrivatePodNetwork(&deployment.Spec.Template.Spec); err != nil {
+			return nil, err
+		}
+		if err := ConfigureListeners(deployment, component); err != nil {
+			return nil, err
+		}
+		if err := ConfigureRuntimeNetworkV2(deployment, ctx, component); err != nil {
+			return nil, err
+		}
+		if err := ValidateComposedPod(deployment); err != nil {
+			return nil, err
+		}
+		if len(component.Sidecars) > 0 {
 			if err := validateReservedColocatedPorts(deployment, component); err != nil {
 				return nil, err
 			}
@@ -82,86 +85,103 @@ func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent,
 	return deployments, nil
 }
 
-func composeOperator(ctx BuildContextV2, deployment *appsv1.Deployment, operator *helpers.ResolvedComponent, registry PatchRegistry) error {
-	for _, name := range operator.Patches {
+func composeSidecar(ctx BuildContextV2, deployment *appsv1.Deployment, sidecar *helpers.ResolvedComponent, registry PatchRegistry) error {
+	for _, name := range sidecar.Patches {
 		patch, ok := registry[name]
 		if !ok {
 			return fmt.Errorf("patch %q is not defined", name)
 		}
-		if err := api.ValidateColocatedOperatorPatch(patch.Patch.Raw); err != nil {
+		if err := api.ValidateSidecarPatch(patch.Patch.Raw); err != nil {
 			return fmt.Errorf("patch %q: %w", name, err)
 		}
 	}
-	op := buildOperator(ctx, operator)
-	if err := ApplyPatches(op, operator.Patches, registry); err != nil {
+	op := buildSingle(ctx, sidecar)
+	if err := ApplyPatches(op, sidecar.Patches, registry); err != nil {
 		return err
 	}
-	// Every declared container must remain in its original group/order. A patch
-	// may add regular containers, which also become owned restartable sidecars.
-	declared := make(map[string]int, len(operator.Containers))
-	for i, container := range operator.Containers {
-		declared[container.Name] = i
+	pod := &op.Spec.Template.Spec
+	if err := api.ValidatePrivatePodNetwork(pod); err != nil {
+		return err
 	}
-	next := 0
-	for _, container := range op.Spec.Template.Spec.Containers {
-		if index, ok := declared[container.Name]; ok {
-			if index != next {
-				return fmt.Errorf("patch changed declared container order")
-			}
-			next++
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != sidecar.Name {
+		return fmt.Errorf("sidecar %q patches must retain exactly its declared container", sidecar.Name)
+	}
+	for _, container := range pod.InitContainers {
+		if container.RestartPolicy != nil {
+			return fmt.Errorf("sidecar %q patch adds a restartable container; declare it in dataplane.sidecars", sidecar.Name)
 		}
 	}
-	if next != len(declared) {
-		return fmt.Errorf("patch removed a declared operator container")
-	}
-	if err := configureComponentListeners(op, operator, nil); err != nil {
-		return err
-	}
-	if err := rewriteColocatedProbePorts(op, operator); err != nil {
+	if err := configureComponentListeners(op, sidecar, false); err != nil {
 		return err
 	}
 	if err := ValidateComposedPod(op); err != nil {
 		return err
 	}
-	if !operator.Enabled {
+	if !sidecar.Enabled {
 		return nil
 	}
-	pod := &op.Spec.Template.Spec
 	visitResourceFieldRefs(pod, func(ref *corev1.ResourceFieldSelector) {
 		if ref.ContainerName != "" {
-			ref.ContainerName = scopedOperatorName(operator.Name, ref.ContainerName)
+			ref.ContainerName = scopedOperatorName(sidecar.Name, ref.ContainerName)
 		}
 	})
 	for _, volume := range pod.Volumes {
-		volume.Name = scopedOperatorName(operator.Name, volume.Name)
+		volume.Name = scopedOperatorName(sidecar.Name, volume.Name)
 		deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, volume)
 	}
-	// Config downloader init containers keep their semantics and precede this
-	// operator's native sidecars. HostIPC/shmem mounts come from buildOperator.
+	// Regular config downloaders precede their consumer and remain one-shot.
 	for group, containers := range [][]corev1.Container{pod.InitContainers, pod.Containers} {
 		for _, container := range containers {
-			container.Name = scopedOperatorName(operator.Name, container.Name)
+			container.Name = scopedOperatorName(sidecar.Name, container.Name)
 			if group == 1 {
 				always := corev1.ContainerRestartPolicyAlways
 				container.RestartPolicy = &always
 			}
 			for i := range container.VolumeMounts {
-				container.VolumeMounts[i].Name = scopedOperatorName(operator.Name, container.VolumeMounts[i].Name)
+				container.VolumeMounts[i].Name = scopedOperatorName(sidecar.Name, container.VolumeMounts[i].Name)
 			}
 			for i := range container.VolumeDevices {
-				container.VolumeDevices[i].Name = scopedOperatorName(operator.Name, container.VolumeDevices[i].Name)
+				container.VolumeDevices[i].Name = scopedOperatorName(sidecar.Name, container.VolumeDevices[i].Name)
 			}
 			deployment.Spec.Template.Spec.InitContainers = append(deployment.Spec.Template.Spec.InitContainers, container)
 		}
 	}
-	deployment.Spec.Template.Labels[OperatorMembershipLabel(operator.Name)] = operator.Name
+	deployment.Spec.Template.Labels[OperatorMembershipLabel(sidecar.Name)] = sidecar.Name
+	return nil
+}
+
+func validateSidecarComposition(pod *corev1.PodSpec, component *helpers.ResolvedComponent) error {
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != api.DataplaneContainerName {
+		return fmt.Errorf("dataplane patches must retain its primary container; declare sidecars in dataplane.sidecars")
+	}
+	var expected []string
+	for _, sidecar := range component.Sidecars {
+		if sidecar.Enabled {
+			expected = append(expected, scopedOperatorName(sidecar.Name, sidecar.Name))
+		}
+	}
+	index := 0
+	for _, container := range pod.InitContainers {
+		if container.RestartPolicy == nil {
+			continue
+		}
+		if *container.RestartPolicy != corev1.ContainerRestartPolicyAlways || index >= len(expected) || container.Name != expected[index] {
+			return fmt.Errorf("dataplane patch changed declared native sidecar composition/order/restartPolicy")
+		}
+		index++
+	}
+	if index != len(expected) {
+		return fmt.Errorf("dataplane patch removed a declared native sidecar or its restartPolicy")
+	}
 	return nil
 }
 
 // ValidateComposedPod checks identities/references before any resource writes.
-// Numeric conflicts between concurrently running containers are additionally
-// checked by the controller's shared Pod/host-port validator.
+// It also rejects conflicting ports between concurrently running containers.
 func ValidateComposedPod(deployment *appsv1.Deployment) error {
+	if err := api.ValidatePrivatePodNetwork(&deployment.Spec.Template.Spec); err != nil {
+		return err
+	}
 	if err := ValidatePodContainerNames(deployment); err != nil {
 		return err
 	}
@@ -214,9 +234,7 @@ func ValidateComposedPod(deployment *appsv1.Deployment) error {
 					ports[port.Name] = true
 				}
 			}
-			colocated := deployment.Spec.Template.Labels[labelComponent] == string(helpers.KindDataplane) &&
-				strings.HasPrefix(container.Name, operatorContainerPrefix)
-			if err := validateContainerProbePorts(&container, colocated); err != nil {
+			if err := validateContainerProbePorts(&container); err != nil {
 				return err
 			}
 		}
@@ -227,7 +245,10 @@ func ValidateComposedPod(deployment *appsv1.Deployment) error {
 			referenceErr = fmt.Errorf("resourceFieldRef refers to missing container %q", ref.ContainerName)
 		}
 	})
-	return referenceErr
+	if referenceErr != nil {
+		return referenceErr
+	}
+	return validateConcurrentPodPorts(pod)
 }
 
 func visitResourceFieldRefs(pod *corev1.PodSpec, visit func(*corev1.ResourceFieldSelector)) {
@@ -262,20 +283,19 @@ func visitResourceFieldRefs(pod *corev1.PodSpec, visit func(*corev1.ResourceFiel
 }
 
 func validateReservedColocatedPorts(deployment *appsv1.Deployment, component *helpers.ResolvedComponent) error {
-	owners := map[int32]string{8080: api.NetlinkDataplaneSidecarContainerName, 8081: api.NetlinkDataplaneSidecarContainerName}
-	for _, operator := range component.ColocatedOperators {
-		owner := scopedOperatorName(operator.Name, operator.Containers[0].Name)
-		offset, err := colocatedPortOffset(operator.PortIndex)
+	owners := map[int32]string{}
+	for _, sidecar := range component.Sidecars {
+		owner := scopedOperatorName(sidecar.Name, sidecar.Name)
+		grpcPort, httpPort, err := runtimePortPair(sidecar)
 		if err != nil {
 			return err
 		}
-		base := ServiceGRPCPort + offset
-		owners[base], owners[base+1] = owner, owner
+		owners[grpcPort], owners[httpPort] = owner, owner
 	}
 	for _, containers := range [][]corev1.Container{deployment.Spec.Template.Spec.Containers, deployment.Spec.Template.Spec.InitContainers} {
 		for _, container := range containers {
 			for _, port := range container.Ports {
-				if owner, reserved := owners[port.ContainerPort]; reserved && owner != container.Name {
+				if owner, reserved := owners[port.ContainerPort]; reserved && owner != container.Name && (port.Protocol == "" || port.Protocol == corev1.ProtocolTCP) {
 					return fmt.Errorf("port %d is reserved for %q, not %q", port.ContainerPort, owner, container.Name)
 				}
 			}

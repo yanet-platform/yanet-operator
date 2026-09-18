@@ -1,11 +1,6 @@
-# Illustrative palette: replace images/config with the deployed binaries' settings.
-# This example retains the legacy combined slot to illustrate port reservations.
-# For split netconfig/neighbour-sidecar runtime, see v2alpha1-yanetconfig-full.yaml.
-# monalive is an ordinary operator, never a fixed dataplane sidecar slot.
-# The operator injects YANET_KUBERNETES_{GRPC,HTTP}_PORT before user env and
-# YANET_KUBERNETES_{GRPC,HTTP}_ADVERTISE_ENDPOINT for the shared Service.
-# Wire those into the binary's own configuration/args/env via container patches;
-# no generic YANET_SERVER_* variables are forced on monalive.
+# Each sidecar is one container. Standalone operators may contain several.
+# The complete sidecars list is ordered and atomic for server-side apply.
+# Images are illustrative; host configs require compatible runtime releases.
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetConfigV2
 metadata:
@@ -16,38 +11,39 @@ spec:
       image: {name: controlplane, tag: example}
     dataplane:
       image: {name: dataplane, tag: example}
-      hostNetwork: false
       sidecars:
-        netlinkDataplaneSidecar:
-          image: {name: netlink-dataplane-sidecar, tag: example}
+        - name: client
+          image: {name: client, tag: example}
+          listeners: [] # Reserves 8080/8081 without exposing a Service.
+        - name: monitor
+          image: {name: monitor, tag: example}
+          # Default grpc: bind 8082; Service/advertise always use 8080.
+          config: {hostPath: /etc/monitor}
+        - name: metrics-agent
+          image: {name: metrics-agent, tag: example}
+          listeners: [http] # Bind 8085; external Service port 8081.
+          config: {hostPath: /etc/metrics-agent}
     operators:
-      - name: monalive
-        listeners: [grpc, http]
+      - name: route
         containers:
           - name: worker
-            image: {name: monalive, tag: example}
-      - name: probe
-        # Omitted listeners retains the default grpc listener.
-        containers:
-          - name: worker
-            image: {name: probe, tag: example}
+            image: {name: route, tag: example}
   boxTypes:
     - name: private
       components:
         controlplane: {}
         dataplane:
           sidecars:
-            netlinkDataplaneSidecar: {}
+            client: {}
+            monitor: {}
+            metrics-agent: {}
       operators:
-        # Sorted declared roles reserve two ports each, even when disabled:
-        # netlink=8080; monalive=8082/8083; probe=8084/8085.
-        # Shared Services still expose grpc:8080 and/or http:8081.
-        monalive: {placement: dataplane}
-        probe: {placement: dataplane}
-    - name: independent
+        route: {}
+    - name: reduced
       components:
         controlplane: {}
-        dataplane: {}
+        dataplane:
+          sidecars:
+            monitor: {} # Still slot 1, even though client is not selected.
       operators:
-        monalive: {placement: standalone}
-        probe: {} # standalone is the default
+        route: {}

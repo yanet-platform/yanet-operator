@@ -56,30 +56,36 @@ live in the cluster-scoped `YanetConfigV2` singleton named `config`. The
 `YanetV2` CR is minimal: pick a `boxType`,
 select nodes via `nodeSelector`, optionally override per-container
 `image.{name,tag}`, workload/native-sidecar `enabled`, and controlplane
-`disabledNuma`. Generic operators can run standalone or with `placement: dataplane`
-as restartable init containers in the dataplane's private network namespace.
-The [full example](deploy/examples/v2alpha1-yanetconfig-full.yaml) uses separate
-`netconfig` and `neighbour-sidecar` operators alongside the fixed BIRD sidecar.
-Both declare `listeners: []`: no separate Deployment or automatic Service.
-Only netconfig receives interface-configuration privileges, through its own patch;
-both receive independently scoped read-only configuration mounts. Their example
-image tags must be replaced with tested releases before deployment.
+`disabledNuma`. Standalone groups use `components.operators[].containers[]`.
+Dataplane sidecars use the ordered, atomic `components.dataplane.sidecars[]` list:
+one `SidecarSpec` (`name`, `image`, `config`, `listeners`) per native container.
+Box types select sidecars by name; installation overrides use
+`components.dataplane.sidecars.<name>`. BIRD, neighbour-sidecar and netconfig are
+ordinary entries with declarative mounts and permissions. See the
+[full example](deploy/examples/v2alpha1-yanetconfig-full.yaml); replace illustrative
+image tags with tested releases before deployment.
 
 Runtime Kubernetes probes and blocking KNI startup hooks are intentionally absent:
 dataplane must start to create KNI. Application readiness belongs to announcer and
 the YANET gRPC readiness APIs; operator consumption of this readiness is deferred.
-Neighbour-sidecar's own `Ready/Watch` bind comes from its config, with no gateway
-registration or automatic listener allocation. The legacy combined
-`netlink-dataplane-sidecar` slot remains available for existing profiles.
+Neighbour-sidecar exposes its own `Ready/Watch`, without gateway registration.
+Omitted listeners default to `[grpc]` for every role; HTTP-only roles explicitly
+declare `[http]`. `listeners: []` suppresses the Service, not the reserved slot or
+host-config bind/gateway env.
 
 Shared Services
 are unconditional for service-backed roles and are named
 `yanet-<boxType>-<component>[-numa<N>]` within each namespace. They expose
-stable gRPC/HTTP ports `8080/8081`; host-network target ports are allocated from
-`YanetConfigV2.spec.hostNetworkPortRange`. Runtime endpoint variables generally
-belong in named Deployment patches; the fixed netlink sidecar receives its bind
-and shared-Service advertise endpoints from the builder for its self-registered
-common gRPC metrics service. Per-NUMA controlplane
+stable gRPC/HTTP ports `8080/8081`. All v2 Pods use private networking; final
+`hostNetwork: true` and nonzero `hostPort` are rejected. Sidecar index `i` reserves
+`8080+2*i` and `8081+2*i` before selection/enablement filtering. Append preserves
+existing indices; reorder/insertion/removal changes the Pod template. For a managed
+HostPath config after patches, the operator injects runtime bind env, Service FQDN
+advertise and complete named NUMA gateway overrides. Inline/ConfigMap data stays
+opaque and receives no automatic env. Compatible gateway runtimes must support
+`YANET_KUBERNETES_GATEWAYS`; preparing their images and host configs is a rollout
+prerequisite. See [the runtime contract](ARCHITECTURE.md#listener-endpoint-configuration).
+Per-NUMA controlplane
 fan-out is configured by `YanetConfigV2.spec.components.controlplane.numa`
 (default 1). Set it explicitly for multi-NUMA hosts before upgrading; node
 labels do not determine the fan-out. `disabledNuma` excludes physical domains
@@ -92,9 +98,7 @@ workload owner (or the oldest CR before workloads exist).
 > has the older namespaced `YanetConfigV2` CRD, export its spec, remove and
 > reinstall that CRD, then recreate the configuration manually as cluster-scoped
 > `metadata.name: config` or let Helm create it through `yanetconfigV2` values.
-> When recreating an existing spec, set
-> `spec.components.dataplane.hostNetwork: true` explicitly to preserve the old
-> networking mode; omission now selects the pod network. Rename any
+> Rename any
 > `spec.components.birdAdapter.containers.birdAdapter` override key to the
 > rendered container name `bird-adapter`.
 > Delete old per-installation v2 Services before enabling the shared-Service
@@ -102,10 +106,16 @@ workload owner (or the oldest CR before workloads exist).
 > Before enabling the native BIRD sidecar, stop the old operator and delete its
 > standalone v2 BIRD Deployments. The old and new BIRD processes share the
 > node-local `/run/bird` control-socket directory and must not overlap.
-> Host-port migrations also require a stop-first transition when new allocations
-> overlap old workloads. Preflight checks live Deployments, Pods, and ReplicaSets
-> and refuses the conflicting migration; stop those workloads and wait for their
-> Pods to terminate before retrying. Stopping the operator alone does not stop Pods.
+>
+> **v2 schema change in chart 0.1.12:** replace fixed sidecar maps with the ordered
+> list; move colocated operator declarations into it and announcer into ordinary
+> operators. Remove legacy placement, host-network fields and endpoint patches.
+> Coordinate CRD, controller and spec updates; there is no automatic conversion.
+> Drain existing workloads before changing networking or moving a role between
+> standalone and dataplane. Preflight retains Deployment/ReplicaSet/Pod producer
+> guards and shared-Service cutover guards. `enabled: false` with `autoSync: true`
+> drains; `stop: true` only freezes reconciliation and does not stop Pods.
+> v1 resources and controllers are unchanged.
 
 Palette images may override `registry` and `prefix` independently: omission
 inherits `spec.images`, while `""` clears that part. Installation container

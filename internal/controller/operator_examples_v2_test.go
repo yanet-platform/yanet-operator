@@ -4,24 +4,22 @@ import (
 	"context"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/yaml"
 )
 
 func TestOperatorPlacementExamples(t *testing.T) {
 	for _, example := range []struct {
 		name, file     string
-		patchedPrivate bool
 		disableNetwork bool
 	}{
 		{name: "full", file: "v2alpha1-yanetconfig-full.yaml"},
-		{name: "private-patch-overrides-host-palette", file: "v2alpha1-yanetconfig-full.yaml", patchedPrivate: true},
 		{name: "disabled-network-sidecars", file: "v2alpha1-yanetconfig-full.yaml", disableNetwork: true},
 		{name: "placement", file: "v2alpha1-yanetconfig-placement.yaml"},
 	} {
@@ -35,15 +33,6 @@ func TestOperatorPlacementExamples(t *testing.T) {
 			if err := yaml.UnmarshalStrict(raw, config); err != nil {
 				t.Fatal(err)
 			}
-			if example.patchedPrivate {
-				config.Spec.Components.Dataplane.HostNetwork = helpers.PtrBool(true)
-				config.Spec.Patches = append(config.Spec.Patches, api.NamedPatch{Name: "private-network",
-					Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"hostNetwork":false}}}}`)}})
-				for i := range config.Spec.BoxTypes {
-					box := &config.Spec.BoxTypes[i]
-					box.Components.Dataplane.Patches = append(box.Components.Dataplane.Patches, "private-network")
-				}
-			}
 			if _, err := (&api.YanetConfigCustomValidator{}).ValidateCreate(context.Background(), config); err != nil {
 				t.Fatal(err)
 			}
@@ -55,9 +44,13 @@ func TestOperatorPlacementExamples(t *testing.T) {
 				build := manifests.BuildContextV2{YanetName: "example", Namespace: "test", BoxType: box.Name, NodeName: "test-node"}
 				spec := &api.YanetSpec{BoxType: box.Name}
 				if example.disableNetwork {
-					spec.Components = &api.YanetComponentsOverride{Operators: map[string]api.YanetComponentOverride{
+					spec.Components = &api.YanetComponentsOverride{Dataplane: &api.YanetDataplaneOverride{Sidecars: map[string]api.YanetContainerOverride{
 						"netconfig": {Enabled: helpers.PtrBool(false)}, "neighbour-sidecar": {Enabled: helpers.PtrBool(false)},
-					}}
+					}}}
+				}
+				build, err = manifests.WithRuntimeNetwork(build, &config.Spec, spec)
+				if err != nil {
+					t.Fatal(err)
 				}
 				var workloads []renderedWorkloadV2
 				for _, ref := range refs {
@@ -81,9 +74,6 @@ func TestOperatorPlacementExamples(t *testing.T) {
 							t.Fatalf("%s: network sidecar must not have an automatic Service: %+v", box.Name, plan)
 						}
 					}
-				}
-				if _, err := allocateHostNetworkPortsV2(workloads, config.Spec.HostNetworkPortRange); err != nil {
-					t.Fatal(err)
 				}
 				if file == "v2alpha1-yanetconfig-full.yaml" {
 					assertNetworkSidecarExample(t, workloads, example.disableNetwork)
@@ -117,7 +107,7 @@ func assertNetworkSidecarExample(t *testing.T, workloads []renderedWorkloadV2, d
 			wantInit = 1
 		}
 		if pod.HostNetwork || len(pod.Containers) != 1 || pod.Containers[0].Name != "dataplane" ||
-			len(pod.InitContainers) != wantInit || pod.InitContainers[0].Name != "bird" {
+			len(pod.InitContainers) != wantInit || !strings.Contains(pod.InitContainers[0].Image, "/bird:") {
 			t.Fatalf("expected private dataplane with BIRD and two network sidecars: %+v", pod)
 		}
 		for _, container := range pod.InitContainers {

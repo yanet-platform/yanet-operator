@@ -197,9 +197,6 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		&cfg.Spec.Components,
 		box,
 	)
-	if overrideErr == nil {
-		overrideErr = yanetv2alpha1.ValidateYanetBirdDependencies(&yanet.Spec, &cfg.Spec.Components, box)
-	}
 	if overrideErr != nil {
 		logger.Error(overrideErr, "component override validation failed")
 		if r.Recorder != nil && r.checkGlobalStopV2() == nil {
@@ -280,7 +277,7 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 		pullPolicy = corev1.PullIfNotPresent
 	}
 
-	servicePlans, listenerAssignments, preflightErr := r.preflightResourcesV2(
+	servicePlans, preflightErr := r.preflightResourcesV2(
 		ctx, &cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
 	)
 	if preflightErr != nil {
@@ -315,6 +312,10 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 			PullPolicy:  pullPolicy,
 			PullSecrets: cfg.Spec.Images.PullSecrets,
 			OwnerRef:    owner,
+		}
+		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, &cfg.Spec, &yanet.Spec)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
 
 		for _, ref := range enabled {
@@ -355,11 +356,6 @@ func (r *YanetV2Reconciler) reconcileYanetV2(ctx context.Context, yanet *yanetv2
 			for _, d := range deployments {
 				if ref.Kind == helpers.KindControlplane {
 					ns.NumaCount++
-				}
-				if listenerErr := manifests.ConfigureListeners(d, rc, listenerAssignments[node.Name][d.Name]); listenerErr != nil {
-					logger.Error(listenerErr, "listener configuration failed", "component", rc.Name, "deployment", d.Name)
-					reconcileErrs = append(reconcileErrs, listenerErr)
-					continue
 				}
 				normalizeDeploymentReplicas(d, rc.Enabled, installationEnabled)
 				state, requeue, applyErr := r.applyDeploymentV2(ctx, d, autoSync, updateWindow, node.Name, logger)
@@ -479,11 +475,9 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 	registry manifests.PatchRegistry,
 ) (
 	plans map[string]manifests.ServicePlan,
-	assignments map[string]listenerPortAssignmentsV2,
 	preflightErr error,
 ) {
 	plans = make(map[string]manifests.ServicePlan)
-	assignments = make(map[string]listenerPortAssignmentsV2, len(nodes))
 	workloadsByNode := make(map[string][]renderedWorkloadV2, len(nodes))
 	collided := make(map[string]struct{})
 	var preflightErrs []error
@@ -525,6 +519,11 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 			PullSecrets: cfg.Images.PullSecrets,
 			OwnerRef:    owner,
 		}
+		var err error
+		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, cfg, &yanet.Spec)
+		if err != nil {
+			return nil, err
+		}
 		for _, ref := range enabled {
 			rc, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
 			if err != nil {
@@ -546,27 +545,14 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 			}
 			for _, deployment := range deployments {
 				normalizeDeploymentReplicas(deployment, rc.Enabled, installationEnabled)
+				if rc.Kind == helpers.KindDataplane && deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 {
+					preflightErrs = append(preflightErrs, fmt.Errorf("deployment %s is a node-pinned dataplane workload with %d replicas", deployment.Name, *deployment.Spec.Replicas))
+				}
 				workloads = append(workloads, renderedWorkloadV2{deployment: deployment, component: rc})
 			}
 			addServicePlans(buildCtx, rc, "on node "+node.Name)
 		}
-		if err := validateRenderedBirdDependenciesV2(workloads); err != nil {
-			preflightErrs = append(preflightErrs, fmt.Errorf("node %s: %w", node.Name, err))
-			continue
-		}
-		nodeAssignments, allocationErr := allocateHostNetworkPortsV2(workloads, cfg.HostNetworkPortRange)
-		if allocationErr != nil {
-			preflightErrs = append(preflightErrs, fmt.Errorf("node %s: %w", node.Name, allocationErr))
-			continue
-		}
-		assignments[node.Name] = nodeAssignments
 		workloadsByNode[node.Name] = workloads
-		hostPorts := make(map[hostPortKey]hostPortOwnerV2)
-		for _, workload := range workloads {
-			if err := reserveHostPorts(hostPorts, workload.deployment); err != nil {
-				preflightErrs = append(preflightErrs, fmt.Errorf("node %s: %w", node.Name, err))
-			}
-		}
 	}
 	if len(nodes) == 0 {
 		buildCtx := manifests.BuildContextV2{
@@ -585,187 +571,15 @@ func (r *YanetV2Reconciler) preflightResourcesV2(
 		}
 	}
 	if len(preflightErrs) > 0 {
-		return nil, nil, errors.Join(preflightErrs...)
-	}
-	if err := r.validateLiveHostPortsV2(ctx, yanet, nodes, workloadsByNode); err != nil {
-		return nil, nil, err
+		return nil, errors.Join(preflightErrs...)
 	}
 	if err := r.validateOperatorPlacementTransitionV2(ctx, yanet, nodes, workloadsByNode); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return plans, assignments, nil
-}
-
-// validateRenderedBirdDependenciesV2 repeats the dependency check after patches:
-// a patch may scale the dataplane to zero while leaving its BIRD consumers up.
-func validateRenderedBirdDependenciesV2(workloads []renderedWorkloadV2) error {
-	birdRunning := false
-	for _, workload := range workloads {
-		if workload.component.Kind != helpers.KindDataplane || deploymentReplicasAreZero(workload.deployment) {
-			continue
-		}
-		for _, container := range workload.deployment.Spec.Template.Spec.InitContainers {
-			if container.Name == yanetv2alpha1.BirdSidecarContainerName && container.RestartPolicy != nil &&
-				*container.RestartPolicy == corev1.ContainerRestartPolicyAlways {
-				birdRunning = true
-			}
-		}
-	}
-	if birdRunning {
-		return nil
-	}
-	for _, workload := range workloads {
-		if (workload.component.Kind == helpers.KindBirdAdapter || workload.component.Kind == helpers.KindAnnouncer) &&
-			!deploymentReplicasAreZero(workload.deployment) {
-			return fmt.Errorf("enabled %s requires a running managed BIRD sidecar and dataplane after patches; disable the consumer explicitly or enable the dataplane",
-				workload.component.Name)
-		}
-	}
-	return nil
+	return plans, nil
 }
 
 //+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
-
-// validateLiveHostPortsV2 prevents desired-only allocation from handing a port
-// to another Deployment before its previous user stops. This is deliberately a
-// preflight refusal, not a rollout orchestrator: stop the conflicting workloads
-// before migrating ports. Recreate only serializes Pods of the SAME Deployment.
-func (r *YanetV2Reconciler) validateLiveHostPortsV2(
-	ctx context.Context,
-	yanet *yanetv2alpha1.YanetV2,
-	nodes []corev1.Node,
-	workloadsByNode map[string][]renderedWorkloadV2,
-) error {
-	hasPorts := false
-	for _, workloads := range workloadsByNode {
-		for _, workload := range workloads {
-			if !deploymentReplicasAreZero(workload.deployment) && len(podHostPortsV2(&workload.deployment.Spec.Template.Spec)) > 0 {
-				hasPorts = true
-			}
-		}
-	}
-	if !hasPorts {
-		return nil
-	}
-	deployments := &appsv1.DeploymentList{}
-	if err := r.List(ctx, deployments); err != nil {
-		return fmt.Errorf("list live Deployments before host-port migration: %w", err)
-	}
-	pods := &corev1.PodList{}
-	if err := r.List(ctx, pods); err != nil {
-		return fmt.Errorf("list live Pods before host-port migration: %w", err)
-	}
-	replicaSets := &appsv1.ReplicaSetList{}
-	if err := r.List(ctx, replicaSets); err != nil {
-		return fmt.Errorf("list live ReplicaSets before host-port migration (read access is required): %w", err)
-	}
-	// Cached List order is unspecified. Keep the first reported collision
-	// stable so an unchanged conflict does not churn status messages.
-	nodes = append([]corev1.Node(nil), nodes...)
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
-	key := func(object metav1.Object) string { return object.GetNamespace() + "/" + object.GetName() }
-	sort.Slice(deployments.Items, func(i, j int) bool { return key(&deployments.Items[i]) < key(&deployments.Items[j]) })
-	sort.Slice(replicaSets.Items, func(i, j int) bool { return key(&replicaSets.Items[i]) < key(&replicaSets.Items[j]) })
-	sort.Slice(pods.Items, func(i, j int) bool { return key(&pods.Items[i]) < key(&pods.Items[j]) })
-	byKey := make(map[client.ObjectKey]*appsv1.Deployment, len(deployments.Items))
-	for i := range deployments.Items {
-		deployment := &deployments.Items[i]
-		byKey[client.ObjectKeyFromObject(deployment)] = deployment
-	}
-	rsByKey := make(map[client.ObjectKey]*appsv1.ReplicaSet, len(replicaSets.Items))
-	for i := range replicaSets.Items {
-		rs := &replicaSets.Items[i]
-		rsByKey[client.ObjectKeyFromObject(rs)] = rs
-	}
-	for i := range nodes {
-		node := &nodes[i]
-		for _, workload := range workloadsByNode[node.Name] {
-			desired := workload.deployment
-			if deploymentReplicasAreZero(desired) {
-				continue
-			}
-			desiredPorts := podHostPortsV2(&desired.Spec.Template.Spec)
-			if len(desiredPorts) == 0 {
-				continue
-			}
-			existing := byKey[client.ObjectKeyFromObject(desired)]
-			recreate := existing != nil && desired.Spec.Strategy.Type == appsv1.RecreateDeploymentStrategyType &&
-				validateDeploymentOwnership(existing, desired) == nil
-			sameDeployment := func(rs *appsv1.ReplicaSet) bool {
-				if !recreate || rs.Namespace != existing.Namespace {
-					return false
-				}
-				owner := metav1.GetControllerOf(rs)
-				return owner != nil && owner.APIVersion == appsv1.SchemeGroupVersion.String() && owner.Kind == "Deployment" &&
-					owner.Name == existing.Name && owner.UID == existing.UID
-			}
-			for j := range deployments.Items {
-				live := &deployments.Items[j]
-				if recreate && live == existing {
-					continue
-				}
-				if deploymentReplicasAreZero(live) && live.Status.Replicas == 0 && live.Status.ObservedGeneration >= live.Generation {
-					continue
-				}
-				placementMatches := podMayUseNodeV2(&live.Spec.Template.Spec, node)
-				if controlledByYanetV2(live, yanet) && live.Labels[manifests.LabelNode] != "" {
-					placementMatches = live.Labels[manifests.LabelNode] == node.Name
-				}
-				if placementMatches {
-					if port, conflict := overlappingHostPortV2(desiredPorts, podHostPortsV2(&live.Spec.Template.Spec)); conflict {
-						return hostPortMigrationErrorV2(node.Name, desired, "Deployment", live, port)
-					}
-				}
-			}
-			// The Deployment template may already have changed while its old
-			// ReplicaSet can still create Pods. Pod inspection alone misses that
-			// gap; a scaled-down ReplicaSet with remaining replicas also reserves.
-			for j := range replicaSets.Items {
-				rs := &replicaSets.Items[j]
-				if sameDeployment(rs) || rs.Spec.Replicas != nil && *rs.Spec.Replicas == 0 && rs.Status.Replicas == 0 {
-					continue
-				}
-				placementMatches := podMayUseNodeV2(&rs.Spec.Template.Spec, node)
-				if owner := metav1.GetControllerOf(rs); owner != nil && owner.Kind == "Deployment" && owner.APIVersion == appsv1.SchemeGroupVersion.String() {
-					if parent := byKey[client.ObjectKey{Namespace: rs.Namespace, Name: owner.Name}]; parent != nil && parent.UID == owner.UID &&
-						controlledByYanetV2(parent, yanet) && parent.Labels[manifests.LabelNode] != "" {
-						placementMatches = parent.Labels[manifests.LabelNode] == node.Name
-					}
-				}
-				if placementMatches {
-					if port, conflict := overlappingHostPortV2(desiredPorts, podHostPortsV2(&rs.Spec.Template.Spec)); conflict {
-						return hostPortMigrationErrorV2(node.Name, desired, "ReplicaSet", rs, port)
-					}
-				}
-			}
-			for j := range pods.Items {
-				pod := &pods.Items[j]
-				if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || !podMayUseNodeV2(&pod.Spec, node) {
-					continue
-				}
-				port, conflict := overlappingHostPortV2(desiredPorts, podHostPortsV2(&pod.Spec))
-				if !conflict {
-					continue
-				}
-				podOwner := metav1.GetControllerOf(pod)
-				if recreate && pod.Namespace == existing.Namespace && podOwner != nil &&
-					podOwner.APIVersion == appsv1.SchemeGroupVersion.String() && podOwner.Kind == "ReplicaSet" {
-					rsKey := client.ObjectKey{Namespace: pod.Namespace, Name: podOwner.Name}
-					if rs := rsByKey[rsKey]; rs != nil && rs.UID == podOwner.UID && sameDeployment(rs) {
-						continue
-					}
-				}
-				return hostPortMigrationErrorV2(node.Name, desired, "Pod", pod, port)
-			}
-		}
-	}
-	return nil
-}
-
-func hostPortMigrationErrorV2(node string, desired *appsv1.Deployment, kind string, live client.Object, port hostPortKey) error {
-	return fmt.Errorf("unsafe host-port migration on node %s: Deployment %s/%s would use %s port %d still reserved by %s %s/%s; stop the old workloads and wait for their Pods to terminate before applying this port migration",
-		node, desired.Namespace, desired.Name, port.protocol, port.port, kind, live.GetNamespace(), live.GetName())
-}
 
 func podMayUseNodeV2(pod *corev1.PodSpec, node *corev1.Node) bool {
 	if pod.NodeName != "" {
@@ -776,94 +590,12 @@ func podMayUseNodeV2(pod *corev1.PodSpec, node *corev1.Node) bool {
 	return labels.SelectorFromSet(pod.NodeSelector).Matches(labels.Set(node.Labels))
 }
 
-func podHostPortsV2(pod *corev1.PodSpec) []hostPortKey {
-	var ports []hostPortKey
-	for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
-		for _, container := range containers {
-			for _, port := range container.Ports {
-				protocol := port.Protocol
-				if protocol == "" {
-					protocol = corev1.ProtocolTCP
-				}
-				// HostIP is deliberately not used to infer disjoint listeners.
-				if pod.HostNetwork && port.ContainerPort > 0 {
-					ports = append(ports, hostPortKey{port: port.ContainerPort, protocol: protocol})
-				}
-				if port.HostPort > 0 {
-					ports = append(ports, hostPortKey{port: port.HostPort, protocol: protocol})
-				}
-			}
-		}
-	}
-	return ports
-}
-
-func overlappingHostPortV2(desired, live []hostPortKey) (hostPortKey, bool) {
-	for _, target := range desired {
-		for _, occupied := range live {
-			if target == occupied {
-				return target, true
-			}
-		}
-	}
-	return hostPortKey{}, false
-}
-
 func normalizeDeploymentReplicas(deployment *appsv1.Deployment, componentEnabled, installationEnabled bool) {
 	if componentEnabled && installationEnabled {
 		return
 	}
 	zero := int32(0)
 	deployment.Spec.Replicas = &zero
-}
-
-type hostPortKey struct {
-	port     int32
-	protocol corev1.Protocol
-}
-
-func reserveHostPorts(
-	reserved map[hostPortKey]hostPortOwnerV2,
-	deployment *appsv1.Deployment,
-) error {
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0 {
-		return nil
-	}
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 &&
-		deployment.Spec.Template.Labels[manifests.LabelComponent] == string(helpers.KindDataplane) {
-		return fmt.Errorf(
-			"deployment %s is a node-pinned dataplane workload with %d replicas",
-			deployment.Name, *deployment.Spec.Replicas,
-		)
-	}
-	if err := validateIntraPodHostPortsV2(deployment, nil); err != nil {
-		return err
-	}
-	if !deployment.Spec.Template.Spec.HostNetwork {
-		return nil
-	}
-	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 1 {
-		return fmt.Errorf(
-			"deployment %s uses hostNetwork with %d replicas pinned to one node",
-			deployment.Name, *deployment.Spec.Replicas,
-		)
-	}
-	reserve := func(containers []corev1.Container) error {
-		for i := range containers {
-			container := &containers[i]
-			owner := hostPortOwnerV2{deployment: deployment.Name, container: container.Name}
-			for j := range container.Ports {
-				if err := reserveHostPortV2(reserved, owner, &container.Ports[j]); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-	if err := reserve(deployment.Spec.Template.Spec.Containers); err != nil {
-		return err
-	}
-	return reserve(deployment.Spec.Template.Spec.InitContainers)
 }
 
 // handleYanetV2Deletion runs cleanup on a v2 YanetV2 whose

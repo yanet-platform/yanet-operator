@@ -100,22 +100,23 @@ func TestRestoreWorkloadIdentityRestoresNativeSidecars(t *testing.T) {
 	component := &helpers.ResolvedComponent{
 		Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
 		Image: helpers.ResolvedImage{Name: "dataplane", Tag: "v1"},
-		NativeSidecars: []helpers.ResolvedContainer{
+		Sidecars: []*helpers.ResolvedComponent{
 			{
-				Name:  yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				Kind: helpers.KindSidecar, Name: "helper-a", Enabled: true,
 				Image: helpers.ResolvedImage{Name: "netlink-dataplane-sidecar", Tag: "v1"},
 			},
 			{
-				Name:  yanetv2alpha1.BirdSidecarContainerName,
+				Kind: helpers.KindSidecar, Name: "helper-b", Enabled: true, PortIndex: 1,
 				Image: helpers.ResolvedImage{Name: "bird", Tag: "v1"},
 			},
 		},
 	}
-	deployments, err := BuildDeployments(ctxV2(), component)
+	deployments, err := RenderDeployments(ctxV2(), component, nil)
 	if err != nil {
 		t.Fatalf("BuildDeployments: %v", err)
 	}
 	deployment := deployments[0]
+	names := []string{deployment.Spec.Template.Spec.InitContainers[0].Name, deployment.Spec.Template.Spec.InitContainers[1].Name}
 	identity := CaptureWorkloadIdentity(deployment)
 	deployment.Spec.Template.Spec.InitContainers[0].RestartPolicy = nil
 	deployment.Spec.Template.Spec.InitContainers[1].RestartPolicy = nil
@@ -129,9 +130,9 @@ func TestRestoreWorkloadIdentityRestoresNativeSidecars(t *testing.T) {
 
 	initContainers := deployment.Spec.Template.Spec.InitContainers
 	if len(initContainers) != 3 ||
-		initContainers[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
+		initContainers[0].Name != names[0] ||
 		initContainers[1].Name != "prepare-network" ||
-		initContainers[2].Name != yanetv2alpha1.BirdSidecarContainerName {
+		initContainers[2].Name != names[1] {
 		t.Fatalf("restored init containers = %+v", initContainers)
 	}
 	for _, index := range []int{0, 2} {
@@ -145,8 +146,8 @@ func TestRestoreWorkloadIdentityRestoresNativeSidecars(t *testing.T) {
 	RestoreWorkloadIdentity(deployment, identity)
 	initContainers = deployment.Spec.Template.Spec.InitContainers
 	if len(initContainers) != 3 ||
-		initContainers[0].Name != yanetv2alpha1.NetlinkDataplaneSidecarContainerName ||
-		initContainers[1].Name != yanetv2alpha1.BirdSidecarContainerName ||
+		initContainers[0].Name != names[0] ||
+		initContainers[1].Name != names[1] ||
 		initContainers[2].Name != "prepare-network" {
 		t.Fatalf("restored deleted native sidecar order = %+v", initContainers)
 	}
@@ -156,8 +157,8 @@ func TestValidatePodContainerNamesRejectsCrossListCollision(t *testing.T) {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "dataplane"},
 		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-			Containers:     []corev1.Container{{Name: yanetv2alpha1.BirdSidecarContainerName}},
-			InitContainers: []corev1.Container{{Name: yanetv2alpha1.BirdSidecarContainerName}},
+			Containers:     []corev1.Container{{Name: "worker"}},
+			InitContainers: []corev1.Container{{Name: "worker"}},
 		}}},
 	}
 	if err := ValidatePodContainerNames(deployment); err == nil {
@@ -167,8 +168,8 @@ func TestValidatePodContainerNamesRejectsCrossListCollision(t *testing.T) {
 
 func TestValidatePodContainerNamesRejectsDisabledSidecarsInRegularContainers(t *testing.T) {
 	for _, name := range []string{
-		yanetv2alpha1.BirdSidecarContainerName,
-		yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+		"op-12345678-first",
+		"op-87654321-second",
 	} {
 		t.Run(name, func(t *testing.T) {
 			component := &helpers.ResolvedComponent{
@@ -219,20 +220,20 @@ func TestRestoreWorkloadIdentityPreservesNativeSidecarPatchFields(t *testing.T) 
 		Image:     helpers.ResolvedImage{Name: "dataplane", Tag: "v2"},
 		Hugepages: &yanetv2alpha1.Hugepages{Size: "1Gi", Count: 2},
 		Config:    &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2"},
-		NativeSidecars: []helpers.ResolvedContainer{
+		Sidecars: []*helpers.ResolvedComponent{
 			{
-				Name:   yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
+				Kind: helpers.KindSidecar, Name: "helper-a", Enabled: true,
 				Image:  helpers.ResolvedImage{Name: "netlink", Tag: "v2"},
 				Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/yanet2"},
 			},
 			{
-				Name:   yanetv2alpha1.BirdSidecarContainerName,
+				Kind: helpers.KindSidecar, Name: "helper-b", Enabled: true, PortIndex: 1, ListenerNames: []string{},
 				Image:  helpers.ResolvedImage{Name: "bird", Tag: "v2"},
 				Config: &yanetv2alpha1.ConfigSource{HostPath: "/etc/bird"},
 			},
 		},
 	}
-	deployments, err := BuildDeployments(ctxV2(), component)
+	deployments, err := RenderDeployments(ctxV2(), component, nil)
 	if err != nil {
 		t.Fatalf("BuildDeployments: %v", err)
 	}
@@ -240,16 +241,17 @@ func TestRestoreWorkloadIdentityPreservesNativeSidecarPatchFields(t *testing.T) 
 	baseline := deployment.DeepCopy()
 	identity := CaptureWorkloadIdentity(deployment)
 	registry := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
-		patch("runtime", `{"spec":{"strategy":{"type":"RollingUpdate"},"template":{"spec":{
-			"hostNetwork":true,
+		patch("runtime", fmt.Sprintf(`{"spec":{"strategy":{"type":"RollingUpdate"},"template":{"spec":{
+			"hostNetwork":false,
 			"containers":[{"name":"dataplane","resources":{"limits":{"memory":"1Gi"}}}],
-			"$setElementOrder/initContainers":[{"name":"bird"},{"name":"netlink-dataplane-sidecar"}],
+			"$setElementOrder/initContainers":[{"name":%q},{"name":%q}],
 			"initContainers":[
-				{"name":"bird","restartPolicy":null,"resources":{"requests":{"cpu":"100m"}}},
-				{"name":"netlink-dataplane-sidecar","restartPolicy":null,"securityContext":{"runAsUser":0},
+				{"name":%q,"restartPolicy":null,"resources":{"requests":{"cpu":"100m"}}},
+				{"name":%q,"restartPolicy":null,"securityContext":{"runAsUser":0,"privileged":true},
 				 "env":[{"name":"CUSTOM","value":"kept"},{"name":"YANET_SERVER_ENDPOINT","value":"wrong"}]}
 			]
-		}}}}`),
+		}}}}`, baseline.Spec.Template.Spec.InitContainers[1].Name, baseline.Spec.Template.Spec.InitContainers[0].Name,
+			baseline.Spec.Template.Spec.InitContainers[1].Name, baseline.Spec.Template.Spec.InitContainers[0].Name)),
 	})
 	if err := ApplyPatches(deployment, []string{"runtime"}, registry); err != nil {
 		t.Fatalf("ApplyPatches: %v", err)
@@ -258,11 +260,14 @@ func TestRestoreWorkloadIdentityPreservesNativeSidecarPatchFields(t *testing.T) 
 	if err := ValidatePodContainerNames(deployment); err != nil {
 		t.Fatalf("ValidatePodContainerNames: %v", err)
 	}
-	if err := ConfigureListeners(deployment, component, map[string]int32{ListenerGRPC: 20000}); err != nil {
+	if err := ConfigureListeners(deployment, component); err != nil {
 		t.Fatalf("ConfigureListeners: %v", err)
 	}
+	if err := ConfigureRuntimeNetworkV2(deployment, ctxV2(), component); err != nil {
+		t.Fatal(err)
+	}
 	pod := &deployment.Spec.Template.Spec
-	if !pod.HostIPC || !pod.HostNetwork || pod.DNSPolicy != corev1.DNSClusterFirstWithHostNet ||
+	if !pod.HostIPC || pod.HostNetwork ||
 		deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
 		t.Fatalf("pod namespace or rollout invariants changed: %+v", deployment.Spec)
 	}
@@ -297,9 +302,8 @@ func TestRestoreWorkloadIdentityPreservesNativeSidecarPatchFields(t *testing.T) 
 		t.Fatalf("netlink security patch = %+v", netlink.SecurityContext)
 	}
 	env := envValues(netlink.Env)
-	if netlink.Env[0].Name != EnvKubernetesGRPCPort || env[EnvKubernetesGRPCPort] != "20000" ||
-		env[envNetlinkServerEndpoint] != "[::]:$(YANET_KUBERNETES_GRPC_PORT)" || env["CUSTOM"] != "kept" ||
-		env[envNetlinkServerAdvertiseEndpoint] != "yanet-firewall-netlink-dataplane-sidecar:8080" {
+	if env["YANET_SERVER_ENDPOINT"] != "[::]:8080" || env["CUSTOM"] != "kept" ||
+		env["YANET_SERVER_ADVERTISE_ENDPOINT"] != "yanet-firewall-helper-a.yanet.svc.cluster.local:8080" {
 		t.Fatalf("netlink listener env = %+v", netlink.Env)
 	}
 	if pod.InitContainers[1].Resources.Requests.Cpu().String() != "100m" || pod.InitContainers[1].SecurityContext != nil {
@@ -314,7 +318,7 @@ func TestRestoreWorkloadIdentityLeavesNonDataplaneInitContainers(t *testing.T) {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{labelComponent: "operator"}},
 				Spec: corev1.PodSpec{InitContainers: []corev1.Container{{
-					Name: yanetv2alpha1.BirdSidecarContainerName,
+					Name: "bird",
 				}}},
 			},
 		},

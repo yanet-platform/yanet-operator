@@ -1,4 +1,4 @@
-# Yanet CR (boxType=firewall) — with antiddos operator.
+# Yanet CR (boxType=firewall) — with standalone route, announcer and metrics.
 # Demonstrates that an entire box can be described in 5 fields.
 ---
 apiVersion: yanet.yanet-platform.io/v2alpha1
@@ -14,5 +14,5 @@ spec:
   enabled: true
   autoSync: true
   # No patches, no inline component specs.
-  # Everything (incl. antiddos operator + firewall-max-memory patch) is already defined
+  # Everything (including the firewall-max-memory patch) is already defined
   # in YanetConfig.boxTypes[firewall].

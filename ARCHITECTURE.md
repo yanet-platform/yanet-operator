@@ -118,11 +118,10 @@ The v2alpha1 design separates three independent axes of configuration:
 │ YanetConfig (cluster-wide, in-memory snapshot)                  │
 │                                                                 │
 │  spec.components       — palette of available components        │
-│    ├─ controlplane     — 4 fixed workload slots                 │
+│    ├─ controlplane     — per-NUMA workload                      │
 │    ├─ dataplane                                                 │
-│    │    └─ sidecars    — bird + netlink-dataplane-sidecar       │
+│    │    └─ sidecars[]  — ordered, one container per entry        │
 │    ├─ birdAdapter                                               │
-│    ├─ announcer                                                 │
 │    └─ operators[]      — dynamic, by name                       │
 │                                                                 │
 │  spec.patches []NamedPatch                                      │
@@ -153,18 +152,18 @@ The v2alpha1 design separates three independent axes of configuration:
 
 Per-installation customisation is intentionally narrow: per-container
 `image.{name,tag}` (under `containers.<name>`), workload `enabled`, dataplane
-native-sidecar `enabled`, and controlplane `disabledNuma` are accepted on the
+sidecar image/`enabled` under `dataplane.sidecars.<name>`, and controlplane `disabledNuma` are accepted on the
 Yanet CR. The intrinsic security/mount baseline each component cannot run
 without is emitted by the builder itself (the dataplane's privileged + hostIPC
-+ minimal host devices, the netlink sidecar's privileged + read-only netplan,
++ minimal host devices,
 and the controlplane's hostIPC + `/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
 `applyControlplaneShmem` in `builder_v2.go`). Everything optional beyond that
 (annotations, postStart, extra hostIPC/privileged for operators, resources)
 belongs in a NamedPatch.
 
 The container key inside `containers` must match the rendered container name.
-Fixed workloads use their own names; dataplane also accepts the native-sidecar
-names `bird` and `netlink-dataplane-sidecar`. Operators use the mandatory
+Fixed workloads use their own names; sidecar overrides use the separate sidecar
+map. Operators use the mandatory
 `OperatorContainer.name` declared in YanetConfigV2.
 
 Each palette `image` may set `registry` and `prefix` independently. An omitted
@@ -181,7 +180,6 @@ sidecar `enabled`.
 spec:
   stop: false
   updateWindow: 0
-  hostNetworkPortRange: { start: 20000, end: 20100 }
   images: { registry: ..., prefix: ..., pullPolicy: IfNotPresent }
   components:
     controlplane:
@@ -190,28 +188,20 @@ spec:
     dataplane:
       image: {...}
       hugepages: { size: 1Gi, count: 8 }
-      hostNetwork: false
       sidecars:
-        bird: { image: {...} }
-        netlinkDataplaneSidecar: { image: {...} }
+        - { name: bird, image: {...}, listeners: [] }
+        - { name: neighbour-sidecar, image: {...}, config: {hostPath: /etc/yanet2} }
+        - { name: netconfig, image: {...}, listeners: [] }
     birdAdapter:  { image: {...} }
-    announcer:    { image: {...} }
     operators:
+      - name: announcer
+        containers:
+          - { name: announcer, image: {...} }
       - name: antiddos
         containers:
           - { name: operator, image: {...} }
           - { name: agent,    image: {...}, hostIPC: true }
   patches:
-    - name: controlplane-listener
-      patch:
-        spec:
-          template:
-            spec:
-              containers:
-                - name: controlplane
-                  env:
-                    - name: YANET_GATEWAY_ENDPOINT
-                      value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
     - name: telegraf
       patch:
         spec: { template: { metadata: { annotations: { telegraf...: "8080" } } } }
@@ -220,13 +210,15 @@ spec:
   boxTypes:
     - name: release
       components:
-        controlplane: { patches: [controlplane-listener, telegraf, cp-resources-release] }
+        controlplane: { patches: [telegraf, cp-resources-release] }
         dataplane:
           sidecars:
             bird: {}
-            netlinkDataplaneSidecar: {}
+            neighbour-sidecar: {}
+            netconfig: {}
           patches: [telegraf, dp-resources]
       operators:
+        announcer:    { patches: [telegraf] }
         antiddos:     { patches: [telegraf] }
 ```
 
@@ -262,11 +254,11 @@ snapshot                     ▼
                              │    BuildContextV2 (node identity and images)
                              │    for each ComponentRef:
                              │      ResolveBoxComponent → ResolvedComponent
-                             │      InlineConfigMaps   → CreateOrUpdate ConfigMaps
-                             │      BuildDeployments   → []Deployment skeletons
-                             │      ApplyPatches       → strategic merge in order
-                             │      applyDeploymentV2  → CreateOrUpdate (or status only)
-                             │      ConfigureListeners → named ports + effective port env
+                             │      RenderDeployments  → build, compose, patch, validate
+                             │      ConfigureListeners → stable named target ports
+                             │      ConfigureRuntimeNetworkV2 → host-only runtime env
+                             │    preflight all plans and producer transitions before writes
+                             │    InlineConfigMaps + applyDeploymentV2 → apply or status only
                              │
                              ├─ preflight ServicePlans for Status.Services
                              └─ Status.Sync buckets + per-node summaries
@@ -308,7 +300,8 @@ Key files:
 - [`internal/manifests/builder_v2.go`](internal/manifests/builder_v2.go) — `BuildDeployments`, `InlineConfigMaps`, hugepages, ConfigSource branches.
 - [`internal/manifests/patcher.go`](internal/manifests/patcher.go) — `PatchRegistry`, `ApplyPatches` via `strategicpatch.StrategicMergePatch`.
 - [`internal/manifests/service_v2.go`](internal/manifests/service_v2.go) — `ServicePlan`, `BuildServices`, `ToService`.
-- [`internal/manifests/listeners_v2.go`](internal/manifests/listeners_v2.go) — fixed listener matrix and effective port env.
+- [`internal/manifests/listeners_v2.go`](internal/manifests/listeners_v2.go) — listener exposure and ordered port slots.
+- [`internal/manifests/runtime_network_v2.go`](internal/manifests/runtime_network_v2.go) — host-config runtime environment.
 - [`internal/controller/yanet_reconciler_v2.go`](internal/controller/yanet_reconciler_v2.go) — orchestration.
 - [`internal/controller/host_network_ports_v2.go`](internal/controller/host_network_ports_v2.go) — deterministic post-patch host port allocation.
 - [`internal/controller/yanetconfig_controller_v2.go`](internal/controller/yanetconfig_controller_v2.go) — snapshot and shared Service owner.
@@ -385,72 +378,56 @@ unique NUMA layout wants its own `YanetV2` CR selecting just that node.
 
 ### Operator services
 
-Every service-backed operator wired into a box type gets one shared ClusterIP Service named
-`yanet-<boxType>-<operator>`. `birdAdapter` and `announcer` use the same model;
-the netlink dataplane sidecar gets
-`yanet-<boxType>-netlink-dataplane-sidecar`. BIRD is service-less.
-The netlink Service remains when its box-type slot is declared but disabled,
-or an installation disables the sidecar; disabling it does not remove its DNS name.
-Installation `status.services` reports this declared role too. Its target port name
-`netlink-grpc` remains reserved for the netlink container even while disabled, so
-another container in the dataplane Pod cannot capture the retained Service.
-
-BIRD remains optional: a BIRD-free box must also omit `birdAdapter` and `announcer`.
-If an installation disables BIRD or its dataplane, it must explicitly disable
-every wired BIRD consumer. Webhooks validate defaults and typed overrides; the
-reconciler repeats the checks, including the final patched replica counts.
-Whole-installation `enabled: false` remains valid and scales everything to zero.
+Every service-backed role wired into a box type gets one shared ClusterIP Service
+named `yanet-<boxType>-<role>`. Disabled roles retain Services and reserved target
+names, including in installation `status.services`. Another container cannot
+capture the reserved target. BIRD and netconfig normally declare `listeners: []`.
+There are no name-based BIRD dependency checks; socket mounts and application
+dependencies belong to the palette and runtime configuration.
 
 ### Dynamic operator placement
 
-`BoxOperator.placement` is `standalone` (the default) or `dataplane`. The latter
-uses the same `OperatorSpec` palette and installation overrides at
-`YanetV2.spec.components.operators.<name>`, but renders its containers as native
-restartable init sidecars in the dataplane Deployment, not a separate Deployment.
-There is no special monalive slot; only BIRD and netlink are fixed slots.
-Colocation requires the dataplane's effective private network namespace after
-ordered dataplane patches. Admission and rendering reject a final
-`hostNetwork: true`; a patch overriding a host-network palette to false is valid.
+Standalone roles use `components.operators[].containers[]`; dataplane roles use
+`components.dataplane.sidecars[]`. A `SidecarSpec` has one container described by
+`name`, `image`, `config` and `listeners`, without numeric ports. Box types select
+sidecars through a map of names to `enabled`/`patches`; installation overrides use
+`components.dataplane.sidecars.<name>` (`enabled`, image `name`/`tag`). Role names
+must be unique across sidecars and standalone workloads. All v2 final Pods must
+have private networking: `hostNetwork: true` and nonzero `hostPort` are rejected.
 
-`OperatorSpec.listeners` optionally selects `grpc`, `http`, or both. Omission
-preserves the gRPC default (HTTP for the operator named `metrics`); `[]` explicitly
-means no listener or Service. The first **declared** container owns the listeners.
-The dataplane reserves 8080/8081 for the fixed listener block (netlink gRPC remains
-8080), then allocates two-port blocks to all declared colocated operator names in
-lexicographic order: index 0 uses 8082/8083, index 1 uses 8084/8085, and so on.
-Disabling a role does not free its block. Reordering the palette or map does not
-change allocations; adding/removing declared colocated names can change indices.
+Both specs default omitted listeners to `[grpc]`; HTTP-only roles explicitly use
+`[http]`, regardless of their name. `[]` suppresses Service exposure. Standalone
+listeners belong to the first declared container. The complete ordered sidecar
+list reserves `grpc=8080+2*i`, `http=8081+2*i`, starting at index zero and ending
+before port 65536. Selection, enablement, listeners and config source do not change
+indices. Appending preserves prior slots; removal/insertion/reordering changes
+them and the Pod template. The list is atomic for server-side apply: different
+managers cannot independently own entries and silently change startup/slot order.
 
 Shared Service names and external gRPC/HTTP ports remain unchanged at 8080/8081.
 Colocated Services select an operator-owned membership label on dataplane Pods
 and target role-specific named ports. Disabled roles lose their membership label
 and containers, but retain their declared Services and reserved target names.
-The builder injects `YANET_KUBERNETES_GRPC_PORT` / `YANET_KUBERNETES_HTTP_PORT`
-and the corresponding `YANET_KUBERNETES_*_ADVERTISE_ENDPOINT` values before user
-environment entries. Advertise values use the shared Service FQDN and external
-port. Runtime-specific endpoint configuration remains the caller's responsibility:
-arbitrary operators do **not** receive netlink's `YANET_SERVER_*` variables.
+For managed host configs, runtime env is applied after patches as described below.
+Advertise uses the Service FQDN and external port, never the sidecar bind offset.
 
-Colocated operator patches may set only `spec.template.spec.containers`,
+Sidecar patches may set only `spec.template.spec.containers`,
 `initContainers`, and `volumes` (including their strategic list-order directives).
 Other Deployment/Pod settings are rejected even if they match the dataplane.
 Patches address original logical container/volume names; composition scopes them
 as `op-<operator-name-hash>-<logical-name>` (long names get a hash suffix).
-ConfigSources, args, image overrides, shmem mounts, volume devices and resource
+ConfigSources, args, image overrides, volume devices and resource
 field references are preserved. Patched config-download init containers precede
 their operator's restartable containers; URL fetching still requires such a patch.
-Named TCP/HTTP startup, readiness and liveness probe ports and HTTP lifecycle-hook
-ports follow the first container's managed listener renaming. Numeric local
-HTTP/TCP default listener ports follow their allocated ports too; a gRPC probe's
-default 8080 follows the allocated gRPC port. Other numeric gRPC probes on
-colocated containers must target a TCP port declared in that same container.
-Unknown names (including names owned only by a sibling) are rejected after
-composition and again after dataplane patches. Standalone port names are unchanged.
+Explicit probe/lifecycle port references are validated without rewriting numeric
+ports. Unknown TCP names (including names owned only by a sibling) and out-of-range
+ports are rejected. Profiles do not synthesize Kubernetes probes.
 **Do not make a native sidecar's startup probe or blocking lifecycle hook wait
 for dataplane startup:** kubelet starts the dataplane application containers only
 after the preceding native sidecars have started. Readiness checks should report
 the sidecar's own health rather than introduce a circular readiness dependency.
-Declared container removal/reordering is rejected. Dataplane patches run last,
+Adding/removing/reordering long-lived sidecars through patches is rejected; the
+typed list is their complete declaration. Dataplane patches run last,
 but cannot resurrect disabled managed containers or remove enabled ownership,
 membership, restart policy or relative order. `op-` init-container names and
 `yanet.yanet-platform.io/operator-` labels are reserved for this composition.
@@ -475,9 +452,9 @@ See `deploy/examples/v2alpha1-yanetconfig-placement.yaml` for the API shape.
 ### Split network runtime example
 
 `deploy/examples/v2alpha1-yanetconfig-full.yaml` selects `netconfig` and
-`neighbour-sidecar` as generic dataplane-placed operators with `listeners: []`.
-There is no combined netlink slot or automatic Service in this profile. BIRD
-starts first, followed by the generic operators in lexicographic order; all are
+`neighbour-sidecar` as generic single-container sidecars with `listeners: []`.
+There is no automatic Service in this example. BIRD starts first, followed by
+neighbour-sidecar and netconfig in declaration order; all are
 restartable init containers. Netconfig waits/retries missing KNI within its
 process, allowing dataplane to start. Do not add a blocking init/PostStart hook.
 
@@ -486,8 +463,9 @@ and remaps its config mount to `/etc/netconfig`. Neighbour-sidecar retains a
 separate read-only `/etc/yanet2` mount and receives no interface-configuration
 privileges. Prepare `config.yaml`, `00-interfaces.yaml`, and
 `yanet-neighbour-sidecar.yaml` on the host and pin both images to tested releases.
-Configure neighbour `server.endpoint` and outbound `gateways` in that file;
-the status listener is not currently integrated with operator port allocation.
+The host-config overlay sets neighbour's bind to `[::]:8082` and selects physical
+NUMA gateway identities while retaining TLS from the host configuration. Set
+`listeners: [grpc]` to expose it through a shared Service on port 8080.
 
 This profile has no runtime Kubernetes startup, readiness, or liveness probes.
 Announcer decides application readiness through YANET gRPC APIs. Direct
@@ -497,28 +475,36 @@ APIs from yanet-operator is deferred.
 
 ### Listener endpoint configuration
 
-Services expose fixed `grpc:8080` and, where applicable, `http:8081` ports with
-named target ports. A Pod-network workload uses the same numeric target. After
-patches, a service-backed `hostNetwork` workload receives a deterministic target
-from `spec.hostNetworkPortRange`, with fixed BIRD and patch-added ports reserved.
+Services expose fixed `grpc:8080` and `http:8081` via named target ports. Separate
+Pods use these bind ports too; native sidecars use their reserved pairs. There is
+no node-wide allocator or host-port inventory scan.
 
-Before applying workloads, the live host-port guard checks Deployments, Pods,
-and ReplicaSets. If a new allocation overlaps another live workload's reserved
-port, preflight fails without applying that migration. Stop the conflicting old
-workloads and wait for their Pods to terminate before retrying. `Recreate` only
-serializes replacements within one Deployment, not port moves between Deployments.
+Automatic env requires the container's managed config mount to resolve to a
+HostPath volume **after patches**. Hugepages, devices and unrelated host mounts
+do not enable the overlay. Inline/ConfigMap content remains opaque; URL and absent
+config also receive no automatic network env. Managed keys override patches;
+unrelated environment variables are preserved.
 
-The operator injects `YANET_KUBERNETES_GRPC_PORT` and
-`YANET_KUBERNETES_HTTP_PORT` into the listener container. Runtime-specific
-endpoint variables are added by NamedPatches and can refer to these earlier env
-entries, for example `[::]:$(YANET_KUBERNETES_GRPC_PORT)`. For the fixed netlink
-sidecar, the builder directly supplies `YANET_SERVER_ENDPOINT` and
-`YANET_SERVER_ADVERTISE_ENDPOINT`; the latter advertises its shared Service.
-The sidecar restores dataplane interfaces and publishes neighbour updates as a
-gateway client. Its registered server descriptors expose the common gRPC metrics
-service, not a reverse-route configuration RPC. The binary's default listener
-`[::1]:0` is not reachable through a Service, so the operator's explicit bind and
-advertise endpoints are required and must be preserved.
+| Runtime | Bind env | Outbound/advertise |
+| --- | --- | --- |
+| Controlplane | `YANET_GATEWAY_SERVER_ENDPOINT=[::]:8080`, `YANET_GATEWAY_SERVER_HTTP_ENDPOINT=[::]:8081` | One Service per physical NUMA |
+| Generic gRPC role | `YANET_SERVER_ENDPOINT=[::]:<grpc-slot>` | `YANET_SERVER_ADVERTISE_ENDPOINT=<service>.<namespace>.svc.cluster.local:8080` when grpc is exposed |
+| HTTP-only role | `YANET_SERVER_ENDPOINT=[::]:<http-slot>` | HTTP Service port 8081; no gRPC advertise |
+| Bird-adapter | `YANET_LISTEN_ADDR=[::]:8080` | `YANET_ROUTE_OPERATOR_ENDPOINT=<route-service>.<namespace>.svc.cluster.local:8080` |
+| Sidecar with `listeners: []` | `YANET_SERVER_ENDPOINT=[::]:<grpc-slot>` | Gateway list; no advertise of a nonexistent Service |
+
+Generic roles also receive `YANET_KUBERNETES_GATEWAYS`, a complete JSON array such
+as `[{"name":"numa1","endpoint":"yanet-firewall-controlplane-numa1.test.svc.cluster.local:8080"}]`.
+Compatible runtimes select exactly these named entries from the host configuration,
+replace endpoints and preserve TLS. This excludes inactive NUMA without leaving a
+tail of old gateways. Unused env does not create an API in BIRD or netconfig.
+The common gRPC runtime has no generic HTTP server field; reserving HTTP is not
+proof of HTTP runtime support. Announcer readiness clients (`operators[]`) and
+metrics clients (`collection.modules[]`) remain application configuration.
+
+Chart 0.1.12 changes the v2 schema. Coordinate CRD/controller/spec changes and
+drain existing workloads before changing network or role placement; no automatic
+conversion is provided. v1 resources and code paths remain independent.
 
 ---
 
@@ -529,7 +515,7 @@ Every fixed workload, dataplane native sidecar, and operator container can suppl
 
 | Variant   | What the builder does                                            |
 |-----------|------------------------------------------------------------------|
-| `inline`  | Generates a hash-named `ConfigMap`, mounts it read-only at the per-component default directory (`/etc/yanet2` or `/etc/bird`). |
+| `inline`  | Generates a hash-named `ConfigMap`, mounts it read-only at `/etc/yanet2`; a patch may customize the path. |
 | `hostPath`| Mounts the HOST directory read-only at the per-component default path. The component binary reads its config file from inside that directory using its own default name. |
 | `url`     | Creates an `emptyDir`; an init-container is expected to populate it (today via a patch; see deferred items). |
 
@@ -574,25 +560,24 @@ Why strategic merge:
 
 Validation:
 - Webhook enforces uniqueness of names and existence of all references.
-- Dynamic operator names cannot reuse the built-in workload/container identities
-  `controlplane`, `dataplane`, `bird`, `bird-adapter`,
-  `netlink-dataplane-sidecar`, or `announcer`.
+- Sidecar/operator role names cannot duplicate one another or reuse reserved
+  workload identities (`controlplane`, `dataplane`, `birdAdapter`/`bird-adapter`).
 - Webhook **dry-runs** every patch via `strategicpatch.StrategicMergePatch(empty Deployment, patch, appsv1.Deployment{})` so a typo (e.g. `templete:` instead of `template:`) is caught at admit time.
 
 After patching, the builder restores the Deployment name, namespace, controller
 owner, immutable selector, node placement, reserved labels, and `Recreate`
-strategy. Other metadata and Pod fields remain patchable. `Recreate` is required
-because a rolling replacement on the same node would overlap BIRD and managed
-host-network listener ports with the old Pod.
+strategy. Other metadata and Pod fields remain patchable subject to private-network
+and composition validation. `Recreate` prevents overlapping dataplane instances
+and sidecars that share node devices, arenas and sockets.
 
-Patches for BIRD or the netlink sidecar target `spec.template.spec.initContainers`
-because Kubernetes native sidecars are restartable init containers with
-`restartPolicy: Always`. All such patches remain attached to the single
-dataplane box slot.
+Sidecar-scoped patches target logical `spec.template.spec.containers` before
+composition. Attach them to `boxTypes[].components.dataplane.sidecars.<name>`;
+the renderer namespaces their containers/volumes and creates native init containers
+with `restartPolicy: Always`. Dataplane patches cannot change this declared lifecycle.
 
 JSON6902 (`jsonPatch`) is intentionally not supported. Service / ConfigMap
 patching is not supported either — those are generated entirely from the
-component definition (`Hugepages`, `ConfigSource`) and the fixed listener matrix.
+component definition (`Hugepages`, `ConfigSource`) and declared listeners.
 
 ---
 

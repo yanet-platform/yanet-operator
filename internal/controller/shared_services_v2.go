@@ -225,8 +225,11 @@ func blockedSharedServicePlacementScopesV2(
 	byNamespace := make(map[string]inventory)
 	for _, scope := range ordered {
 		box, err := helpers.FindBoxType(config, scope.boxType)
-		if err != nil || len(box.Operators) == 0 {
+		if err != nil {
 			// Resolution errors are already protected/reported by Service planning.
+			continue
+		}
+		if len(box.Operators) == 0 && (box.Components.Dataplane == nil || len(box.Components.Dataplane.Sidecars) == 0) {
 			continue
 		}
 		live, loaded := byNamespace[scope.namespace]
@@ -243,13 +246,20 @@ func blockedSharedServicePlacementScopesV2(
 		for name := range box.Operators {
 			names = append(names, name)
 		}
+		sidecars := map[string]bool{}
+		if box.Components.Dataplane != nil {
+			for name := range box.Components.Dataplane.Sidecars {
+				names = append(names, name)
+				sidecars[name] = true
+			}
+		}
 		sort.Strings(names)
 		for _, producer := range live.producers {
 			if producer.template.Labels[manifests.LabelBoxType] != scope.boxType {
 				continue
 			}
 			for _, name := range names {
-				if incompatibleOperatorPlacementV2(producer.template.Labels, name, box.Operators[name].Placement == yanetv2alpha1.OperatorPlacementDataplane) {
+				if incompatibleOperatorPlacementV2(producer.template.Labels, name, sidecars[name]) {
 					blocked[scope] = struct{}{}
 					errs = append(errs, fmt.Errorf("shared Service placement migration in %s/%s for %q requires drain of old %s %s; preserving existing Services until all installations in this scope have drained incompatible producers",
 						scope.namespace, scope.boxType, name, producer.kind, producer.name))

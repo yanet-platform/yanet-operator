@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,18 +38,6 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 		wantCount int
 	}{
 		{
-			name: "dataplane netlink sidecar",
-			component: &helpers.ResolvedComponent{
-				Kind: helpers.KindDataplane,
-				Name: "dataplane",
-				NativeSidecars: []helpers.ResolvedContainer{{
-					Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
-				}},
-			},
-			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: NetlinkGRPCTargetPort}},
-			wantCount: 1,
-		},
-		{
 			name:      "controlplane",
 			component: &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Numa: 2},
 			wantPorts: []ServicePortPlan{
@@ -67,7 +54,7 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 		},
 		{
 			name:      "announcer",
-			component: &helpers.ResolvedComponent{Kind: helpers.KindAnnouncer, Name: "announcer"},
+			component: &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "announcer"},
 			wantPorts: []ServicePortPlan{{Name: ListenerGRPC, Port: ServiceGRPCPort, TargetPortName: ListenerGRPC}},
 			wantCount: 1,
 		},
@@ -79,7 +66,7 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 		},
 		{
 			name:      "metrics operator",
-			component: &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "metrics"},
+			component: &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "metrics", ListenerNames: []string{"http"}},
 			wantPorts: []ServicePortPlan{{Name: ListenerHTTP, Port: ServiceHTTPPort, TargetPortName: ListenerHTTP}},
 			wantCount: 1,
 		},
@@ -143,21 +130,17 @@ func TestBuildServices_ListenerMatrix(t *testing.T) {
 	}
 }
 
-func TestBuildServices_DataplaneNetlinkSidecar(t *testing.T) {
+func TestBuildServices_NamedSidecar(t *testing.T) {
 	component := &helpers.ResolvedComponent{
-		Kind: helpers.KindDataplane,
-		Name: "dataplane",
-		NativeSidecars: []helpers.ResolvedContainer{{
-			Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName,
-		}},
+		Kind: helpers.KindSidecar,
+		Name: "discovery",
 	}
 	plans := BuildServices(serviceContextV2(), component)
 	if len(plans) != 1 {
 		t.Fatalf("plans = %+v, want one netlink sidecar Service", plans)
 	}
 	plan := plans[0]
-	if plan.Name != "yanet-firewall-netlink-dataplane-sidecar" ||
-		plan.Component != yanetv2alpha1.NetlinkDataplaneSidecarContainerName {
+	if plan.Name != "yanet-firewall-discovery" || plan.Component != "discovery" {
 		t.Fatalf("dataplane sidecar Service identity = %+v", plan)
 	}
 	if plan.Selector[LabelComponent] != "dataplane" || !plan.Local {

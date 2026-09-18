@@ -162,19 +162,19 @@ var _ = Describe("Webhook Validation E2E Tests", func() {
 			Expect(err).Should(HaveOccurred())
 		})
 
-		It("Should reject YanetConfigV2 with an invalid host-network port range", func() {
+		It("Should reject YanetConfigV2 with an invalid sidecar image", func() {
 			config := &yanetv2alpha1.YanetConfigV2{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: yanetv2alpha1.YanetConfigName,
 				},
 				Spec: yanetv2alpha1.YanetConfigSpec{
-					HostNetworkPortRange: &yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 19999},
 					Components: yanetv2alpha1.ComponentsSpec{
 						Controlplane: yanetv2alpha1.ControlplaneSpec{
 							Image: yanetv2alpha1.ImageRef{Name: "cp", Tag: "v1"},
 						},
 						Dataplane: yanetv2alpha1.DataplaneSpec{
-							Image: yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
+							Image:    yanetv2alpha1.ImageRef{Name: "dp", Tag: "v1"},
+							Sidecars: []yanetv2alpha1.SidecarSpec{{Name: "missing-image"}},
 						},
 					},
 					BoxTypes: []yanetv2alpha1.BoxType{{

@@ -21,8 +21,7 @@ package v2alpha1
 //
 //   - Inline: configuration is embedded into the CR; the operator creates a
 //     ConfigMap (named deterministically by content hash) and mounts it into
-//     the Pod at the per-component default directory (/etc/bird for bird,
-//     /etc/yanet2 for everything else).
+//     the Pod at /etc/yanet2 unless a patch customizes the mount.
 //   - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
 //     the per-component default directory. The component binary finds its
 //     config file inside that directory by its own default name (e.g.
@@ -46,8 +45,8 @@ type ConfigSource struct {
 
 	// HostPath is the HOST directory to mount into the container via a
 	// hostPath volume. The directory is mounted read-only at the
-	// per-component default path (/etc/bird for bird, /etc/yanet2 for
-	// everything else). The component binary reads its config file from
+	// default path /etc/yanet2, unless customized by a patch.
+	// The component binary reads its config file from
 	// inside that directory using its own default file name.
 	// +optional
 	HostPath string `json:"hostPath,omitempty"`

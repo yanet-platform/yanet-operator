@@ -18,18 +18,16 @@ func TestOperatorPlacementProbeReferences(t *testing.T) {
 			}
 			t.Run(field+"/"+protocol, func(t *testing.T) {
 				config, component := manifestPlacementConfig(t)
-				port := `"grpc"`
-				if protocol == "httpGet" {
-					port = `"http"`
-				} else if protocol == "grpc" {
-					port = `8080`
+				port := `"health"`
+				if protocol == "grpc" {
+					port = `9000`
 				}
 				handler := fmt.Sprintf(`{%q:{"port":%s}}`, protocol, port)
 				entry := fmt.Sprintf(`%q:%s`, field, handler)
 				if field == "postStart" || field == "preStop" {
 					entry = `"lifecycle":{` + entry + `}`
 				}
-				config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"worker",` + entry + `}]}}}}`)
+				config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"worker","ports":[{"name":"health","containerPort":9000}],` + entry + `}]}}}}`)
 				deployments, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches))
 				if err != nil {
 					t.Fatal(err)
@@ -50,16 +48,16 @@ func TestOperatorPlacementProbeReferences(t *testing.T) {
 				}
 				switch protocol {
 				case "tcpSocket":
-					if probe.TCPSocket.Port.StrVal != worker.Ports[0].Name {
-						t.Fatalf("probe points to %q, but listener was renamed to %q", probe.TCPSocket.Port.StrVal, worker.Ports[0].Name)
+					if probe.TCPSocket.Port.StrVal != "health" {
+						t.Fatalf("explicit probe reference changed: %q", probe.TCPSocket.Port.StrVal)
 					}
 				case "httpGet":
-					if probe.HTTPGet.Port.StrVal != worker.Ports[1].Name {
-						t.Fatalf("HTTP action points to %q, not %q", probe.HTTPGet.Port.StrVal, worker.Ports[1].Name)
+					if probe.HTTPGet.Port.StrVal != "health" {
+						t.Fatalf("explicit HTTP reference changed: %q", probe.HTTPGet.Port.StrVal)
 					}
 				case "grpc":
-					if probe.GRPC.Port != worker.Ports[0].ContainerPort {
-						t.Fatalf("numeric gRPC probe hits %d, not its listener %d", probe.GRPC.Port, worker.Ports[0].ContainerPort)
+					if probe.GRPC.Port != 9000 {
+						t.Fatalf("explicit numeric probe changed: %d", probe.GRPC.Port)
 					}
 				}
 				if worker.RestartPolicy == nil || *worker.RestartPolicy != corev1.ContainerRestartPolicyAlways {
@@ -76,7 +74,7 @@ func TestOperatorPlacementRejectsUnresolvedProbes(t *testing.T) {
 		`"readinessProbe":{"httpGet":{"port":"missing"}}`,
 		`"livenessProbe":{"tcpSocket":{"port":"missing"}}`,
 		`"lifecycle":{"preStop":{"httpGet":{"port":"missing"}}}`,
-		`"startupProbe":{"grpc":{"port":8081}}`,
+		`"startupProbe":{"grpc":{"port":65536}}`,
 	} {
 		t.Run(fragment, func(t *testing.T) {
 			config, component := manifestPlacementConfig(t)
@@ -102,7 +100,7 @@ func TestOperatorPlacementProbeValidationAfterDataplanePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	worker := initial[0].Spec.Template.Spec.InitContainers[1]
-	for _, probe := range []string{`{"tcpSocket":{"port":"missing"}}`, `{"grpc":{"port":8080}}`} {
+	for _, probe := range []string{`{"tcpSocket":{"port":"missing"}}`, `{"grpc":{"port":65536}}`} {
 		registry := NewPatchRegistry(config.Patches)
 		registry["bad-probe"] = api.NamedPatch{Patch: runtime.RawExtension{Raw: []byte(fmt.Sprintf(
 			`{"spec":{"template":{"spec":{"initContainers":[{"name":%q,"startupProbe":%s}]}}}}`, worker.Name, probe))}}
@@ -129,20 +127,16 @@ func TestOperatorPlacementStandaloneProbeUnchanged(t *testing.T) {
 func TestOperatorPlacementCustomProbePorts(t *testing.T) {
 	config, component := manifestPlacementConfig(t)
 	config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[
-		{"name":"worker","readinessProbe":{"httpGet":{"port":8081}},"startupProbe":{"grpc":{"port":8082}}},
-		{"name":"agent","ports":[{"name":"health","containerPort":9090}],
-		 "livenessProbe":{"tcpSocket":{"port":"health"}},"startupProbe":{"grpc":{"port":9090}}}
+		{"name":"worker","ports":[{"name":"health","containerPort":9090}],
+		 "readinessProbe":{"httpGet":{"port":9090}},"livenessProbe":{"tcpSocket":{"port":"health"}},"startupProbe":{"grpc":{"port":9090}}}
 	]}}}}`)
 	deployments, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches))
 	if err != nil {
 		t.Fatal(err)
 	}
 	pod := deployments[0].Spec.Template.Spec
-	worker, agent := pod.InitContainers[0], pod.InitContainers[1]
-	if worker.ReadinessProbe.HTTPGet.Port.IntVal != 8083 || worker.StartupProbe.GRPC.Port != 8082 {
-		t.Fatal("local numeric defaults must follow allocation; already-effective ports must remain unchanged")
-	}
-	if agent.LivenessProbe.TCPSocket.Port.StrVal != "health" || agent.StartupProbe.GRPC.Port != 9090 {
+	worker := pod.InitContainers[0]
+	if worker.ReadinessProbe.HTTPGet.Port.IntVal != 9090 || worker.StartupProbe.GRPC.Port != 9090 || worker.LivenessProbe.TCPSocket.Port.StrVal != "health" {
 		t.Fatal("custom declared listener/probe ports must remain unchanged")
 	}
 }

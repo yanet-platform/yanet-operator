@@ -20,12 +20,13 @@ import (
 	"strings"
 	"testing"
 
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 )
 
-func TestConfigureListeners_NetlinkReservedTarget(t *testing.T) {
+func TestConfigureListeners_SidecarReservedTarget(t *testing.T) {
+	sidecar := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "worker", Image: helpers.ResolvedImage{Name: "worker"}}
+	target := BuildServices(ctxV2(), sidecar)[0].Ports[0].TargetPortName
 	for _, tt := range []struct {
 		name     string
 		kind     helpers.ComponentKind
@@ -34,11 +35,11 @@ func TestConfigureListeners_NetlinkReservedTarget(t *testing.T) {
 		portName string
 		wantErr  bool
 	}{
-		{name: "enabled sidecar", kind: helpers.KindDataplane, netlink: true, portName: NetlinkGRPCTargetPort, wantErr: true},
-		{name: "disabled sidecar", kind: helpers.KindDataplane, portName: NetlinkGRPCTargetPort, wantErr: true},
-		{name: "disabled sidecar and another native sidecar", kind: helpers.KindDataplane, init: true, portName: NetlinkGRPCTargetPort, wantErr: true},
+		{name: "enabled sidecar", kind: helpers.KindDataplane, netlink: true, portName: target, wantErr: true},
+		{name: "disabled sidecar", kind: helpers.KindDataplane, portName: target, wantErr: true},
+		{name: "disabled sidecar and another native sidecar", kind: helpers.KindDataplane, init: true, portName: target, wantErr: true},
 		{name: "unrelated port", kind: helpers.KindDataplane, portName: "custom"},
-		{name: "unrelated workload", kind: helpers.KindOperator, portName: NetlinkGRPCTargetPort},
+		{name: "unrelated workload", kind: helpers.KindOperator, portName: target},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			component := &helpers.ResolvedComponent{
@@ -46,12 +47,12 @@ func TestConfigureListeners_NetlinkReservedTarget(t *testing.T) {
 				Image:      helpers.ResolvedImage{Name: "dataplane"},
 				Containers: []helpers.ResolvedContainer{{Name: "operator", Image: helpers.ResolvedImage{Name: "operator"}}},
 			}
-			if tt.netlink {
-				component.NativeSidecars = []helpers.ResolvedContainer{{
-					Name: yanetv2alpha1.NetlinkDataplaneSidecarContainerName, Image: helpers.ResolvedImage{Name: "netlink"},
-				}}
+			if tt.kind == helpers.KindDataplane {
+				resolved := *sidecar
+				resolved.Enabled = tt.netlink
+				component.Sidecars = []*helpers.ResolvedComponent{&resolved}
 			}
-			deployments, err := BuildDeployments(ctxV2(), component)
+			deployments, err := RenderDeployments(ctxV2(), component, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -66,9 +67,9 @@ func TestConfigureListeners_NetlinkReservedTarget(t *testing.T) {
 			} else {
 				pod.Containers = append(pod.Containers, other)
 			}
-			err = ConfigureListeners(deployments[0], component, nil)
+			err = ConfigureListeners(deployments[0], component)
 			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), NetlinkGRPCTargetPort) || !strings.Contains(err.Error(), "other") {
+				if err == nil || !strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), "other") {
 					t.Fatalf("reserved target name must not be captured: %v", err)
 				}
 			} else if err != nil {

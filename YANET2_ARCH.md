@@ -23,7 +23,7 @@
 
 | Component | Deployment | IPC / network | Config |
 |---|---|---|---|
-| `dataplane` (`yanet-dataplane`) | One Deployment per node | Pod network by default, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet`; native sidecars share its network namespace | hostPath (`/etc/yanet2/dataplane.yaml`), as in v1 |
+| `dataplane` (`yanet-dataplane`) | One Deployment per node | Private Pod network, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet`; native sidecars share its network namespace | hostPath (`/etc/yanet2/dataplane.yaml`) |
 | `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` (for shmem) | hostPath, inline or URL |
 | `metrics-collector` | DaemonSet (out of yanet-operator scope in Phase 4) | gRPC to gateway service | — |
 
@@ -32,44 +32,42 @@
 | Component | Deployment | Wiring |
 |---|---|---|
 | `bird` (BIRD2) | Native sidecar in the dataplane Pod | hostPath config; owns `/run/bird`; shares dataplane network namespace |
-| `netconfig` | Generic operator placed in the dataplane Pod | bootstraps KNI/VLAN/lo/dummy; privileged for netlink and per-interface IPv6 sysctls; read-only `/etc/netconfig` and `/etc/netplan`; no RPC listener |
-| `neighbour-sidecar` | Generic operator placed in the dataplane Pod | observes kernel neighbours and publishes `SwapNeighbours` through outbound gateways; own configured gRPC `Ready/Watch`; read-only config, no interface-configuration privileges |
+| `netconfig` | Generic single-container sidecar in the dataplane Pod | bootstraps KNI/VLAN/lo/dummy; privileged for netlink and per-interface IPv6 sysctls; read-only `/etc/netconfig` and `/etc/netplan`; no RPC listener |
+| `neighbour-sidecar` | Generic single-container sidecar in the dataplane Pod | observes kernel neighbours and publishes `SwapNeighbours` through outbound gateways; own gRPC `Ready/Watch`; read-only config, no interface-configuration privileges |
 | `bird-adapter` (`yanet-bird-adapter`) | Standalone Deployment | shared `/run/bird` (reads BIRD socket); gRPC → gateway service and/or route-operator service |
 
-> BIRD uses its fixed optional slot below `spec.components.dataplane.sidecars`.
-> Netconfig and neighbour-sidecar use `spec.components.operators[]` with explicit
-> `listeners: []`, selected by `boxTypes[].operators` with `placement: dataplane`.
-> All three use restartable init containers (`restartPolicy: Always`), sharing
-> the private dataplane netns. Generic operators follow BIRD in lexicographic order.
+> All three use `spec.components.dataplane.sidecars[]`, an ordered atomic list of
+> `SidecarSpec` (`name`, `image`, `config`, `listeners`). Each entry creates exactly
+> one restartable init container (`restartPolicy: Always`). Box types select names
+> through `components.dataplane.sidecars`; startup and port slots follow the complete
+> palette order, including disabled/unselected entries. BIRD, neighbour-sidecar,
+> netconfig reserve respectively 8080/8081, 8082/8083 and 8084/8085.
 > During migration, stop the old operator and delete its standalone v2 BIRD
 > Deployments before enabling this sidecar. Both variants own the node-local
 > `/run/bird` control-socket directory and cannot run concurrently.
 
-BIRD is optional, but enabled `birdAdapter` and `announcer` workloads require the
-managed BIRD sidecar and dataplane to be enabled. Disabling BIRD through an
-installation override therefore requires explicitly disabling its consumers too.
-Whole-installation scale-to-zero is allowed; consumer enablement never cascades
-silently.
+BIRD is optional and has no name-based dependency checks in the controller.
+Declare its config, socket mounts, ports and permissions through scoped patches;
+declare socket mounts for its consumers separately.
 
 Netconfig must retry absent KNI asynchronously: dataplane creates KNI only after
 the native sidecars start. No blocking init/PostStart hook or runtime Kubernetes
 probes are configured. Announcer owns application readiness decisions through
 YANET gRPC readiness APIs; operator consumption of these APIs is deferred.
-Neighbour-sidecar does not register with gateway; its configured `Ready/Watch`
-listener (default `[::]:9903`) has no automatic Service or port allocation here.
+Neighbour-sidecar does not register with gateway. For a managed host config its
+bind is overridden to `[::]:8082`; `[grpc]` creates a Service on external port 8080,
+while `[]` leaves the bind/gateway env but suppresses the Service.
 It reports publication status, not FIB/forwarding readiness.
 
-The legacy combined `netlinkDataplaneSidecar` palette slot remains supported, but
-is not selected by the split-runtime profile. See the
+There are no fixed BIRD/netlink slots. See the
 [full example](deploy/examples/v2alpha1-yanetconfig-full.yaml) for separate images,
 config mounts, and the netconfig-specific security patch. Image release/pinning,
 host config generation, and a real Kubernetes forwarding smoke are rollout steps.
 
 ### 2.3. Operators and Agents
 
-The list comes from `spec.components.operators[]`. Standalone placement creates
-a separate Deployment; `placement: dataplane` composes restartable containers
-into the dataplane Pod. Service-backed operators receive a shared box-type
+The list comes from `spec.components.operators[]` and creates standalone
+Deployments. Dataplane roles use the separate sidecar list. Service-backed roles receive a shared box-type
 ClusterIP Service. Explicit `listeners: []` suppresses managed listeners and
 Services. Registering operators talk bidirectionally with gateway; the two
 network sidecars above do not register.
@@ -97,11 +95,11 @@ single-container is `containers: [{...}]`, multi-container is
 `containers: [{name: operator, ...}, {name: agent, hostIPC: true, ...}]`.
 The Pod-level `hostIPC` is set if **any** container in the list requests it.
 
-### 2.4. Announcer (planned, shown on the diagram)
+### 2.4. Announcer
 
-- Standalone Deployment.
+- Standalone Deployment declared as an ordinary `operators[name=announcer]`.
 - Watches host health and decides whether the node should be in service.
-- Primary channel: gRPC to `gateway`.
+- Readiness targets are direct application gRPC endpoints configured in `operators[]`.
 - Additionally needs the **bird unix socket** (shared volume `/run/bird`)
   in order to withdraw the announcement when controlplane fails.
 
@@ -124,20 +122,24 @@ Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`
 Services are unconditional for service-backed roles wired by a box type, even when an
 installation or component has zero replicas. Their selectors omit Yanet and node
 identity so installations of the same box type share the stable DNS names in a
-namespace. Named target ports let host-network Pods use target ports allocated
-from `spec.hostNetworkPortRange`, while Pod-network workloads use `8080/8081`.
+namespace. Named targets resolve standalone `8080/8081` or the sidecar's reserved
+pair, with stable external `8080/8081`. Sidecars use membership-label selectors.
 
-Netconfig and neighbour-sidecar declare `listeners: []` and receive no automatic
-Service. The reserved 8080/8081 block does not imply a listener is active.
-Legacy profiles selecting the combined netlink slot still receive
-`yanet-<boxType>-netlink-dataplane-sidecar` and its managed metrics endpoint.
+Every role defaults omitted listeners to `[grpc]`; metrics must explicitly select
+`[http]`. `listeners: []` disables Service exposure, not the slot or host-config env.
+Only the managed config volume after patches enables the HostPath overlay; inline
+ConfigMap/URL/no-config roles receive none. Runtime gateway env selects active
+physical `numa<N>` entries and preserves their TLS. See
+[the environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
 
 ## 4. Dependencies
 
 - **Kubernetes 1.33+** — required so EndpointSlice resolves named Service
   target ports exposed by restartable init-container sidecars.
 - Host requirements: hugepages, `hostIPC`, DPDK devices, and netplan input.
-  `hostNetwork` remains an explicit legacy option.
+  Final v2 `hostNetwork: true` and nonzero `hostPort` are unsupported.
+- Compatible runtime images and prepared host configs for named gateway overrides.
+  ACL runtime support is an external integration prerequisite.
 
 ## 5. Mermaid diagram
 

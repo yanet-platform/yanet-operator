@@ -11,7 +11,6 @@ import (
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
-	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,24 +27,20 @@ func colocatedConfigV2(t *testing.T) yanetv2alpha1.YanetConfigSpec {
 	if err := json.Unmarshal([]byte(`{
 		"components":{
 			"controlplane":{"image":{"name":"cp"}},
-			"dataplane":{"image":{"name":"dp"},"sidecars":{"netlinkDataplaneSidecar":{"image":{"name":"netlink"}}}},
-			"operators":[
-				{"name":"z-probe","containers":[{"name":"worker","image":{"name":"probe"},"config":{"inline":"probe"}}]},
-				{"name":"monalive","listeners":["http","grpc"],"containers":[
-					{"name":"worker","image":{"name":"monalive","tag":"v1"},"config":{"inline":"monitor"}},
-					{"name":"agent","image":{"name":"agent"},"hostIPC":true}
-				]}
-			]
+			"dataplane":{"image":{"name":"dp"},"sidecars":[
+				{"name":"neighbour","image":{"name":"netlink"}},
+				{"name":"monalive","listeners":["http","grpc"],"image":{"name":"monalive","tag":"v1"},"config":{"hostPath":"/etc/monitor"}},
+				{"name":"z-probe","image":{"name":"probe"},"config":{"inline":"probe"}}
+			]}
 		},
 		"patches":[{"name":"monitor-runtime","patch":{"spec":{"template":{"spec":{
-			"containers":[{"name":"worker","env":[
-				{"name":"CUSTOM_BIND","value":"[::]:$(YANET_KUBERNETES_GRPC_PORT)"},
-				{"name":"CUSTOM_ADVERTISE","value":"$(YANET_KUBERNETES_GRPC_ADVERTISE_ENDPOINT)"}
+			"containers":[{"name":"monalive","env":[
+				{"name":"CUSTOM","value":"retained"}
 			],"volumeMounts":[{"name":"extra","mountPath":"/extra"}]}],
 			"volumes":[{"name":"extra","emptyDir":{}}]
 		}}}}}],
-		"boxTypes":[{"name":"release","components":{"controlplane":{},"dataplane":{"sidecars":{"netlinkDataplaneSidecar":{}}}},
-			"operators":{"monalive":{"placement":"dataplane","patches":["monitor-runtime"]},"z-probe":{"placement":"dataplane"}}}]
+		"boxTypes":[{"name":"release","components":{"controlplane":{},"dataplane":{"sidecars":{
+			"neighbour":{},"monalive":{"patches":["monitor-runtime"]},"z-probe":{}}}}}]
 	}`), &config); err != nil {
 		t.Fatal(err)
 	}
@@ -59,9 +54,7 @@ func TestOperatorPlacementTransitionOldReplicaSet(t *testing.T) {
 			yanet := reviewYanetV2()
 			r, snapshot := makeReconcilerEnv(t, yanet, reviewNodeV2())
 			snapshot.Config = colocatedConfigV2(t)
-			slot := snapshot.Config.BoxTypes[0].Operators["monalive"]
-			slot.Placement = yanetv2alpha1.OperatorPlacementStandalone
-			snapshot.Config.BoxTypes[0].Operators["monalive"] = slot
+			moveMonitorRoleV2(&snapshot.Config, false)
 			if _, err := reviewReconcileV2(testContext, r, yanet); err != nil {
 				t.Fatal(err)
 			}
@@ -84,8 +77,7 @@ func TestOperatorPlacementTransitionOldReplicaSet(t *testing.T) {
 			if err := r.Delete(testContext, old); err != nil {
 				t.Fatal(err)
 			}
-			slot.Placement = yanetv2alpha1.OperatorPlacementDataplane
-			snapshot.Config.BoxTypes[0].Operators["monalive"] = slot
+			moveMonitorRoleV2(&snapshot.Config, true)
 			_, err := reviewReconcileV2(testContext, r, yanet)
 			if mode == "drained" {
 				if err != nil {
@@ -169,7 +161,7 @@ func TestOperatorPlacementColocation(t *testing.T) {
 		t.Fatalf("want only controlplane and dataplane Deployments, got %d", len(deployments.Items))
 	}
 	dataplane := transitionDeploymentV2(t, r, "dataplane")
-	if dataplane.Spec.Template.Spec.HostNetwork || len(dataplane.Spec.Template.Spec.InitContainers) != 4 {
+	if dataplane.Spec.Template.Spec.HostNetwork || len(dataplane.Spec.Template.Spec.InitContainers) != 3 {
 		t.Fatalf("wrong shared private netns topology: %+v", dataplane.Spec.Template.Spec)
 	}
 	monitor := placementServiceV2(t, r, "monalive")
@@ -195,13 +187,9 @@ func TestOperatorPlacementColocation(t *testing.T) {
 	for _, variable := range worker.Env {
 		variables[variable.Name] = variable.Value
 	}
-	if worker.Env[0].Name != manifests.EnvKubernetesGRPCPort || variables[manifests.EnvKubernetesHTTPPort] != "8083" ||
-		variables["CUSTOM_BIND"] != "[::]:$(YANET_KUBERNETES_GRPC_PORT)" ||
-		variables["YANET_KUBERNETES_GRPC_ADVERTISE_ENDPOINT"] != "yanet-release-monalive.yanet.svc.cluster.local:8080" {
+	if variables["YANET_SERVER_ENDPOINT"] != "[::]:8082" || variables["CUSTOM"] != "retained" ||
+		variables["YANET_SERVER_ADVERTISE_ENDPOINT"] != "yanet-release-monalive.yanet.svc.cluster.local:8080" {
 		t.Fatalf("wrong bind/advertise contract: %+v", worker.Env)
-	}
-	if _, forced := variables["YANET_SERVER_ENDPOINT"]; forced {
-		t.Fatal("arbitrary operators must not receive xcfg-specific bind variables")
 	}
 	volumeNames := map[string]bool{}
 	for _, volume := range dataplane.Spec.Template.Spec.Volumes {
@@ -229,8 +217,8 @@ func TestOperatorPlacementColocation(t *testing.T) {
 	if err := r.Get(testContext, client.ObjectKeyFromObject(yanet), yanet); err != nil {
 		t.Fatal(err)
 	}
-	yanet.Spec.Components = &yanetv2alpha1.YanetComponentsOverride{Operators: map[string]yanetv2alpha1.YanetComponentOverride{
-		"monalive": {Enabled: helpers.PtrFalse()},
+	yanet.Spec.Components = &yanetv2alpha1.YanetComponentsOverride{Dataplane: &yanetv2alpha1.YanetDataplaneOverride{
+		Sidecars: map[string]yanetv2alpha1.YanetContainerOverride{"monalive": {Enabled: helpers.PtrFalse()}},
 	}}
 	if err := r.Update(testContext, yanet); err != nil {
 		t.Fatal(err)
@@ -244,6 +232,14 @@ func TestOperatorPlacementColocation(t *testing.T) {
 	}
 	snapshot.Config.Patches = append(snapshot.Config.Patches, yanetv2alpha1.NamedPatch{Name: "resurrect", Patch: runtime.RawExtension{Raw: raw}})
 	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"resurrect"}
+	if _, err := reviewReconcileV2(testContext, r, yanet); err == nil {
+		t.Fatal("a patch must not resurrect a disabled sidecar")
+	}
+	unchanged := transitionDeploymentV2(t, r, "dataplane")
+	if !reflect.DeepEqual(dataplane.Spec, unchanged.Spec) {
+		t.Fatal("invalid composition partially updated the workload")
+	}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = nil
 	if _, err := reviewReconcileV2(testContext, r, yanet); err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +261,7 @@ func TestOperatorPlacementRejectsUnsafePatches(t *testing.T) {
 		`{"spec":{"template":{"spec":{"hostNetwork":true}}}}`,
 		`{"spec":{"template":{"spec":{"nodeSelector":{"pool":"other"}}}}}`,
 		`{"metadata":{"annotations":{"unexpected":"value"}}}`,
-		`{"spec":{"template":{"spec":{"containers":[{"name":"worker","$patch":"delete"}]}}}}`,
+		`{"spec":{"template":{"spec":{"containers":[{"name":"monalive","$patch":"delete"}]}}}}`,
 		`{"spec":{"template":{"spec":{"volumes":[{"name":"bad","emptyDir":{}},{"name":"bad","emptyDir":{}}]}}}}`,
 	} {
 		t.Run(fragment, func(t *testing.T) {
@@ -288,8 +284,8 @@ func TestOperatorPlacementRejectsHostNetwork(t *testing.T) {
 	yanet := reviewYanetV2()
 	r, snapshot := makeReconcilerEnv(t, yanet, reviewNodeV2())
 	snapshot.Config = colocatedConfigV2(t)
-	snapshot.Config.HostNetworkPortRange = &yanetv2alpha1.HostNetworkPortRange{Start: 20000, End: 20100}
-	snapshot.Config.Components.Dataplane.HostNetwork = helpers.PtrTrue()
+	snapshot.Config.Patches = append(snapshot.Config.Patches, yanetv2alpha1.NamedPatch{Name: "host-network", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"hostNetwork":true}}}}`)}})
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"host-network"}
 	if _, err := reviewReconcileV2(context.Background(), r, yanet); err == nil || !strings.Contains(err.Error(), "private") {
 		t.Fatalf("colocation in hostNetwork must fail clearly: %v", err)
 	}
@@ -303,12 +299,7 @@ func TestOperatorPlacementTransitionRequiresDrain(t *testing.T) {
 			r, snapshot := makeReconcilerEnv(t, yanet, reviewNodeV2())
 			snapshot.Config = colocatedConfigV2(t)
 			setPlacement := func(colocated bool) {
-				slot := snapshot.Config.BoxTypes[0].Operators["monalive"]
-				slot.Placement = yanetv2alpha1.OperatorPlacementStandalone
-				if colocated {
-					slot.Placement = yanetv2alpha1.OperatorPlacementDataplane
-				}
-				snapshot.Config.BoxTypes[0].Operators["monalive"] = slot
+				moveMonitorRoleV2(&snapshot.Config, colocated)
 			}
 			setPlacement(reverse)
 			if _, err := reviewReconcileV2(testContext, r, yanet); err != nil {

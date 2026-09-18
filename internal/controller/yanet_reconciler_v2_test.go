@@ -24,6 +24,7 @@ import (
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -253,11 +254,11 @@ func TestReconcileV2_RevalidatesComponentOverrides(t *testing.T) {
 			BoxType:  "release",
 			AutoSync: &autoSync,
 			Components: &yanetv2alpha1.YanetComponentsOverride{
-				Dataplane: &yanetv2alpha1.YanetComponentOverride{
+				Dataplane: &yanetv2alpha1.YanetDataplaneOverride{YanetComponentOverride: yanetv2alpha1.YanetComponentOverride{
 					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
 						yanetv2alpha1.DataplaneContainerName: {Enabled: &disabled},
 					},
-				},
+				}},
 			},
 		},
 	}
@@ -335,23 +336,30 @@ func TestReconcileV2_CrossListContainerNameCollisionFailsBeforeApply(t *testing.
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"role": "yanet"}}}
 	r, snapshot := makeReconcilerEnv(t, yanet, node)
 	snapshot.Config = minimalConfigV2()
-	snapshot.Config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
-		Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+	snapshot.Config.Components.Dataplane.Sidecars = []yanetv2alpha1.SidecarSpec{
+		{Name: "bird",
 			Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
 		},
 	}
+	snapshot.Config.BoxTypes[0].Components.Dataplane.Sidecars = map[string]yanetv2alpha1.BoxDataplaneSidecar{"bird": {}}
+	component, resolveErr := helpers.ResolveBoxComponent(&snapshot.Config, &yanet.Spec, helpers.KindDataplane, "")
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	rendered, renderErr := manifests.RenderDeployments(manifests.BuildContextV2{YanetName: "test"}, component, nil)
+	if renderErr != nil {
+		t.Fatal(renderErr)
+	}
+	containerName := rendered[0].Spec.Template.Spec.InitContainers[0].Name
 	snapshot.Config.Patches = []yanetv2alpha1.NamedPatch{{
 		Name: "regular-bird", Patch: runtime.RawExtension{Raw: []byte(
-			`{"spec":{"template":{"spec":{"containers":[{"name":"bird","image":"bird:v1"}]}}}}`,
+			`{"spec":{"template":{"spec":{"containers":[{"name":"` + containerName + `","image":"bird:v1"}]}}}}`,
 		)},
 	}}
-	snapshot.Config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
-		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
-	}
 	snapshot.Config.BoxTypes[0].Components.Dataplane.Patches = []string{"regular-bird"}
 
 	_, err := r.reconcileYanetV2(context.Background(), yanet)
-	if err == nil || !strings.Contains(err.Error(), "bird") || !strings.Contains(err.Error(), "init") {
+	if err == nil || !strings.Contains(err.Error(), "declare sidecars") {
 		t.Fatalf("expected cross-list container name collision, got %v", err)
 	}
 	deployments := &appsv1.DeploymentList{}
@@ -363,7 +371,7 @@ func TestReconcileV2_CrossListContainerNameCollisionFailsBeforeApply(t *testing.
 	}
 }
 
-func TestReconcileV2_HostNetworkListenerWithoutRangeFailsBeforeApply(t *testing.T) {
+func TestReconcileV2_StandaloneHostNetworkFailsBeforeApply(t *testing.T) {
 	autoSync := true
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{
@@ -390,8 +398,8 @@ func TestReconcileV2_HostNetworkListenerWithoutRangeFailsBeforeApply(t *testing.
 	}
 
 	_, err := r.reconcileYanetV2(context.Background(), yanet)
-	if err == nil || !strings.Contains(err.Error(), "hostNetworkPortRange is not configured") {
-		t.Fatalf("expected missing host-network range error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "hostNetwork is unsupported") {
+		t.Fatalf("expected private-network rejection, got %v", err)
 	}
 	deployments := &appsv1.DeploymentList{}
 	if err := r.Client.List(context.Background(), deployments, client.InNamespace("yanet")); err != nil {

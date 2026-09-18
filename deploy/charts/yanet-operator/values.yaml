@@ -104,31 +104,27 @@ yanetconfigV2: {}
 #  spec:
 #    stop: false
 #    updateWindow: 60
-#    hostNetworkPortRange: {start: 20000, end: 20100}
 #    images:
 #      registry: cr.yandex/yanet
 #    components:
 #      controlplane:
 #        image: {name: controlplane, tag: v2.1}
+#        numa: 2
+#        config: {hostPath: /etc/yanet2}
 #      dataplane:
 #        image: {name: dataplane, tag: v2.1}
 #        hugepages: {size: 1Gi, count: 8}
 #        sidecars:
-#          bird:
+#          - name: bird
 #            image: {name: bird, tag: "2.15"}
-#          netlinkDataplaneSidecar:
-#            image: {name: netlink-dataplane-sidecar, tag: v2.1}
+#            listeners: []
+#          - name: neighbour-sidecar
+#            image: {name: neighbour-sidecar, tag: example}
+#            config: {hostPath: /etc/yanet2}
+#          - name: netconfig
+#            image: {name: netconfig, tag: example}
+#            listeners: []
 #    patches:
-#      - name: controlplane-listener
-#        patch:
-#          spec:
-#            template:
-#              spec:
-#                containers:
-#                  - name: controlplane
-#                    env:
-#                      - name: YANET_GATEWAY_ENDPOINT
-#                        value: '[::]:$(YANET_KUBERNETES_GRPC_PORT)'
 #      - name: telegraf
 #        patch:
 #          spec:
@@ -139,9 +135,10 @@ yanetconfigV2: {}
 #    boxTypes:
 #      - name: release
 #        components:
-#          controlplane: {patches: [controlplane-listener, telegraf]}
+#          controlplane: {patches: [telegraf]}
 #          dataplane:
 #            sidecars:
 #              bird: {}
-#              netlinkDataplaneSidecar: {}
+#              neighbour-sidecar: {}
+#              netconfig: {}
 #            patches: [telegraf]

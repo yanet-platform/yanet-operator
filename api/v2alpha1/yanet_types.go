@@ -29,7 +29,7 @@ import (
 // No patches and no inline component specs are accepted here. The only
 // per-installation customisation knobs are typed point-overrides in
 // components.<name>.{enabled,image}. Dataplane native sidecars can also be
-// disabled through their entries in components.dataplane.containers.
+// disabled through their entries in components.dataplane.sidecars.
 type YanetSpec struct {
 	// BoxType selects a boxType definition from
 	// YanetConfigV2.spec.boxTypes[]. Required.
@@ -80,11 +80,9 @@ type YanetComponentsOverride struct {
 	// +optional
 	Controlplane *YanetControlplaneOverride `json:"controlplane,omitempty"`
 	// +optional
-	Dataplane *YanetComponentOverride `json:"dataplane,omitempty"`
+	Dataplane *YanetDataplaneOverride `json:"dataplane,omitempty"`
 	// +optional
 	BirdAdapter *YanetComponentOverride `json:"birdAdapter,omitempty"`
-	// +optional
-	Announcer *YanetComponentOverride `json:"announcer,omitempty"`
 	// Operators keyed by OperatorSpec.Name.
 	// +optional
 	Operators map[string]YanetComponentOverride `json:"operators,omitempty"`
@@ -101,8 +99,7 @@ type YanetComponentOverride struct {
 
 	// Containers overrides image.name and image.tag per container, keyed by
 	// container name. Single-container fixed components use their rendered
-	// container name. The dataplane accepts "dataplane", "bird" and
-	// "netlink-dataplane-sidecar" for its fixed Pod containers. Operators use
+	// container name. The dataplane accepts only "dataplane". Operators use
 	// YanetConfigV2.spec.components.operators[].containers[].name.
 	// Registry/prefix come from the palette image, falling back to
 	// YanetConfigV2.spec.images.
@@ -110,11 +107,20 @@ type YanetComponentOverride struct {
 	Containers map[string]YanetContainerOverride `json:"containers,omitempty"`
 }
 
+// YanetDataplaneOverride separates the primary container from named sidecars.
+type YanetDataplaneOverride struct {
+	YanetComponentOverride `json:",inline"`
+
+	// Sidecars overrides enabled and image name/tag for each selected sidecar.
+	// +optional
+	Sidecars map[string]YanetContainerOverride `json:"sidecars,omitempty"`
+}
+
 // YanetContainerOverride is the per-installation image override for one
 // rendered container.
 type YanetContainerOverride struct {
-	// Enabled may only be set for the BIRD and netlink native sidecars of the
-	// dataplane Pod. The dataplane field itself uses the component-level Enabled
+	// Enabled may only be set under the dataplane sidecars map.
+	// The dataplane field itself uses the component-level Enabled
 	// switch because a Pod cannot run without its primary container.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`

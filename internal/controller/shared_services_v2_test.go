@@ -47,13 +47,13 @@ func TestReconcileSharedServicesV2AggregatesInstallationsAndPrunesOwnedOrphans(t
 	}
 	numa := int32(3)
 	config.Spec.Components.Controlplane.Numa = &numa
-	config.Spec.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
-		NetlinkDataplaneSidecar: &yanetv2alpha1.DataplaneSidecarSpec{
+	config.Spec.Components.Dataplane.Sidecars = []yanetv2alpha1.SidecarSpec{
+		{Name: "netlink-dataplane-sidecar",
 			Image: yanetv2alpha1.ImageRef{Name: "netlink-dataplane-sidecar", Tag: "v1"},
 		},
 	}
-	config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
-		NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{},
+	config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]yanetv2alpha1.BoxDataplaneSidecar{
+		"netlink-dataplane-sidecar": {},
 	}
 	config.Spec.Components.Operators = []yanetv2alpha1.OperatorSpec{{
 		Name: "route",

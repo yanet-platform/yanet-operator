@@ -8,7 +8,6 @@ metadata:
 spec:
   stop: false
   updateWindow: 60
-  hostNetworkPortRange: {start: 20000, end: 20100}
   images:
     registry: docker.io/test
   components:
@@ -17,14 +16,18 @@ spec:
     dataplane:
       image: {name: dataplane, tag: test}
       sidecars:
-        bird:
+        - name: bird
           image: {name: bird, tag: test}
-        netlinkDataplaneSidecar:
-          image: {name: netlink-dataplane-sidecar, tag: test}
+          listeners: []
+        - name: neighbour-sidecar
+          image: {name: neighbour-sidecar, tag: test}
     birdAdapter:
       image: {name: bird-adapter, tag: test}
-    announcer:
-      image: {name: announcer, tag: test}
+    operators:
+      - name: announcer
+        containers:
+          - name: announcer
+            image: {name: announcer, tag: test}
   patches:
     - name: telegraf
       patch:
@@ -48,7 +51,8 @@ spec:
         dataplane:
           sidecars:
             bird: {}
-            netlinkDataplaneSidecar: {}
+            neighbour-sidecar: {}
           patches: [telegraf, checkpointer]
+      operators:
         announcer:
           patches: [checkpointer]

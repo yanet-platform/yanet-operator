@@ -630,9 +630,9 @@ func TestReconcileV2_RemovesSidecarDespiteStaleOverride(t *testing.T) {
 			NodeSelector: map[string]string{"role": "yanet"},
 			AutoSync:     &autoSync,
 			Components: &yanetv2alpha1.YanetComponentsOverride{
-				Dataplane: &yanetv2alpha1.YanetComponentOverride{
-					Containers: map[string]yanetv2alpha1.YanetContainerOverride{
-						yanetv2alpha1.BirdSidecarContainerName: {Tag: "override"},
+				Dataplane: &yanetv2alpha1.YanetDataplaneOverride{
+					Sidecars: map[string]yanetv2alpha1.YanetContainerOverride{
+						"bird": {Tag: "override"},
 					},
 				},
 			},
@@ -643,13 +643,13 @@ func TestReconcileV2_RemovesSidecarDespiteStaleOverride(t *testing.T) {
 	}}
 	r, snapshot := makeReconcilerEnv(t, yanet, node)
 	config := minimalConfigV2()
-	config.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
-		Bird: &yanetv2alpha1.DataplaneSidecarSpec{
+	config.Components.Dataplane.Sidecars = []yanetv2alpha1.SidecarSpec{
+		{Name: "bird",
 			Image: yanetv2alpha1.ImageRef{Name: "bird", Tag: "v1"},
 		},
 	}
-	config.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
-		Bird: &yanetv2alpha1.BoxDataplaneSidecar{},
+	config.BoxTypes[0].Components.Dataplane.Sidecars = map[string]yanetv2alpha1.BoxDataplaneSidecar{
+		"bird": {},
 	}
 	snapshot.Config = config
 	reconcileTwice(t, r, yanet)
@@ -670,7 +670,7 @@ func TestReconcileV2_RemovesSidecarDespiteStaleOverride(t *testing.T) {
 	}
 	hasBird := func(deployment *appsv1.Deployment) bool {
 		for i := range deployment.Spec.Template.Spec.InitContainers {
-			if deployment.Spec.Template.Spec.InitContainers[i].Name == yanetv2alpha1.BirdSidecarContainerName {
+			if deployment.Spec.Template.Spec.InitContainers[i].Image == "bird:override" {
 				return true
 			}
 		}

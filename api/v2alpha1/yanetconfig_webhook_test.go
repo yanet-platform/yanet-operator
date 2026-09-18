@@ -143,47 +143,19 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 
 func TestYanetConfigWebhook_DataplaneSidecarConfigSource(t *testing.T) {
 	cfg := validConfig()
-	cfg.Spec.Components.Dataplane.Sidecars = &DataplaneSidecarsSpec{
-		Bird: &DataplaneSidecarSpec{
+	cfg.Spec.Components.Dataplane.Sidecars = []SidecarSpec{
+		{
+			Name:   "bird",
 			Image:  ImageRef{Name: "bird"},
 			Config: &ConfigSource{HostPath: "/etc/bird", Inline: "invalid"},
 		},
 	}
-	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
-		Bird: &BoxDataplaneSidecar{},
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]BoxDataplaneSidecar{
+		"bird": {},
 	}
 	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "spec.components.dataplane.sidecars.bird.config") {
+	if err == nil || !strings.Contains(err.Error(), "spec.components.dataplane.sidecars[0:bird].config") {
 		t.Fatalf("invalid BIRD sidecar config source must be rejected, got %v", err)
-	}
-}
-
-func TestYanetConfigWebhook_HostNetworkPortRange(t *testing.T) {
-	tests := []struct {
-		name    string
-		value   *HostNetworkPortRange
-		wantErr string
-	}{
-		{name: "omitted"},
-		{name: "single port", value: &HostNetworkPortRange{Start: 20000, End: 20000}},
-		{name: "range", value: &HostNetworkPortRange{Start: 20000, End: 20100}},
-		{name: "zero start", value: &HostNetworkPortRange{Start: 0, End: 20100}, wantErr: "start"},
-		{name: "end too large", value: &HostNetworkPortRange{Start: 20000, End: 65536}, wantErr: "end"},
-		{name: "reversed", value: &HostNetworkPortRange{Start: 20100, End: 20000}, wantErr: "must not exceed"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.Spec.HostNetworkPortRange = tt.value
-			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
-			if tt.wantErr == "" && err != nil {
-				t.Fatalf("valid host-network range rejected: %v", err)
-			}
-			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
-				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
-			}
-		})
 	}
 }
 
@@ -214,10 +186,7 @@ func TestYanetConfigWebhook_ReservedOperatorName(t *testing.T) {
 	for _, name := range []string{
 		"controlplane",
 		"dataplane",
-		"bird",
 		"bird-adapter",
-		"netlink-dataplane-sidecar",
-		"announcer",
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
@@ -304,11 +273,11 @@ func TestYanetConfigWebhook_UnknownPatchRef(t *testing.T) {
 
 func TestYanetConfigWebhook_UndeclaredDataplaneSidecar(t *testing.T) {
 	cfg := validConfig()
-	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
-		NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]BoxDataplaneSidecar{
+		"discovery": {},
 	}
 	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "netlinkDataplaneSidecar") {
+	if err == nil || !strings.Contains(err.Error(), "discovery") {
 		t.Fatalf("undeclared dataplane sidecar must be rejected, got %v", err)
 	}
 }
@@ -334,11 +303,6 @@ func TestYanetConfigWebhook_OptionalComponentRequiresPaletteDeclaration(t *testi
 			wire: func(components *BoxComponents) { components.BirdAdapter = &BoxComponent{} },
 			want: "birdAdapter",
 		},
-		{
-			name: "announcer",
-			wire: func(components *BoxComponents) { components.Announcer = &BoxComponent{} },
-			want: "announcer",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -354,14 +318,12 @@ func TestYanetConfigWebhook_OptionalComponentRequiresPaletteDeclaration(t *testi
 
 func TestYanetConfigWebhook_ComponentImageNameRequired(t *testing.T) {
 	cfg := validConfig()
-	cfg.Spec.Components.Dataplane.Sidecars = &DataplaneSidecarsSpec{
-		NetlinkDataplaneSidecar: &DataplaneSidecarSpec{},
-	}
-	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &BoxDataplaneSidecars{
-		NetlinkDataplaneSidecar: &BoxDataplaneSidecar{},
+	cfg.Spec.Components.Dataplane.Sidecars = []SidecarSpec{{Name: "discovery"}}
+	cfg.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]BoxDataplaneSidecar{
+		"discovery": {},
 	}
 	_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
-	if err == nil || !strings.Contains(err.Error(), "netlinkDataplaneSidecar.image.name is required") {
+	if err == nil || !strings.Contains(err.Error(), "sidecars[0:discovery].image.name is required") {
 		t.Fatalf("empty sidecar image name must be rejected, got %v", err)
 	}
 }

@@ -114,13 +114,6 @@ for f in "$INVALID_DIR"/*.yaml; do
         kubectl delete -f "$f" --ignore-not-found >/dev/null 2>&1 || true
         fail "invalid CR $name was unexpectedly accepted: $out"
     fi
-    # CEL rejects reversed ranges before the admission webhook is called.
-    if [[ "$name" == "04-yanetconfig-v2-invalid-port.yaml" &&
-          "$out" == *"spec.hostNetworkPortRange:"* &&
-          "$out" == *"start must not exceed end"* ]]; then
-        green "  ok rejected by CRD range validation: $name"
-        continue
-    fi
     if ! grep -qiE 'denied the request|admission webhook|validation failed' <<<"$out"; then
         fail "invalid CR $name was rejected, but not by the webhook: $out"
     fi

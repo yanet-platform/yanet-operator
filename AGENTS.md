@@ -336,9 +336,9 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 ### v2alpha1 — three-tier model
 1. **`YanetConfig.spec.components`** — palette of available components:
-   four fixed workload slots (`controlplane`, `dataplane`, `birdAdapter`,
-   `announcer`), fixed BIRD/netlink native-sidecar slots below dataplane, and a
-   dynamic `operators[]` array.
+   `controlplane`, `dataplane`, optional `birdAdapter`, ordered atomic
+   `dataplane.sidecars[]` (one `SidecarSpec` per container), and standalone
+   `operators[].containers[]`. Announcer is an ordinary operator.
 2. **`YanetConfig.spec.patches []NamedPatch`** — strategic-merge fragments of
    `appsv1.Deployment` stored as `runtime.RawExtension` (validated via dry-run
    `strategicpatch.StrategicMergePatch(skeleton, patch, appsv1.Deployment{})`
@@ -348,8 +348,9 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 `Yanet` CRs reference a `boxType` by name; per-installation overrides are
 restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-plus workload `enabled`, dataplane native-sidecar `enabled`, and controlplane
-`disabledNuma`. The container key must match the rendered container name;
+plus workload `enabled` and controlplane `disabledNuma`. Sidecars use separate
+`dataplane.sidecars.<name>` image/enablement overrides. The container key for
+standalone workloads must match the rendered container name;
 operators use the declared `OperatorContainer.name`. No inline patches in
 `Yanet`.
 
@@ -373,10 +374,14 @@ and fixed `grpc:8080` / `http:8081` ports.
 ### Operator Services
 Each operator wired by a box type gets one shared `ClusterIP` Service named
 `yanet-<boxType>-<operator>`, with `internalTrafficPolicy=Local` so in-node
-callers reach the local pod. Named target ports resolve to `8080/8081` in a Pod
-network namespace or deterministic ports from `hostNetworkPortRange` after a
-patch enables host networking. The fixed netlink dataplane sidecar uses the same
-model under `yanet-<boxType>-netlink-dataplane-sidecar`; BIRD has no Service.
+callers reach the local pod. All v2 workloads use private networking; final
+`hostNetwork: true` and nonzero `hostPort` are rejected. Sidecar index `i` in the
+complete palette reserves `8080+2*i` / `8081+2*i` before enablement/selection.
+Standalone Pods bind `8080/8081`; Service ports always stay `8080/8081`.
+Omitted listeners default to grpc; HTTP-only requires `[http]`. `[]` suppresses
+the Service, not the slot. After patches, only a managed HostPath config enables
+automatic runtime bind, Service advertise and named NUMA gateway env. ConfigMap
+content is opaque. Never add address/port validation of application config data.
 
 ### Webhook pattern (controller-runtime ≥ 0.23)
 Use the generic typed validator:
@@ -407,12 +412,13 @@ validator struct.
 - ✅ AutoDiscovery without retry / without caching (not priority)
 
 ### To be implemented (v2 deferred)
-- [ ] `updateWindow` global throttling on the v2 path
-- [ ] Formal `metav1.Condition` entries in `Yanet.Status` (currently only `Sync` buckets)
+- [ ] Observed/applied palette revision tracking
 - [ ] Init-container generation for `ConfigSource.URL` (today: emptyDir + patch)
 - [ ] JSON6902 (`jsonPatch`) — out of scope, only strategic merge is supported
 
 ### Done in v2 (was open in v1 era)
+- Global `updateWindow` throttling, conditions and observed generation.
+- Role migration drain guards and shared-Service selector cutover guards.
 - Finalizer cleanup waits for foreground Deployment deletion before releasing
   the node claim; the global stop switch pauses cleanup too.
 - ✅ Validation webhooks (`vyanet-v2.kb.io`, `vyanetconfig-v2.kb.io`)

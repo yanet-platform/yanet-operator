@@ -374,13 +374,13 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 			}
 			config.Spec.Components.Controlplane.Numa = tt.numa
 			config.Spec.Components.Controlplane.DisabledNuma = []int32{0}
-			config.Spec.Components.Dataplane.Sidecars = &yanetv2alpha1.DataplaneSidecarsSpec{
-				NetlinkDataplaneSidecar: &yanetv2alpha1.DataplaneSidecarSpec{
+			config.Spec.Components.Dataplane.Sidecars = []yanetv2alpha1.SidecarSpec{
+				{Name: "netlink-dataplane-sidecar",
 					Image: yanetv2alpha1.ImageRef{Name: "netlink", Tag: "v1"},
 				},
 			}
-			config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = &yanetv2alpha1.BoxDataplaneSidecars{
-				NetlinkDataplaneSidecar: &yanetv2alpha1.BoxDataplaneSidecar{Enabled: &tt.boxEnabled},
+			config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]yanetv2alpha1.BoxDataplaneSidecar{
+				"netlink-dataplane-sidecar": {Enabled: &tt.boxEnabled},
 			}
 			enabled := true
 			installation := &yanetv2alpha1.YanetV2{
@@ -389,9 +389,9 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 					BoxType: "release",
 					Components: &yanetv2alpha1.YanetComponentsOverride{
 						Controlplane: &yanetv2alpha1.YanetControlplaneOverride{DisabledNuma: []int32{1}},
-						Dataplane: &yanetv2alpha1.YanetComponentOverride{
-							Containers: map[string]yanetv2alpha1.YanetContainerOverride{
-								yanetv2alpha1.NetlinkDataplaneSidecarContainerName: {Enabled: &enabled},
+						Dataplane: &yanetv2alpha1.YanetDataplaneOverride{
+							Sidecars: map[string]yanetv2alpha1.YanetContainerOverride{
+								"netlink-dataplane-sidecar": {Enabled: &enabled},
 							},
 						},
 					},
@@ -427,7 +427,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 				t.Fatalf("get installation: %v", err)
 			}
 			disabled := false
-			installation.Spec.Components.Dataplane.Containers[yanetv2alpha1.NetlinkDataplaneSidecarContainerName] =
+			installation.Spec.Components.Dataplane.Sidecars["netlink-dataplane-sidecar"] =
 				yanetv2alpha1.YanetContainerOverride{Enabled: &disabled}
 			if err := cl.Update(testContext, installation); err != nil {
 				t.Fatalf("disable last netlink sidecar: %v", err)
@@ -438,7 +438,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 				t.Fatal("disabling the last sidecar must not replace or change the shared Service")
 			}
 			component, err := helpers.ResolveBoxComponent(&config.Spec, &installation.Spec, helpers.KindDataplane, "")
-			if err != nil || component == nil || len(component.NativeSidecars) != 0 {
+			if err != nil || component == nil || len(component.Sidecars) != 1 || component.Sidecars[0].Enabled {
 				t.Fatalf("Service planning must not enable workload sidecars: component=%+v err=%v", component, err)
 			}
 			controlplane, err := helpers.ResolveBoxComponent(&config.Spec, &installation.Spec, helpers.KindControlplane, "")
@@ -470,7 +470,7 @@ func TestYanetConfigReconcileV2KeepsDeclaredNetlinkServiceWhenDisabled(t *testin
 			if err := cl.Get(testContext, client.ObjectKeyFromObject(config), config); err != nil {
 				t.Fatalf("get config: %v", err)
 			}
-			config.Spec.BoxTypes[0].Components.Dataplane.Sidecars.NetlinkDataplaneSidecar = nil
+			delete(config.Spec.BoxTypes[0].Components.Dataplane.Sidecars, "netlink-dataplane-sidecar")
 			if err := cl.Update(testContext, config); err != nil {
 				t.Fatalf("remove netlink wiring: %v", err)
 			}

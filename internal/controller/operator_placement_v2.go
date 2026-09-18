@@ -13,6 +13,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+type renderedWorkloadV2 struct {
+	deployment *appsv1.Deployment
+	component  *helpers.ResolvedComponent
+}
+
+func deploymentReplicasAreZero(deployment *appsv1.Deployment) bool {
+	return deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0
+}
+
 // validateOperatorPlacementTransitionV2 refuses cross-workload migrations until
 // the previous producer cannot create Pods and every old Pod has terminated.
 // Recreate serializes only one Deployment, not a standalone-to-sidecar move.
@@ -34,7 +43,7 @@ func (r *YanetV2Reconciler) validateOperatorPlacementTransitionV2(
 			if workload.component.Kind == helpers.KindOperator {
 				desired = append(desired, role{name: workload.component.Name, node: node})
 			}
-			for _, operator := range workload.component.ColocatedOperators {
+			for _, operator := range workload.component.Sidecars {
 				if operator.Enabled {
 					desired = append(desired, role{name: operator.Name, colocated: true, node: node})
 				}

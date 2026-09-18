@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"strings"
 
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -187,7 +186,7 @@ func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
 	pod.InitContainers = restored
 }
 
-// ValidatePodContainerNames rejects duplicate names and fixed dataplane sidecars
+// ValidatePodContainerNames rejects duplicate names and managed dataplane sidecars
 // placed outside initContainers, even when their native-sidecar slot is disabled.
 func ValidatePodContainerNames(deployment *appsv1.Deployment) error {
 	if deployment == nil {
@@ -220,13 +219,8 @@ func ValidatePodContainerNames(deployment *appsv1.Deployment) error {
 	return check(deployment.Spec.Template.Spec.InitContainers, "init")
 }
 
-func isFixedNativeSidecar(name string) bool {
-	return name == yanetv2alpha1.BirdSidecarContainerName ||
-		name == yanetv2alpha1.NetlinkDataplaneSidecarContainerName
-}
-
 func isManagedNativeContainer(name string) bool {
-	return isFixedNativeSidecar(name) || strings.HasPrefix(name, operatorContainerPrefix)
+	return strings.HasPrefix(name, operatorContainerPrefix)
 }
 
 func reservedLabels(labels map[string]string) map[string]string {

@@ -19,16 +19,18 @@ func TestOperatorListenersContracts(t *testing.T) {
 		want      []int32
 	}{
 		{name: "monalive", want: []int32{8080}},
-		{name: "metrics", want: []int32{8081}},
+		{name: "metrics", want: []int32{8080}},
+		{name: "http-only", listeners: []string{"http"}, want: []int32{8081}},
 		{name: "metrics", listeners: []string{"grpc", "http"}, want: []int32{8080, 8081}},
 		{name: "client", listeners: []string{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for _, colocated := range []bool{false, true} {
 				op := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: tt.name, Enabled: true,
+					Image:         helpers.ResolvedImage{Name: "test"},
 					ListenerNames: tt.listeners, Containers: []helpers.ResolvedContainer{{Name: "worker", Image: helpers.ResolvedImage{Name: "test"}}}}
 				if colocated {
-					op.Placement = api.OperatorPlacementDataplane
+					op.Kind = helpers.KindSidecar
 					op.PortIndex = 1
 				}
 				context := BuildContextV2{YanetName: "test", Namespace: "test", BoxType: "test"}
@@ -40,7 +42,7 @@ func TestOperatorListenersContracts(t *testing.T) {
 				for _, port := range deployments[0].Spec.Template.Spec.Containers[0].Ports {
 					number := port.ContainerPort
 					if colocated {
-						number -= 4
+						number -= 2
 					}
 					actual = append(actual, number)
 				}
@@ -60,17 +62,15 @@ func manifestPlacementConfig(t *testing.T) (*api.YanetConfigSpec, *helpers.Resol
 	t.Helper()
 	var config api.YanetConfigSpec
 	err := json.Unmarshal([]byte(`{
-		"components":{"dataplane":{"image":{"name":"dp"}}, "operators":[
-			{"name":"monalive","listeners":["grpc","http"],"containers":[
-				{"name":"worker","image":{"name":"monalive"},"config":{"url":"https://example.com/config","args":["-c","/etc/yanet2/config"]}},
-				{"name":"agent","image":{"name":"agent"},"hostIPC":true,"config":{"hostPath":"/etc/agent","args":["agent"]}}
-			]}
-		]},
+		"components":{"dataplane":{"image":{"name":"dp"}, "sidecars":[
+			{"name":"worker","image":{"name":"monalive"},"listeners":["grpc","http"],"config":{"url":"https://example.com/config","args":["-c","/etc/yanet2/config"]}},
+			{"name":"agent","image":{"name":"agent"},"listeners":[],"config":{"hostPath":"/etc/agent","args":["agent"]}}
+		]}},
 		"patches":[{"name":"configure","patch":{"spec":{"template":{"spec":{
-			"initContainers":[{"name":"fetch","image":"fetch","volumeMounts":[{"name":"config-0","mountPath":"/out"}]}],
-			"containers":[{"name":"worker","env":[{"name":"AGENT_MEMORY","valueFrom":{"resourceFieldRef":{"containerName":"agent","resource":"limits.memory"}}}]}]
+			"initContainers":[{"name":"fetch","image":"fetch","volumeMounts":[{"name":"config","mountPath":"/out"}]}],
+			"containers":[{"name":"worker","env":[{"name":"OWN_MEMORY","valueFrom":{"resourceFieldRef":{"containerName":"worker","resource":"limits.memory"}}}]}]
 		}}}}}],
-		"boxTypes":[{"name":"test","components":{"dataplane":{}},"operators":{"monalive":{"placement":"dataplane","patches":["configure"]}}}]
+		"boxTypes":[{"name":"test","components":{"dataplane":{"sidecars":{"worker":{"patches":["configure"]},"agent":{}}}}}]
 	}`), &config)
 	if err != nil {
 		t.Fatal(err)
@@ -95,8 +95,8 @@ func TestOperatorPlacementConfigComposition(t *testing.T) {
 		t.Fatalf("config downloader and native sidecars have incorrect order/policy: %+v", pod.InitContainers)
 	}
 	worker, agent := pod.InitContainers[1], pod.InitContainers[2]
-	if worker.Ports[0].ContainerPort != 8082 || worker.Ports[1].ContainerPort != 8083 {
-		t.Fatalf("absent netlink must still reserve 8080/8081: %+v", worker.Ports)
+	if worker.Ports[0].ContainerPort != 8080 || worker.Ports[1].ContainerPort != 8081 {
+		t.Fatalf("first declared sidecar must use 8080/8081: %+v", worker.Ports)
 	}
 	if !reflect.DeepEqual(worker.Args, []string{"-c", "/etc/yanet2/config"}) ||
 		!reflect.DeepEqual(agent.Args, []string{"agent"}) || !pod.HostIPC {
@@ -106,7 +106,7 @@ func TestOperatorPlacementConfigComposition(t *testing.T) {
 		t.Fatal("config downloader and consumer no longer share the volume")
 	}
 	for _, variable := range worker.Env {
-		if variable.Name == "AGENT_MEMORY" && variable.ValueFrom.ResourceFieldRef.ContainerName != agent.Name {
+		if variable.Name == "OWN_MEMORY" && variable.ValueFrom.ResourceFieldRef.ContainerName != worker.Name {
 			t.Fatal("resourceFieldRef must use the composed container name")
 		}
 	}
@@ -116,15 +116,12 @@ func TestOperatorPlacementConfigComposition(t *testing.T) {
 		"metadata":{"labels":{%q:null}},"spec":{"initContainers":[
 		{"name":%q,"$patch":"delete"},{"name":%q,"restartPolicy":null}],
 		"$setElementOrder/initContainers":[{"name":%q},{"name":%q}]}}}}`,
-		OperatorMembershipLabel("monalive"), worker.Name, agent.Name, agent.Name, pod.InitContainers[0].Name))}}
+		OperatorMembershipLabel("worker"), worker.Name, agent.Name, agent.Name, pod.InitContainers[0].Name))}}
 	component.Patches = []string{"mutate"}
 	config.Patches = append(config.Patches, patch)
 	protected, err := RenderDeployments(context, component, NewPatchRegistry(config.Patches))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(deployments[0].Spec.Template, protected[0].Spec.Template) {
-		t.Fatal("dataplane patch changed managed sidecar ownership/order/restartPolicy")
+	if err == nil || protected != nil {
+		t.Fatal("dataplane patch must not change declared sidecar composition/order/restartPolicy")
 	}
 }
 
@@ -152,15 +149,15 @@ func TestOperatorPlacementRejectsFinalReferences(t *testing.T) {
 
 func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 	config, component := manifestPlacementConfig(t)
-	component.ColocatedOperators[0].Enabled = false
+	component.Sidecars[0].Enabled = false
 	for _, useName := range []bool{false, true} {
-		port := corev1.ContainerPort{ContainerPort: 8082}
+		port := corev1.ContainerPort{ContainerPort: 8080}
 		if useName {
 			port.ContainerPort = 9000
-			port.Name = BuildServices(BuildContextV2{BoxType: "test"}, component.ColocatedOperators[0])[0].Ports[0].TargetPortName
+			port.Name = BuildServices(BuildContextV2{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
 		}
 		raw, err := json.Marshal(map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
-			"containers": []corev1.Container{{Name: "other", Image: "test", Ports: []corev1.ContainerPort{port}}},
+			"containers": []corev1.Container{{Name: "dataplane", Ports: []corev1.ContainerPort{port}}},
 		}}}})
 		if err != nil {
 			t.Fatal(err)
@@ -175,8 +172,8 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 }
 
 func TestOperatorPlacementServicesDisambiguateRoleHashes(t *testing.T) {
-	first := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "role-47893", Placement: api.OperatorPlacementDataplane}
-	second := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "role-89356", Placement: api.OperatorPlacementDataplane}
+	first := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "role-47893"}
+	second := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "role-89356"}
 	firstPlan := BuildServices(BuildContextV2{BoxType: "test"}, first)[0]
 	secondPlan := BuildServices(BuildContextV2{BoxType: "test"}, second)[0]
 	if reflect.DeepEqual(firstPlan.Selector, secondPlan.Selector) {

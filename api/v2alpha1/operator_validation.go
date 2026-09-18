@@ -3,37 +3,42 @@ package v2alpha1
 import (
 	"encoding/json"
 	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
 )
 
-// ValidateOperatorPlacement also guards reconciliation when admission is bypassed.
-func ValidateOperatorPlacement(placement OperatorPlacement) error {
-	switch placement {
-	case "", OperatorPlacementStandalone, OperatorPlacementDataplane:
-		return nil
-	default:
-		return fmt.Errorf("unsupported operator placement %q", placement)
-	}
-}
+const (
+	// RuntimeGRPCPort and RuntimeHTTPPort are fixed Service ports and slot bases.
+	RuntimeGRPCPort int32 = 8080
+	RuntimeHTTPPort int32 = 8081
+	// MaxDataplaneSidecars keeps the last two-port slot within the TCP port range.
+	MaxDataplaneSidecars = (65535-int(RuntimeHTTPPort))/2 + 1
+)
 
 // ValidateOperatorListeners rejects ambiguous or unknown listener contracts.
 func ValidateOperatorListeners(operator *OperatorSpec) error {
-	if operator.Listeners == nil {
+	return ValidateListeners(operator.Name, operator.Listeners)
+}
+
+// ValidateListeners is shared by standalone operators and single-container sidecars.
+func ValidateListeners(name string, listeners *[]OperatorListener) error {
+	if listeners == nil {
 		return nil
 	}
 	seen := map[OperatorListener]bool{}
-	for _, listener := range *operator.Listeners {
+	for _, listener := range *listeners {
 		if listener != "grpc" && listener != "http" || seen[listener] {
-			return fmt.Errorf("operator %q has unsupported or duplicate listener %q", operator.Name, listener)
+			return fmt.Errorf("role %q has unsupported or duplicate listener %q", name, listener)
 		}
 		seen[listener] = true
 	}
 	return nil
 }
 
-// ValidateColocatedOperatorPatch permits only container/volume-scoped changes.
+// ValidateSidecarPatch permits only container/volume-scoped changes.
 // Pod and Deployment settings cannot be composed into another workload without
 // changing their meaning. Reject them rather than silently discarding them.
-func ValidateColocatedOperatorPatch(raw []byte) error {
+func ValidateSidecarPatch(raw []byte) error {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return err
@@ -44,7 +49,7 @@ func ValidateColocatedOperatorPatch(raw []byte) error {
 		}
 		child, ok := object[level]
 		if !ok || len(object) != 1 || string(child) == "null" {
-			return fmt.Errorf("colocated operator patches support only spec.template.spec containers, initContainers and volumes")
+			return fmt.Errorf("sidecar patches support only spec.template.spec containers, initContainers and volumes")
 		}
 		object = nil
 		if err := json.Unmarshal(child, &object); err != nil {
@@ -67,7 +72,24 @@ func ValidateColocatedOperatorPatch(raw []byte) error {
 				seen[name] = true
 			}
 		default:
-			return fmt.Errorf("colocated operator patch cannot set pod field %q", key)
+			return fmt.Errorf("sidecar patch cannot set pod field %q", key)
+		}
+	}
+	return nil
+}
+
+// ValidatePrivatePodNetwork enforces v2 networking after all patches.
+func ValidatePrivatePodNetwork(pod *corev1.PodSpec) error {
+	if pod.HostNetwork {
+		return fmt.Errorf("v2 requires a private network namespace; hostNetwork is unsupported")
+	}
+	for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+		for _, container := range containers {
+			for _, port := range container.Ports {
+				if port.HostPort != 0 {
+					return fmt.Errorf("v2 container %q must not declare hostPort %d", container.Name, port.HostPort)
+				}
+			}
 		}
 	}
 	return nil
