@@ -138,6 +138,75 @@ Chart **0.1.14** removes unused v2 `autoDiscovery`, `config.url`, and
 container-level `hostIPC`. Use explicit Deployment patches for config downloaders,
 Pod IPC and agent shared-memory mounts. v1 API and behavior are unchanged.
 
+### Device-backed Multus attachments (0.1.15)
+
+Declare the default ordered list in `yanetconfigV2.spec.components.dataplane.networks`:
+
+```yaml
+yanetconfigV2:
+  spec:
+    components:
+      dataplane:
+        networks:
+          - name: yanet-pf
+            interface: eth2
+            resourceName: yanet-platform.io/pf
+          - name: yanet-pf
+            interface: eth4
+            resourceName: yanet-platform.io/pf
+```
+
+This is a fragment of the palette, not a complete installation. Each entry adds
+one Multus attachment and one device request/limit to the primary dataplane
+container. The two entries above produce two attachments of the same NAD and
+`yanet-platform.io/pf: "2"`. An omitted `namespace` uses the installation's
+namespace. Interface names must be unique, at most 15 characters, and cannot be
+`eth0` or `lo`.
+
+An installation can replace the complete list:
+
+```yaml
+apiVersion: yanet.yanet-platform.io/v2alpha1
+kind: YanetV2
+metadata:
+  name: custom-node
+  namespace: yanet
+spec:
+  boxType: firewall
+  nodeSelector:
+    kubernetes.io/hostname: worker-1
+  components:
+    dataplane:
+      networks:
+        - name: custom-pf
+          namespace: yanet
+          interface: eth2
+          resourceName: yanet-platform.io/custom_pf
+```
+
+Omitted/null `networks` inherits the palette; `networks: []` removes the typed
+attachments and their reservations. This override applies to every node matched
+by the installation. Requests are explicit integer counts, not an automatic
+"all devices on this node" selection.
+
+NADs and device-plugin pools remain externally managed. `resourceName` must equal
+the referenced NAD's resource annotation. The operator does not discover NICs,
+configure PF/VF drivers, or read node-local device-plugin JSON. A standalone
+device-plugin DaemonSet and common NAD can be deployed with `extraManifests`.
+
+When adopting typed networks, remove the Multus annotation and corresponding
+device quantities from dataplane/sidecar patches. Conflicts are rejected before
+workload changes, including stale default-pool reservations after an override.
+CPU, memory, hugepages and unrelated device-resource patches are retained. If
+typed networks are omitted everywhere, existing patch-based networking remains
+supported.
+
+Before changing live PF attachments, disable the installation with
+`YanetV2.spec.enabled: false` and wait for its Pods to terminate. Update the host
+configuration, device-plugin selection and attachment list together, then enable
+the installation. This does not resolve the separate dataplane/controlplane
+shared-memory startup-lifecycle requirement.
+
 ## Values
 
 | Parameter | Description | Default |

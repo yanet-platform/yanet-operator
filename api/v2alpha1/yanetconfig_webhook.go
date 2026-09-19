@@ -120,6 +120,9 @@ func validateYanetConfig(spec *YanetConfigSpec) error {
 	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
 		return err
 	}
+	if err := ValidateNetworkAttachments(spec.Components.Dataplane.Networks); err != nil {
+		return fmt.Errorf("spec.components.dataplane.%w", err)
+	}
 	if err := validateComponentImages(&spec.Components); err != nil {
 		return err
 	}

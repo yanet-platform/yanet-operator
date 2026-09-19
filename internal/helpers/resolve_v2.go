@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
@@ -59,6 +60,10 @@ type ResolvedComponent struct {
 	Hugepages    *yanetv2alpha1.Hugepages
 	Numa         int32
 	DisabledNuma []int32
+	Networks     []yanetv2alpha1.NetworkAttachment
+	// NetworkResources includes inherited and overridden names, so patches
+	// cannot retain stale device reservations when an override replaces a pool.
+	NetworkResources []string
 
 	// Containers belongs only to standalone operators. The first owns listeners.
 	Containers []ResolvedContainer
@@ -141,11 +146,16 @@ func ResolveBoxComponent(config *yanetv2alpha1.YanetConfigSpec, yanet *yanetv2al
 			return nil, err
 		}
 		dp := config.Components.Dataplane
+		networks, resources, err := resolveDataplaneNetworks(dp.Networks, yanet)
+		if err != nil {
+			return nil, err
+		}
 		override := componentOverride(yanet, kind, "")
 		return &ResolvedComponent{
 			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),
 			Image:  mergeImage(config.Images, dp.Image, containerOverride(override, "dataplane")),
 			Config: dp.Config, Hugepages: dp.Hugepages, Sidecars: sidecars, Patches: box.Components.Dataplane.Patches,
+			Networks: networks, NetworkResources: resources,
 		}, nil
 	case KindSidecar:
 		if box.Components.Dataplane == nil {
@@ -183,6 +193,31 @@ func ResolveBoxComponent(config *yanetv2alpha1.YanetConfigSpec, yanet *yanetv2al
 	default:
 		return nil, fmt.Errorf("unknown component kind %q", kind)
 	}
+}
+
+func resolveDataplaneNetworks(defaults []yanetv2alpha1.NetworkAttachment, yanet *yanetv2alpha1.YanetSpec) ([]yanetv2alpha1.NetworkAttachment, []string, error) {
+	if err := yanetv2alpha1.ValidateNetworkAttachments(defaults); err != nil {
+		return nil, nil, err
+	}
+	selected := defaults
+	if yanet.Components != nil && yanet.Components.Dataplane != nil && yanet.Components.Dataplane.Networks != nil {
+		selected = yanet.Components.Dataplane.Networks
+	}
+	if err := yanetv2alpha1.ValidateNetworkAttachments(selected); err != nil {
+		return nil, nil, err
+	}
+	resources := make(map[string]bool)
+	for _, group := range [][]yanetv2alpha1.NetworkAttachment{defaults, selected} {
+		for _, attachment := range group {
+			resources[attachment.ResourceName] = true
+		}
+	}
+	names := make([]string, 0, len(resources))
+	for name := range resources {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return slices.Clone(selected), names, nil
 }
 
 // ResolveBoxServiceComponent ignores installation enablement and NUMA opt-outs.

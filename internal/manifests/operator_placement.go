@@ -62,6 +62,9 @@ func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent,
 			if err := validateSidecarComposition(&deployment.Spec.Template.Spec, component); err != nil {
 				return nil, err
 			}
+			if err := configureDataplaneNetworks(deployment, component); err != nil {
+				return nil, err
+			}
 		}
 		RestoreWorkloadIdentity(deployment, identity)
 		if err := api.ValidatePrivatePodNetwork(&deployment.Spec.Template.Spec); err != nil {

@@ -23,6 +23,10 @@ spec:
     dataplane:
       image: {name: yanet2/dataplane, tag: example}
       hugepages: {size: 1Gi, count: 8}
+      # Requires an externally managed NAD and matching device-plugin resource.
+      networks:
+        - {name: yanet-pf, interface: eth2, resourceName: yanet-platform.io/pf}
+        - {name: yanet-pf, interface: eth4, resourceName: yanet-platform.io/pf}
       config:
         hostPath: /etc/yanet2
         args: [/etc/yanet2/dataplane.yaml]

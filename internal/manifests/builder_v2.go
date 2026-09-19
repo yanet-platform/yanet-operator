@@ -23,7 +23,8 @@ limitations under the License.
 // dataplane's privileged + hostIPC + minimal host devices
 // (applyDataplaneSecurity) and the controlplane's hostIPC + shmem-arena mount
 // (applyControlplaneShmem). Everything optional
-// beyond that — annotations, postStart hooks, resource requests, init
+// beyond that and typed dataplane network attachments — general annotations,
+// postStart hooks, resource requests, init
 // containers, extra hostIPC/privileged for operators — lives in
 // YanetConfigV2.spec.patches[] and is layered on top by ApplyPatches
 // in patcher.go.

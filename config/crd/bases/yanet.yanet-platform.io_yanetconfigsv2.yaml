@@ -435,6 +435,43 @@ spec:
                         required:
                         - name
                         type: object
+                      networks:
+                        description: |-
+                          Networks declares ordered device-backed Multus attachments. Each entry
+                          reserves one device from ResourceName in the primary dataplane container.
+                          YanetV2 can replace this list per installation. NADs are managed externally.
+                        items:
+                          description: NetworkAttachment couples one Multus attachment
+                            with one extended resource.
+                          properties:
+                            interface:
+                              description: Interface is the interface name inside
+                                the dataplane Pod.
+                              maxLength: 15
+                              minLength: 1
+                              type: string
+                            name:
+                              description: Name references an existing NetworkAttachmentDefinition.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: Namespace defaults to the YanetV2 installation
+                                namespace.
+                              maxLength: 63
+                              type: string
+                            resourceName:
+                              description: ResourceName must match the NAD's k8s.v1.cni.cncf.io/resourceName
+                                annotation.
+                              minLength: 1
+                              type: string
+                          required:
+                          - interface
+                          - name
+                          - resourceName
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
                       sidecars:
                         description: |-
                           Sidecars is the ordered palette of single-container native sidecars.

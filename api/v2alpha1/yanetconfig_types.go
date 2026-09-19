@@ -177,6 +177,13 @@ type DataplaneSpec struct {
 	// +optional
 	Hugepages *Hugepages `json:"hugepages,omitempty"`
 
+	// Networks declares ordered device-backed Multus attachments. Each entry
+	// reserves one device from ResourceName in the primary dataplane container.
+	// YanetV2 can replace this list per installation. NADs are managed externally.
+	// +optional
+	// +listType=atomic
+	Networks []NetworkAttachment `json:"networks,omitempty"`
+
 	// Sidecars is the ordered palette of single-container native sidecars.
 	// Each declaration reserves a gRPC/HTTP pair at 8080+2*i / 8081+2*i,
 	// including unselected and disabled entries. The box type selects names;
@@ -185,6 +192,31 @@ type DataplaneSpec struct {
 	// +listType=atomic
 	// +kubebuilder:validation:MaxItems=28728
 	Sidecars []SidecarSpec `json:"sidecars,omitempty"`
+}
+
+// NetworkAttachment couples one Multus attachment with one extended resource.
+type NetworkAttachment struct {
+	// Name references an existing NetworkAttachmentDefinition.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// Namespace defaults to the YanetV2 installation namespace.
+	// +optional
+	// +kubebuilder:validation:MaxLength=63
+	Namespace string `json:"namespace,omitempty"`
+
+	// Interface is the interface name inside the dataplane Pod.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=15
+	Interface string `json:"interface"`
+
+	// ResourceName must match the NAD's k8s.v1.cni.cncf.io/resourceName annotation.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ResourceName string `json:"resourceName"`
 }
 
 // SidecarSpec describes exactly one native sidecar container in the dataplane.

@@ -348,7 +348,12 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 `Yanet` CRs reference a `boxType` by name; per-installation overrides are
 restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-plus workload `enabled` and controlplane `disabledNuma`. Sidecars use separate
+plus workload `enabled`, controlplane `disabledNuma`, and dataplane `networks`.
+Each typed network entry couples an existing NAD with one extended resource;
+the renderer derives matching requests/limits after patches. A per-installation
+network list replaces the palette list, `[]` clears it, and omitted/null inherits.
+Patches must not duplicate the managed Multus annotation or resource quantities.
+Sidecars use separate
 `dataplane.sidecars.<name>` image/enablement overrides. The container key for
 standalone workloads must match the rendered container name;
 operators use the declared `OperatorContainer.name`. No inline patches in

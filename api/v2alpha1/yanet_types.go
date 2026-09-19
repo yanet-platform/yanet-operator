@@ -27,9 +27,9 @@ import (
 // tiny: it only selects the target nodes and references a boxType.
 //
 // No patches and no inline component specs are accepted here. The only
-// per-installation customisation knobs are typed point-overrides in
-// components.<name>.{enabled,image}. Dataplane native sidecars can also be
-// disabled through their entries in components.dataplane.sidecars.
+// per-installation customisation knobs are typed point-overrides for images,
+// enablement, controlplane NUMA selection and dataplane network attachments.
+// Native sidecars can also be disabled through components.dataplane.sidecars.
 type YanetSpec struct {
 	// BoxType selects a boxType definition from
 	// YanetConfigV2.spec.boxTypes[]. Required.
@@ -67,9 +67,9 @@ type YanetSpec struct {
 	AutoSync *bool `json:"autoSync,omitempty"`
 
 	// Components offers narrow, per-installation overrides for
-	// individual components. Only image and enabled flags are
-	// allowed. Anything else (annotations, resources, ...) lives in
-	// YanetConfigV2 patches.
+	// individual components: images, enabled flags, controlplane NUMA selection
+	// and the dataplane's complete network attachment list. General annotations
+	// and resources live in YanetConfigV2 patches.
 	// +optional
 	Components *YanetComponentsOverride `json:"components,omitempty"`
 }
@@ -110,6 +110,13 @@ type YanetComponentOverride struct {
 // YanetDataplaneOverride separates the primary container from named sidecars.
 type YanetDataplaneOverride struct {
 	YanetComponentOverride `json:",inline"`
+
+	// Networks replaces the palette's complete list of Multus attachments.
+	// Omitted/null inherits; [] explicitly removes the declared attachments.
+	// Do not omit an empty list during serialization: it is an explicit override.
+	// +optional
+	// +listType=atomic
+	Networks []NetworkAttachment `json:"networks"`
 
 	// Sidecars overrides enabled and image name/tag for each selected sidecar.
 	// +optional

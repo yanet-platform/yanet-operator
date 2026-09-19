@@ -114,6 +114,10 @@ yanetconfigV2: {}
 #      dataplane:
 #        image: {name: dataplane, tag: v2.1}
 #        hugepages: {size: 1Gi, count: 8}
+#        # Existing device-backed NAD; repeat with a different interface for another PF.
+#        networks:
+#          - {name: yanet-pf, interface: eth2, resourceName: yanet-platform.io/pf}
+#          - {name: yanet-pf, interface: eth4, resourceName: yanet-platform.io/pf}
 #        sidecars:
 #          - name: bird
 #            image: {name: bird, tag: "2.15"}

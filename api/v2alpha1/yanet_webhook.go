@@ -301,6 +301,9 @@ func validateDataplaneOverrideShape(override *YanetDataplaneOverride) error {
 	if err := validateHardcodedContainerKeys("dataplane", DataplaneContainerName, &override.YanetComponentOverride); err != nil {
 		return err
 	}
+	if err := ValidateNetworkAttachments(override.Networks); err != nil {
+		return fmt.Errorf("spec.components.dataplane.%w", err)
+	}
 	for name := range override.Sidecars {
 		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
 			return fmt.Errorf("spec.components.dataplane.sidecars[%q] is invalid: %s", name, strings.Join(errs, "; "))

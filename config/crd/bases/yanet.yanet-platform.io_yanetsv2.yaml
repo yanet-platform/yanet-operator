@@ -64,9 +64,9 @@ spec:
               tiny: it only selects the target nodes and references a boxType.
 
               No patches and no inline component specs are accepted here. The only
-              per-installation customisation knobs are typed point-overrides in
-              components.<name>.{enabled,image}. Dataplane native sidecars can also be
-              disabled through their entries in components.dataplane.sidecars.
+              per-installation customisation knobs are typed point-overrides for images,
+              enablement, controlplane NUMA selection and dataplane network attachments.
+              Native sidecars can also be disabled through components.dataplane.sidecars.
             properties:
               autoSync:
                 description: |-
@@ -87,9 +87,9 @@ spec:
               components:
                 description: |-
                   Components offers narrow, per-installation overrides for
-                  individual components. Only image and enabled flags are
-                  allowed. Anything else (annotations, resources, ...) lives in
-                  YanetConfigV2 patches.
+                  individual components: images, enabled flags, controlplane NUMA selection
+                  and the dataplane's complete network attachment list. General annotations
+                  and resources live in YanetConfigV2 patches.
                 properties:
                   birdAdapter:
                     description: |-
@@ -222,6 +222,43 @@ spec:
                           true → replicas=1, false → replicas=0 (component still
                           rendered, but with zero pods).
                         type: boolean
+                      networks:
+                        description: |-
+                          Networks replaces the palette's complete list of Multus attachments.
+                          Omitted/null inherits; [] explicitly removes the declared attachments.
+                          Do not omit an empty list during serialization: it is an explicit override.
+                        items:
+                          description: NetworkAttachment couples one Multus attachment
+                            with one extended resource.
+                          properties:
+                            interface:
+                              description: Interface is the interface name inside
+                                the dataplane Pod.
+                              maxLength: 15
+                              minLength: 1
+                              type: string
+                            name:
+                              description: Name references an existing NetworkAttachmentDefinition.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: Namespace defaults to the YanetV2 installation
+                                namespace.
+                              maxLength: 63
+                              type: string
+                            resourceName:
+                              description: ResourceName must match the NAD's k8s.v1.cni.cncf.io/resourceName
+                                annotation.
+                              minLength: 1
+                              type: string
+                          required:
+                          - interface
+                          - name
+                          - resourceName
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
                       sidecars:
                         additionalProperties:
                           description: |-
