@@ -48,7 +48,7 @@ func fixtureConfig() *yanetv2alpha1.YanetConfigSpec {
 					Name: "antiddos",
 					Containers: []yanetv2alpha1.OperatorContainer{
 						{Name: "operator", Image: yanetv2alpha1.ImageRef{Name: "antiddos-operator", Tag: "v0.5"}},
-						{Name: "agent", Image: yanetv2alpha1.ImageRef{Name: "antiddos-agent", Tag: "v0.5"}, HostIPC: PtrTrue()},
+						{Name: "agent", Image: yanetv2alpha1.ImageRef{Name: "antiddos-agent", Tag: "v0.5"}},
 					},
 				},
 				{
@@ -183,8 +183,7 @@ func TestResolveBoxComponent_Operator(t *testing.T) {
 	if operator.Name != "antiddos" || operator.Kind != KindOperator || len(operator.Containers) != 2 {
 		t.Fatalf("operator = %+v", operator)
 	}
-	if operator.Containers[0].Name != "operator" || operator.Containers[1].Name != "agent" ||
-		!operator.Containers[1].HostIPC {
+	if operator.Containers[0].Name != "operator" || operator.Containers[1].Name != "agent" {
 		t.Fatalf("operator containers = %+v", operator.Containers)
 	}
 }

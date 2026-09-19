@@ -73,10 +73,9 @@ type ResolvedComponent struct {
 
 // ResolvedContainer carries a standalone operator container's effective inputs.
 type ResolvedContainer struct {
-	Name    string
-	Image   ResolvedImage
-	Config  *yanetv2alpha1.ConfigSource
-	HostIPC bool
+	Name   string
+	Image  ResolvedImage
+	Config *yanetv2alpha1.ConfigSource
 }
 
 // FindBoxType returns the requested preset from the current configuration.
@@ -315,7 +314,7 @@ func resolveOperator(config *yanetv2alpha1.YanetConfigSpec, yanet *yanetv2alpha1
 	for _, container := range operator.Containers {
 		containers = append(containers, ResolvedContainer{
 			Name: container.Name, Image: mergeImage(config.Images, container.Image, containerOverride(override, container.Name)),
-			Config: container.Config, HostIPC: BoolValue(container.HostIPC, false),
+			Config: container.Config,
 		})
 	}
 	return &ResolvedComponent{

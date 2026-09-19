@@ -127,7 +127,12 @@ Palette images may override `registry` and `prefix` independently: omission
 inherits `spec.images`, while `""` clears that part. Installation container
 overrides still only support `name`, `tag`, and native-sidecar `enabled`.
 Controlplane `config.args` supports `{numa}` for the physical NUMA index;
-literal `.yaml`/`.yml` arguments without it retain the legacy `-<index>` suffix.
+arguments without it remain literal, including other YAML file paths.
+
+Chart **0.1.14** removes unused v2 `autoDiscovery`, the unimplemented `config.url`
+source and container-level `hostIPC`. Config downloads, optional Pod IPC settings
+and agent shared-memory mounts use explicit Deployment patches. Controlplane
+config paths must use `{numa}` when they vary by NUMA; no suffix is inferred.
 
 See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
 [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable

@@ -31,7 +31,6 @@ package manifests
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
@@ -147,30 +146,15 @@ func disabledNumaSet(c *helpers.ResolvedComponent) map[int32]struct{} {
 }
 
 // numaConfigArgs substitutes {numa} in explicit per-NUMA arguments, for example
-// /etc/yanet2/controlplane.d/numa{numa}.yaml. Arguments without a placeholder
-// retain the legacy config-path convention: append the NUMA index to the file
-// base name, keeping the directory and extension:
-//
-//	/etc/yanet2/controlplane.yaml → /etc/yanet2/controlplane-0.yaml
-//
-// Without a placeholder, only *.yaml / *.yml elements are touched. Flags such
-// as `-c` and subcommands are preserved verbatim. The index is the physical
-// fan-out index, not the position among enabled NUMA domains.
+// /etc/yanet2/controlplane.d/numa{numa}.yaml. All other arguments stay literal.
+// The index is the physical fan-out index, not the position among enabled domains.
 func numaConfigArgs(args []string, numa int32) []string {
 	if len(args) == 0 {
 		return args
 	}
 	out := append([]string(nil), args...)
 	for i, a := range out {
-		if strings.Contains(a, "{numa}") {
-			out[i] = strings.ReplaceAll(a, "{numa}", fmt.Sprint(numa))
-			continue
-		}
-		ext := filepath.Ext(a)
-		if ext != ".yaml" && ext != ".yml" {
-			continue
-		}
-		out[i] = fmt.Sprintf("%s-%d%s", strings.TrimSuffix(a, ext), numa, ext)
+		out[i] = strings.ReplaceAll(a, "{numa}", fmt.Sprint(numa))
 	}
 	return out
 }
@@ -272,10 +256,8 @@ func buildSingle(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deplo
 }
 
 // buildOperator renders the multi-container operator Deployment. The
-// first container is the primary (the one a Service targets). Any
-// container with HostIPC=true escalates to Pod-level hostIPC and is
-// treated as a shmem peer (agent): it gets the dataplane shmem arena
-// mounted at /dev/hugepages, like the controlplane.
+// first container is the primary (the one a Service targets). Pod IPC settings
+// and shared-memory mounts are explicit Deployment patches.
 func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Deployment {
 	selectorLabels := baseLabels(ctx, c)
 	labels := workloadLabels(ctx, selectorLabels)
@@ -283,7 +265,6 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 		ImagePullSecrets: ctx.PullSecrets,
 		NodeSelector:     nodeSelector(ctx),
 	}
-	hostIPC := false
 	for i, rc := range c.Containers {
 		volumes, mounts, _, configArgs := buildConfigVolumesForContainer(ctx, c, &rc, i)
 		pod.Volumes = append(pod.Volumes, volumes...)
@@ -294,17 +275,7 @@ func buildOperator(ctx BuildContextV2, c *helpers.ResolvedComponent) *appsv1.Dep
 			VolumeMounts:    mounts,
 		}
 		container.Args = configArgs
-		// A hostIPC container is a shmem peer (agent) → give it the arena.
-		if rc.HostIPC {
-			container.VolumeMounts = append(container.VolumeMounts, shmemMount())
-			hostIPC = true
-		}
 		pod.Containers = append(pod.Containers, container)
-	}
-	pod.HostIPC = hostIPC
-	// Add the shared shmem volume once if any container mounted it.
-	if hostIPC {
-		pod.Volumes = append(pod.Volumes, shmemVolume())
 	}
 
 	return &appsv1.Deployment{
@@ -440,16 +411,6 @@ func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 			VolumeSource: corev1.VolumeSource{ConfigMap: &cmVol},
 		}}
 		mounts = []corev1.VolumeMount{{Name: "config", MountPath: mountPath, ReadOnly: true}}
-	case cs.URL != "":
-		// URL-based config is downloaded by an initContainer
-		// into an emptyDir; the patcher / future logic decides
-		// the exact init image. For now we expose the empty
-		// volume and let a patch attach the init container.
-		volumes = []corev1.Volume{{
-			Name:         "config",
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		}}
-		mounts = []corev1.VolumeMount{{Name: "config", MountPath: mountPath}}
 	}
 	return volumes, mounts, configMapName, append([]string(nil), cs.Args...)
 }
@@ -491,12 +452,6 @@ func buildConfigVolumesForContainer(
 			VolumeSource: corev1.VolumeSource{ConfigMap: &cmVol},
 		}}
 		mounts = []corev1.VolumeMount{{Name: volName, MountPath: mountPath, ReadOnly: true}}
-	case rc.Config.URL != "":
-		volumes = []corev1.Volume{{
-			Name:         volName,
-			VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
-		}}
-		mounts = []corev1.VolumeMount{{Name: volName, MountPath: mountPath}}
 	}
 	return volumes, mounts, configMapName, append([]string(nil), rc.Config.Args...)
 }
@@ -623,7 +578,7 @@ func applyDataplaneSecurity(c *corev1.Container, volumes *[]corev1.Volume) {
 
 // shmemVolName / shmemDir identify the hugepages-backed shmem arena that
 // the dataplane publishes (files under /dev/hugepages/yanet) and that
-// every shmem peer mmaps: the controlplane and any hostIPC operator/agent.
+// the controlplane mmaps. Optional agent mounts are declared in patches.
 const (
 	shmemVolName = "hugepages"
 	shmemDir     = "/dev/hugepages"

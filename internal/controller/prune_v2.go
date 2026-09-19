@@ -33,7 +33,7 @@ import (
 // pruneConflictingDeploymentsV2 removes only this installation's Deployments
 // from nodes won by another YanetV2. ConfigMaps are harmless and remain until a
 // later ordinary prune, while deleting the Deployments terminates conflicting
-// host-network Pods.
+// Pods that still use the node's devices and shared memory.
 func (r *YanetV2Reconciler) pruneConflictingDeploymentsV2(
 	ctx context.Context,
 	yanet *yanetv2alpha1.YanetV2,

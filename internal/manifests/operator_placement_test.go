@@ -63,12 +63,13 @@ func manifestPlacementConfig(t *testing.T) (*api.YanetConfigSpec, *helpers.Resol
 	var config api.YanetConfigSpec
 	err := json.Unmarshal([]byte(`{
 		"components":{"dataplane":{"image":{"name":"dp"}, "sidecars":[
-			{"name":"worker","image":{"name":"monalive"},"listeners":["grpc","http"],"config":{"url":"https://example.com/config","args":["-c","/etc/yanet2/config"]}},
+			{"name":"worker","image":{"name":"monalive"},"listeners":["grpc","http"]},
 			{"name":"agent","image":{"name":"agent"},"listeners":[],"config":{"hostPath":"/etc/agent","args":["agent"]}}
 		]}},
 		"patches":[{"name":"configure","patch":{"spec":{"template":{"spec":{
-			"initContainers":[{"name":"fetch","image":"fetch","volumeMounts":[{"name":"config","mountPath":"/out"}]}],
-			"containers":[{"name":"worker","env":[{"name":"OWN_MEMORY","valueFrom":{"resourceFieldRef":{"containerName":"worker","resource":"limits.memory"}}}]}]
+			"volumes":[{"name":"downloaded-config","emptyDir":{}}],
+			"initContainers":[{"name":"fetch","image":"fetch","volumeMounts":[{"name":"downloaded-config","mountPath":"/out"}]}],
+			"containers":[{"name":"worker","args":["-c","/etc/yanet2/config"],"volumeMounts":[{"name":"downloaded-config","mountPath":"/etc/yanet2","readOnly":true}],"env":[{"name":"OWN_MEMORY","valueFrom":{"resourceFieldRef":{"containerName":"worker","resource":"limits.memory"}}}]}]
 		}}}}}],
 		"boxTypes":[{"name":"test","components":{"dataplane":{"sidecars":{"worker":{"patches":["configure"]},"agent":{}}}}}]
 	}`), &config)

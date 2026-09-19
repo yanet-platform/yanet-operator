@@ -17,7 +17,7 @@ limitations under the License.
 package v2alpha1
 
 // ConfigSource describes where the configuration of a yanet component
-// comes from. Exactly one of Inline, HostPath or URL must be specified.
+// comes from. Exactly one of Inline or HostPath must be specified.
 //
 //   - Inline: configuration is embedded into the CR; the operator creates a
 //     ConfigMap (named deterministically by content hash) and mounts it into
@@ -26,16 +26,12 @@ package v2alpha1
 //     configured MountPath (default /etc/yanet2). The component binary finds its
 //     config file inside that directory by its own default name (e.g.
 //     controlplane.conf). This is the default for production hosts.
-//   - URL: an HTTP(S) endpoint that returns the configuration body. The
-//     operator creates an emptyDir shared with the component. Downloader
-//     generation is deferred; a strategic patch must currently add the init
-//     container that populates the volume.
 //
 // Args, when set, are passed to the component binary verbatim. For HostPath
 // sources the whole directory is mounted, so args can reference any file in
 // that directory. Inline content is available as <mountDir>/config.
 //
-// Validation that exactly one of Inline/HostPath/URL is filled is enforced
+// Validation that exactly one of Inline/HostPath is filled is enforced
 // by the webhook.
 type ConfigSource struct {
 	// Inline is the literal configuration body. When set, the operator
@@ -50,12 +46,6 @@ type ConfigSource struct {
 	// inside that directory using its own default file name.
 	// +optional
 	HostPath string `json:"hostPath,omitempty"`
-
-	// URL is an HTTP(S) endpoint that returns the configuration body.
-	// The operator creates an emptyDir volume shared with the component;
-	// a strategic patch must currently add the downloader init container.
-	// +optional
-	URL string `json:"url,omitempty"`
 
 	// MountPath is the absolute container directory for the managed config volume.
 	// Defaults to /etc/yanet2 when omitted. Inline content is stored as config
@@ -77,7 +67,7 @@ func (c *ConfigSource) IsZero() bool {
 	if c == nil {
 		return true
 	}
-	return c.Inline == "" && c.HostPath == "" && c.URL == ""
+	return c.Inline == "" && c.HostPath == ""
 }
 
 // VariantsSet returns the number of variants populated. The webhook
@@ -91,9 +81,6 @@ func (c *ConfigSource) VariantsSet() int {
 		n++
 	}
 	if c.HostPath != "" {
-		n++
-	}
-	if c.URL != "" {
 		n++
 	}
 	return n

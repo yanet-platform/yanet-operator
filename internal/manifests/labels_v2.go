@@ -37,7 +37,7 @@ const (
 	// one box type in a namespace.
 	LabelBoxType = labelBoxType
 	// LabelComponent identifies the component (controlplane,
-	// dataplane, bird, birdAdapter, announcer, or operator name).
+	// dataplane, birdAdapter, or a declared operator name).
 	LabelComponent = labelComponent
 	// LabelNuma identifies the NUMA index for a controlplane
 	// instance (0..numa-1).

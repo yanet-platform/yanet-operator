@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -175,19 +174,13 @@ func validateConfigSources(components *ComponentsSpec) error {
 			return nil
 		}
 		if variants := source.VariantsSet(); variants != 1 {
-			return fmt.Errorf("%s must define exactly one of inline, hostPath or url, got %d", fieldPath, variants)
+			return fmt.Errorf("%s must define exactly one of inline or hostPath, got %d", fieldPath, variants)
 		}
 		if source.HostPath != "" && !path.IsAbs(source.HostPath) {
 			return fmt.Errorf("%s.hostPath must be an absolute path", fieldPath)
 		}
 		if source.MountPath != "" && !path.IsAbs(source.MountPath) {
 			return fmt.Errorf("%s.mountPath must be an absolute path", fieldPath)
-		}
-		if source.URL != "" {
-			parsed, err := url.Parse(source.URL)
-			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
-				return fmt.Errorf("%s.url must be an absolute HTTP(S) URL with a host", fieldPath)
-			}
 		}
 		return nil
 	}

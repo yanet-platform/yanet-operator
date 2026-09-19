@@ -709,8 +709,7 @@ func (r *YanetV2Reconciler) listNodesForYanetV2(ctx context.Context, yanet *yane
 
 // validateExclusiveNodesV2 enforces the host-resource invariant that one node
 // belongs to at most one YanetV2. Services may be shared by box type, but two
-// installations cannot safely share DPDK devices, hugepages, BIRD sockets, or
-// a host-network listener range.
+// installations cannot safely share DPDK devices, hugepages, or BIRD sockets.
 type nodeSelectionConflictV2 struct {
 	messages         []string
 	cleanupNodeNames map[string]struct{}
@@ -769,7 +768,7 @@ func (r *YanetV2Reconciler) validateExclusiveNodesV2(
 				currentWins = yanetV2Precedes(yanet, other)
 			}
 			// A deleting installation remains authoritative until its object
-			// and finalizer are gone, so its host-network Pods cannot overlap a
+			// and finalizer are gone, so its host-resource users cannot overlap a
 			// replacement while cleanup is still in progress.
 			if currentWins && other.DeletionTimestamp.IsZero() {
 				continue

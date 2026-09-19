@@ -124,9 +124,6 @@ func TestYanetConfigWebhook_ConfigSource(t *testing.T) {
 		{name: "custom container path", source: &ConfigSource{HostPath: "/host/config", MountPath: "/etc/worker"}},
 		{name: "inline custom container path", source: &ConfigSource{Inline: "opaque", MountPath: "/etc/worker"}},
 		{name: "relative container path", source: &ConfigSource{Inline: "opaque", MountPath: "etc/worker"}, wantErr: "mountPath must be an absolute path"},
-		{name: "https URL", source: &ConfigSource{URL: "https://config.example/controlplane"}},
-		{name: "non HTTP URL", source: &ConfigSource{URL: "file:///etc/yanet2/config"}, wantErr: "HTTP(S)"},
-		{name: "URL without host", source: &ConfigSource{URL: "https:///controlplane"}, wantErr: "HTTP(S)"},
 	}
 
 	for _, tt := range tests {

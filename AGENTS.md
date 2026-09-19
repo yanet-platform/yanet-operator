@@ -83,7 +83,7 @@ yanet-operator/
 │       ├── yanetconfig_types.go   # Components palette, NamedPatch[], BoxType[]
 │       ├── yanet_webhook.go       # admission.Validator[*Yanet] (immutable boxType, refs)
 │       ├── yanetconfig_webhook.go # Validator (uniqueness, refs, strategic-merge dry-run)
-│       ├── config_source.go       # Inline | HostPath | URL
+│       ├── config_source.go       # Inline | HostPath
 │       └── zz_generated.deepcopy.go
 ├── cmd/main.go
 ├── internal/
@@ -413,7 +413,6 @@ validator struct.
 
 ### To be implemented (v2 deferred)
 - [ ] Observed/applied palette revision tracking
-- [ ] Init-container generation for `ConfigSource.URL` (today: emptyDir + patch)
 - [ ] JSON6902 (`jsonPatch`) — out of scope, only strategic merge is supported
 
 ### Done in v2 (was open in v1 era)

@@ -11,7 +11,7 @@
 |---|---|
 | **Module** | Code that obtains an *arena* from the dataplane and writes to shmem via the IPC namespace; compiles data into a binary format. May live either inside the `controlplane` or as a standalone process. Examples: `acl`, `route`, `decap`, `nat64`, `balancer`, `forward`. |
 | **Operator** | Userspace wrapper around a module. Holds the pre-compilation ("source") state, supplies data to be compiled, talks gRPC with other entities (via `gateway`), and collects metrics. Examples: `yanet-pipeline-operator`, `yanet-route-operator`, `yanet-forward-operator`. |
-| **Agent** | Same as an operator, but requires **direct access to the host IPC namespace** (`hostIPC: true`). From the CRD point of view it is identical to an operator — only the flag differs. Planned example: `antiddos`. |
+| **Agent** | An operator container that also accesses shared memory. Its mounts and any Pod IPC requirements are explicit Deployment patches. Planned example: `antiddos`. |
 | **Bundle** | A set of modules inside `controlplane` that work via shmem: `acl`, `route`, `decap`, `nat`, `balancer`. |
 | **Built-in** | Services inside `controlplane` that do not perform networking tasks but are required to assemble the pipeline: `pipe`, `function`, `counters`, `inspect`, `logging`. They are auto-registered in the gateway (see [`gateway.go`](../yanet2/controlplane/internal/gateway/gateway.go:179)). |
 | **Gateway** | gRPC + HTTP/gRPC-proxy inside `controlplane`. The registration entry point for external operators (`Register` in [`service.go`](../yanet2/controlplane/internal/gateway/service.go:63)) and the entry point for CLI / web / metrics-collector. |
@@ -24,7 +24,7 @@
 | Component | Deployment | IPC / network | Config |
 |---|---|---|---|
 | `dataplane` (`yanet-dataplane`) | One Deployment per node | Private Pod network, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet`; native sidecars share its network namespace | hostPath (`/etc/yanet2/dataplane.yaml`) |
-| `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` (for shmem) | hostPath, inline or URL |
+| `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` | hostPath or inline; `{numa}` explicitly selects per-NUMA files |
 | `metrics-collector` | DaemonSet (out of yanet-operator scope in Phase 4) | gRPC to gateway service | — |
 
 ### 2.2. Dataplane network sidecars and BIRD
@@ -80,20 +80,21 @@ network sidecars above do not register.
 | acl | `yanet-operator-acl` | `/etc/yanet/operator-acl.yaml` |
 | (planned) antiddos | operator + agent in one Pod | — |
 
-An agent is functionally identical to an operator but requires `hostIPC: true`
-(direct access to the host IPC namespace). Two deployment shapes are supported:
+Agents use the same container-group API as operators. Two shapes are supported:
 
 - **Single-container Deployment** — the most common case (`pipeline`, `route`,
-  `forward`, `acl`). One container per Pod, optionally with `hostIPC: true`.
+  `forward`, `acl`).
 - **Multi-container Deployment** — needed when an operator and a paired agent
   must live in **the same Pod** (shared lifecycle, shared volumes, the same
   IPC/network namespaces). The reference case is `antiddos`: an `operator`
-  container + an `agent` container with `hostIPC: true`.
+  container + an `agent` container with an explicitly patched shared-memory mount.
 
-The CRD therefore models each item via `containers[]` (see [`13-operators-spec.md`](YANET2_MIGRATION_PLAN/13-operators-spec.md) §4):
+The CRD models each item via `containers[]`:
 single-container is `containers: [{...}]`, multi-container is
-`containers: [{name: operator, ...}, {name: agent, hostIPC: true, ...}]`.
-The Pod-level `hostIPC` is set if **any** container in the list requests it.
+`containers: [{name: operator, ...}, {name: agent, ...}]`.
+There is no container-level `hostIPC` field and no inferred hugepages mount.
+Set `spec.template.spec.hostIPC` when required, declare the shared volume, and
+mount it only into the intended containers through a Deployment patch.
 
 ### 2.4. Announcer
 
@@ -128,7 +129,7 @@ pair, with stable external `8080/8081`. Sidecars use membership-label selectors.
 Every role defaults omitted listeners to `[grpc]`; metrics must explicitly select
 `[http]`. `listeners: []` disables Service exposure, not the slot or host-config env.
 Only the managed config volume after patches enables the HostPath overlay; inline
-ConfigMap/URL/no-config roles receive none. Runtime gateway env selects active
+ConfigMap/no-config roles receive none. Runtime gateway env selects active
 physical `numa<N>` entries and preserves their TLS. See
 [the environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
 
@@ -249,36 +250,19 @@ flowchart TB
 > `yanet-<boxType>-controlplane-numa{N}` Services
 > (see §3 above).
 
-## 6. yanet-operator Requirements (Phase 4 input)
+## 6. Configuration contract
 
-The architecture above translates into the following items in the implementation plan
-([`YANET2_MIGRATION_PLAN/16-phase4-plan.md`](YANET2_MIGRATION_PLAN/16-phase4-plan.md)):
+`components` declares the palette; `boxTypes` selects components and ordered
+Deployment patches; `YanetV2` selects a box and per-installation overrides.
+The current types and runnable examples are the source of truth:
 
-1. **Explicit NUMA configuration** via `spec.components.controlplane.numa`.
-   It defaults to 1; configure the physical domain count for multi-NUMA hosts
-   and exclude domains without dataplane instances through `disabledNuma`.
-2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: false` by
-   default, hugepages, `securityContext`, hostPath config, fixed optional BIRD
-   and generic dataplane-placed network sidecars.
-3. **N controlplane Deployments per node** plus one shared
-   `yanet-<boxType>-controlplane-numa{N}` Service per NUMA role. Each Service has
-   `internalTrafficPolicy: Local` and exposes fixed gRPC/HTTP ports `8080/8081`.
-4. **BIRD native sidecar + standalone bird-adapter** — BIRD shares the
-   dataplane network namespace; `/run/bird` remains a node-local hostPath for
-   adapter and announcer clients.
-5. **Operators / agents — array in CRD** with fields:
-   - `name` and `containers`,
-   - `config: { inline | hostPath | url }` (see §7),
-   - `containers[]` — one or more containers in the same Pod, each with
-     its own `image`, `args`, `env`, `resources`, `hostIPC`,
-     `extraVolumes` / `extraVolumeMounts`. Pod-level `hostIPC` is enabled
-     if any container sets it. This supports both classical operators
-     (single-container) and operator+agent pairs (e.g. `antiddos`) in
-     a single Deployment.
-   Placement controls standalone versus dataplane composition; explicit
-   `listeners: []` suppresses managed ports and the shared Service.
-6. **Announcer Deployment** — separate CRD section, with `/run/bird` mount
-   and access to the gateway service.
+- [v2 API](api/v2alpha1/yanetconfig_types.go).
+- [Full configuration](deploy/examples/v2alpha1-yanetconfig-full.yaml).
+- [Rendering and ownership](ARCHITECTURE.md).
+
+There is no fixed announcer/BIRD/netlink slot, placement switch, host-network
+allocator or v2 auto-discovery. Announcer is an ordinary operator; BIRD and the
+network sidecars are declarations in `dataplane.sidecars[]`.
 
 ## 7. Component Config Sources
 
@@ -292,14 +276,15 @@ config:
     logging: { level: info }
     ...
   # variant 2 — hostPath (as in v1)
-  hostPath: /etc/yanet2/dataplane.yaml
-  # variant 3 — HTTP URL; downloader init container supplied by a patch
-  url: https://config-server.example/yanet2/controlplane
+  hostPath: /etc/yanet2
+  # Optional container directory; default /etc/yanet2
+  mountPath: /etc/yanet2
 ```
 
 Exactly **one** of the variants may be specified. Validation lives in the webhook.
-For `url`, the builder creates an `emptyDir`; until downloader generation is
-implemented, a strategic patch must add the init container that populates it.
+Remote configuration downloads are entirely described by Deployment patches:
+an init container, an emptyDir, and the consumer mounts/args. The typed API
+does not offer an unimplemented URL source.
 
 ## 8. Open Questions / Deferred
 

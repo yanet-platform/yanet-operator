@@ -61,29 +61,6 @@ spec:
               A YanetV2 CR references a boxType by name; everything else is derived
               from this YanetConfigV2.
             properties:
-              autoDiscovery:
-                description: |-
-                  AutoDiscovery configures the optional new-worker initializer
-                  (carried over from v1alpha1 verbatim, untyped here).
-                properties:
-                  archUri:
-                    type: string
-                  configsUri:
-                    type: string
-                  enable:
-                    default: false
-                    type: boolean
-                  namespace:
-                    default: default
-                    type: string
-                  registry:
-                    default: dockerhub.io
-                    type: string
-                  typeUri:
-                    type: string
-                  versionUri:
-                    type: string
-                type: object
               boxTypes:
                 description: |-
                   BoxTypes are box presets, each wiring components to lists of
@@ -194,7 +171,7 @@ spec:
                       config:
                         description: |-
                           ConfigSource describes where the configuration of a yanet component
-                          comes from. Exactly one of Inline, HostPath or URL must be specified.
+                          comes from. Exactly one of Inline or HostPath must be specified.
 
                             - Inline: configuration is embedded into the CR; the operator creates a
                               ConfigMap (named deterministically by content hash) and mounts it into
@@ -203,16 +180,12 @@ spec:
                               configured MountPath (default /etc/yanet2). The component binary finds its
                               config file inside that directory by its own default name (e.g.
                               controlplane.conf). This is the default for production hosts.
-                            - URL: an HTTP(S) endpoint that returns the configuration body. The
-                              operator creates an emptyDir shared with the component. Downloader
-                              generation is deferred; a strategic patch must currently add the init
-                              container that populates the volume.
 
                           Args, when set, are passed to the component binary verbatim. For HostPath
                           sources the whole directory is mounted, so args can reference any file in
                           that directory. Inline content is available as <mountDir>/config.
 
-                          Validation that exactly one of Inline/HostPath/URL is filled is enforced
+                          Validation that exactly one of Inline/HostPath is filled is enforced
                           by the webhook.
                         properties:
                           args:
@@ -243,12 +216,6 @@ spec:
                               Defaults to /etc/yanet2 when omitted. Inline content is stored as config
                               inside this directory; Args are never rewritten to match the mount.
                             pattern: ^(/.*)?$
-                            type: string
-                          url:
-                            description: |-
-                              URL is an HTTP(S) endpoint that returns the configuration body.
-                              The operator creates an emptyDir volume shared with the component;
-                              a strategic patch must currently add the downloader init container.
                             type: string
                         type: object
                       image:
@@ -286,7 +253,7 @@ spec:
                     properties:
                       config:
                         description: Config is the configuration source (inline |
-                          hostPath | url).
+                          hostPath).
                         properties:
                           args:
                             description: |-
@@ -316,12 +283,6 @@ spec:
                               Defaults to /etc/yanet2 when omitted. Inline content is stored as config
                               inside this directory; Args are never rewritten to match the mount.
                             pattern: ^(/.*)?$
-                            type: string
-                          url:
-                            description: |-
-                              URL is an HTTP(S) endpoint that returns the configuration body.
-                              The operator creates an emptyDir volume shared with the component;
-                              a strategic patch must currently add the downloader init container.
                             type: string
                         type: object
                       disabledNuma:
@@ -387,7 +348,7 @@ spec:
                       config:
                         description: |-
                           ConfigSource describes where the configuration of a yanet component
-                          comes from. Exactly one of Inline, HostPath or URL must be specified.
+                          comes from. Exactly one of Inline or HostPath must be specified.
 
                             - Inline: configuration is embedded into the CR; the operator creates a
                               ConfigMap (named deterministically by content hash) and mounts it into
@@ -396,16 +357,12 @@ spec:
                               configured MountPath (default /etc/yanet2). The component binary finds its
                               config file inside that directory by its own default name (e.g.
                               controlplane.conf). This is the default for production hosts.
-                            - URL: an HTTP(S) endpoint that returns the configuration body. The
-                              operator creates an emptyDir shared with the component. Downloader
-                              generation is deferred; a strategic patch must currently add the init
-                              container that populates the volume.
 
                           Args, when set, are passed to the component binary verbatim. For HostPath
                           sources the whole directory is mounted, so args can reference any file in
                           that directory. Inline content is available as <mountDir>/config.
 
-                          Validation that exactly one of Inline/HostPath/URL is filled is enforced
+                          Validation that exactly one of Inline/HostPath is filled is enforced
                           by the webhook.
                         properties:
                           args:
@@ -436,12 +393,6 @@ spec:
                               Defaults to /etc/yanet2 when omitted. Inline content is stored as config
                               inside this directory; Args are never rewritten to match the mount.
                             pattern: ^(/.*)?$
-                            type: string
-                          url:
-                            description: |-
-                              URL is an HTTP(S) endpoint that returns the configuration body.
-                              The operator creates an emptyDir volume shared with the component;
-                              a strategic patch must currently add the downloader init container.
                             type: string
                         type: object
                       hugepages:
@@ -498,7 +449,7 @@ spec:
                             config:
                               description: |-
                                 ConfigSource describes where the configuration of a yanet component
-                                comes from. Exactly one of Inline, HostPath or URL must be specified.
+                                comes from. Exactly one of Inline or HostPath must be specified.
 
                                   - Inline: configuration is embedded into the CR; the operator creates a
                                     ConfigMap (named deterministically by content hash) and mounts it into
@@ -507,16 +458,12 @@ spec:
                                     configured MountPath (default /etc/yanet2). The component binary finds its
                                     config file inside that directory by its own default name (e.g.
                                     controlplane.conf). This is the default for production hosts.
-                                  - URL: an HTTP(S) endpoint that returns the configuration body. The
-                                    operator creates an emptyDir shared with the component. Downloader
-                                    generation is deferred; a strategic patch must currently add the init
-                                    container that populates the volume.
 
                                 Args, when set, are passed to the component binary verbatim. For HostPath
                                 sources the whole directory is mounted, so args can reference any file in
                                 that directory. Inline content is available as <mountDir>/config.
 
-                                Validation that exactly one of Inline/HostPath/URL is filled is enforced
+                                Validation that exactly one of Inline/HostPath is filled is enforced
                                 by the webhook.
                               properties:
                                 args:
@@ -547,12 +494,6 @@ spec:
                                     Defaults to /etc/yanet2 when omitted. Inline content is stored as config
                                     inside this directory; Args are never rewritten to match the mount.
                                   pattern: ^(/.*)?$
-                                  type: string
-                                url:
-                                  description: |-
-                                    URL is an HTTP(S) endpoint that returns the configuration body.
-                                    The operator creates an emptyDir volume shared with the component;
-                                    a strategic patch must currently add the downloader init container.
                                   type: string
                               type: object
                             image:
@@ -658,19 +599,7 @@ spec:
                                       inside this directory; Args are never rewritten to match the mount.
                                     pattern: ^(/.*)?$
                                     type: string
-                                  url:
-                                    description: |-
-                                      URL is an HTTP(S) endpoint that returns the configuration body.
-                                      The operator creates an emptyDir volume shared with the component;
-                                      a strategic patch must currently add the downloader init container.
-                                    type: string
                                 type: object
-                              hostIPC:
-                                description: |-
-                                  HostIPC, when true, requests host IPC namespace for the whole
-                                  Pod. Pod-level hostIPC=true is set if any container in the
-                                  list requests it.
-                                type: boolean
                               image:
                                 description: |-
                                   ImageRef identifies a palette image. Registry and prefix default to

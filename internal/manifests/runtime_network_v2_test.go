@@ -157,7 +157,6 @@ func TestRuntimeNetwork_UsesFinalManagedConfigVolume(t *testing.T) {
 	}{
 		{name: "host", source: &api.ConfigSource{HostPath: "/etc/runtime"}, wantBind: "[::]:8080"},
 		{name: "inline with unrelated host mount", source: &api.ConfigSource{Inline: "opaque"}},
-		{name: "URL", source: &api.ConfigSource{URL: "https://example.com/config"}},
 		{name: "no managed config"},
 		{name: "host volume replaced by ConfigMap", source: &api.ConfigSource{HostPath: "/etc/runtime"}, fragment: `"volumes":[{"name":"config","hostPath":null,"configMap":{"name":"external"}}],`},
 	} {

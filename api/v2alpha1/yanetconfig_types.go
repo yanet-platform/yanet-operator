@@ -52,11 +52,6 @@ type YanetConfigSpec struct {
 	// +optional
 	UpdateWindow int `json:"updateWindow,omitempty"`
 
-	// AutoDiscovery configures the optional new-worker initializer
-	// (carried over from v1alpha1 verbatim, untyped here).
-	// +optional
-	AutoDiscovery AutoDiscovery `json:"autoDiscovery,omitempty"`
-
 	// Images defines global image settings shared by all generated
 	// Deployments.
 	// +optional
@@ -134,7 +129,7 @@ type ControlplaneSpec struct {
 	// +kubebuilder:validation:Required
 	Image ImageRef `json:"image"`
 
-	// Config is the configuration source (inline | hostPath | url).
+	// Config is the configuration source (inline | hostPath).
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 
@@ -306,12 +301,6 @@ type OperatorContainer struct {
 	// Config is the configuration source for this container.
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
-
-	// HostIPC, when true, requests host IPC namespace for the whole
-	// Pod. Pod-level hostIPC=true is set if any container in the
-	// list requests it.
-	// +optional
-	HostIPC *bool `json:"hostIPC,omitempty"`
 }
 
 // NamedPatch is a strategic-merge patch fragment of an appsv1.Deployment
@@ -397,36 +386,6 @@ type BoxDataplaneSidecar struct {
 type BoxOperator struct {
 	// +optional
 	Patches []string `json:"patches,omitempty"`
-}
-
-// AutoDiscovery configures the optional new-worker initializer.
-//
-// Untouched from v1alpha1 to keep helm-chart shape stable. Not part of
-// the components/patches/boxTypes pipeline.
-type AutoDiscovery struct {
-	// +kubebuilder:default=false
-	// +optional
-	Enable bool `json:"enable,omitempty"`
-
-	// +optional
-	TypeURI string `json:"typeUri,omitempty"`
-
-	// +kubebuilder:default=default
-	// +optional
-	Namespace string `json:"namespace,omitempty"`
-
-	// +kubebuilder:default=dockerhub.io
-	// +optional
-	Registry string `json:"registry,omitempty"`
-
-	// +optional
-	VersionURI string `json:"versionUri,omitempty"`
-
-	// +optional
-	ArchURI string `json:"archUri,omitempty"`
-
-	// +optional
-	ConfigsURI string `json:"configsUri,omitempty"`
 }
 
 // MutexYanetConfigSpec wraps YanetConfigSpec for safe concurrent

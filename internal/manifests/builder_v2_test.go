@@ -512,7 +512,7 @@ func TestBuildDeployments_Operator_MultiContainerHostIPC(t *testing.T) {
 		Image: helpers.ResolvedImage{Name: "antiddos-op", Tag: "v0.5"},
 		Containers: []helpers.ResolvedContainer{
 			{Name: "operator", Image: helpers.ResolvedImage{Name: "antiddos-op", Tag: "v0.5"}},
-			{Name: "agent", Image: helpers.ResolvedImage{Name: "antiddos-agent", Tag: "v0.5"}, HostIPC: true},
+			{Name: "agent", Image: helpers.ResolvedImage{Name: "antiddos-agent", Tag: "v0.5"}},
 		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
@@ -522,9 +522,22 @@ func TestBuildDeployments_Operator_MultiContainerHostIPC(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("operator: 1 deployment expected")
 	}
+	if pod := deps[0].Spec.Template.Spec; pod.HostIPC || len(pod.Volumes) != 0 {
+		t.Fatalf("operator skeleton must not infer IPC or shared memory: %+v", pod)
+	}
+	c.Patches = []string{"agent-shmem"}
+	registry := NewPatchRegistry([]yanetv2alpha1.NamedPatch{patch("agent-shmem", `{"spec":{"template":{"spec":{
+		"hostIPC":true,
+		"volumes":[{"name":"hugepages","hostPath":{"path":"/dev/hugepages"}}],
+		"containers":[{"name":"agent","volumeMounts":[{"name":"hugepages","mountPath":"/dev/hugepages"}]}]
+	}}}}`)})
+	deps, err = RenderDeployments(ctxV2(), c, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pod := deps[0].Spec.Template.Spec
 	if !pod.HostIPC {
-		t.Errorf("any container HostIPC=true escalates pod-level: %v", pod.HostIPC)
+		t.Errorf("explicit Pod-level hostIPC patch was lost")
 	}
 	if len(pod.Containers) != 2 {
 		t.Fatalf("containers = %d", len(pod.Containers))
@@ -535,8 +548,7 @@ func TestBuildDeployments_Operator_MultiContainerHostIPC(t *testing.T) {
 	if len(pod.Containers[1].Ports) != 0 {
 		t.Errorf("non-primary should have no Service ports: %+v", pod.Containers[1])
 	}
-	// The hostIPC container (agent) is a shmem peer → gets the arena;
-	// the non-hostIPC container (operator) must not.
+	// IPC is Pod-level; only the explicitly named container gets the mount.
 	if hasMount(pod.Containers[0].VolumeMounts, "/dev/hugepages", false) {
 		t.Errorf("non-hostIPC operator must not mount shmem: %+v", pod.Containers[0].VolumeMounts)
 	}
@@ -611,7 +623,6 @@ func TestBuildDeployments_ConfigMountPath(t *testing.T) {
 		}{
 			{"host", yanetv2alpha1.ConfigSource{HostPath: "/host/config"}, true},
 			{"inline", yanetv2alpha1.ConfigSource{Inline: "opaque configuration"}, true},
-			{"url", yanetv2alpha1.ConfigSource{URL: "https://config.example/worker"}, false},
 		} {
 			t.Run(string(kind)+"/"+source.name, func(t *testing.T) {
 				config := source.config
@@ -692,19 +703,6 @@ func TestBuildDeployments_Config_Inline_GeneratesConfigMap(t *testing.T) {
 	cms2 := InlineConfigMaps(ctx, c)
 	if cms2[cmName] != "foo: bar" {
 		t.Errorf("inline map non-deterministic")
-	}
-}
-
-func TestBuildDeployments_Config_URL_EmptyDir(t *testing.T) {
-	c := &helpers.ResolvedComponent{
-		Kind: helpers.KindSidecar, Name: "worker", Enabled: true,
-		Image:  helpers.ResolvedImage{Name: "an", Tag: "x"},
-		Config: &yanetv2alpha1.ConfigSource{URL: "https://x/y"},
-	}
-	deps, _ := BuildDeployments(ctxV2(), c)
-	pod := deps[0].Spec.Template.Spec
-	if pod.Volumes[0].EmptyDir == nil {
-		t.Errorf("URL config: expected emptyDir, got %+v", pod.Volumes[0].VolumeSource)
 	}
 }
 
@@ -845,12 +843,14 @@ func TestBuildDeployments_ConfigSourceArgs(t *testing.T) {
 			want: []string{"/etc/yanet2/dataplane.yaml"},
 		},
 		{
-			// The controlplane fans out per NUMA, so its config
-			// path always carries the NUMA index — even on a
-			// single-NUMA host, where only index 0 exists.
 			name: "controlplane short option", kind: helpers.KindControlplane,
-			args: []string{"-c", "/etc/yanet2/controlplane.yaml"},
+			args: []string{"-c", "/etc/yanet2/controlplane-{numa}.yaml"},
 			want: []string{"-c", "/etc/yanet2/controlplane-0.yaml"},
+		},
+		{
+			name: "controlplane literal paths", kind: helpers.KindControlplane,
+			args: []string{"-c", "/etc/yanet2/controlplane.yaml", "--permissions", "/etc/auth/permissions.yml"},
+			want: []string{"-c", "/etc/yanet2/controlplane.yaml", "--permissions", "/etc/auth/permissions.yml"},
 		},
 		{
 			name: "bird adapter subcommand", kind: helpers.KindBirdAdapter,
@@ -895,7 +895,7 @@ func TestBuildDeployments_Controlplane_PerNumaConfigArgs(t *testing.T) {
 		Numa:  3,
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
-			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+			Args:     []string{"-c", "/etc/yanet2/controlplane-{numa}.yaml"},
 		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
@@ -934,11 +934,6 @@ func TestBuildDeployments_Controlplane_NumaPlaceholderKeepsPhysicalIndices(t *te
 			name:       "repeated placeholder without yaml extension",
 			path:       "/etc/yanet2/numa{numa}/config-{numa}",
 			wantFormat: "/etc/yanet2/numa%[1]d/config-%[1]d",
-		},
-		{
-			name:       "legacy literal path",
-			path:       "/etc/yanet2/controlplane.yaml",
-			wantFormat: "/etc/yanet2/controlplane-%d.yaml",
 		},
 	}
 	for _, tt := range tests {
@@ -987,56 +982,6 @@ func TestBuildDeployments_Controlplane_NumaPlaceholderKeepsPhysicalIndices(t *te
 	}
 }
 
-// TestNumaConfigArgs verifies the path rewriting in isolation: only YAML path
-// elements are touched, flags and subcommands survive untouched.
-func TestNumaConfigArgs(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		numa int32
-		want []string
-	}{
-		{
-			name: "short option", args: []string{"-c", "/etc/yanet2/controlplane.yaml"}, numa: 1,
-			want: []string{"-c", "/etc/yanet2/controlplane-1.yaml"},
-		},
-		{
-			name: "yml extension", args: []string{"-c", "/etc/yanet2/cp.yml"}, numa: 2,
-			want: []string{"-c", "/etc/yanet2/cp-2.yml"},
-		},
-		{
-			name: "subcommand preserved", args: []string{"run", "--config", "/etc/yanet2/cp.yaml"}, numa: 0,
-			want: []string{"run", "--config", "/etc/yanet2/cp-0.yaml"},
-		},
-		{
-			name: "no yaml element untouched", args: []string{"-c", "/etc/yanet2/config"}, numa: 1,
-			want: []string{"-c", "/etc/yanet2/config"},
-		},
-		{
-			name: "empty args", args: nil, numa: 1, want: nil,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := numaConfigArgs(tt.args, tt.numa)
-			if diff := cmp.Diff(tt.want, got); diff != "" {
-				t.Errorf("numaConfigArgs mismatch (-want +got):\n%s", diff)
-			}
-		})
-	}
-}
-
-// TestNumaConfigArgs_DoesNotMutateInput guards against aliasing: the resolved
-// ConfigSource is shared by every NUMA instance, so rewriting must not edit it
-// in place.
-func TestNumaConfigArgs_DoesNotMutateInput(t *testing.T) {
-	in := []string{"-c", "/etc/yanet2/controlplane.yaml"}
-	_ = numaConfigArgs(in, 1)
-	if in[1] != "/etc/yanet2/controlplane.yaml" {
-		t.Errorf("input mutated: %v", in)
-	}
-}
-
 // --- disabled NUMA ----------------------------------------------------------
 
 // TestBuildDeployments_Controlplane_DisabledNuma verifies that a NUMA domain
@@ -1050,7 +995,7 @@ func TestBuildDeployments_Controlplane_DisabledNuma(t *testing.T) {
 		DisabledNuma: []int32{1},
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
-			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+			Args:     []string{"-c", "/etc/yanet2/controlplane-{numa}.yaml"},
 		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)
@@ -1085,7 +1030,7 @@ func TestBuildDeployments_Controlplane_DisabledNumaKeepsIndices(t *testing.T) {
 		DisabledNuma: []int32{0},
 		Config: &yanetv2alpha1.ConfigSource{
 			HostPath: "/etc/yanet2",
-			Args:     []string{"-c", "/etc/yanet2/controlplane.yaml"},
+			Args:     []string{"-c", "/etc/yanet2/controlplane-{numa}.yaml"},
 		},
 	}
 	deps, err := BuildDeployments(ctxV2(), c)

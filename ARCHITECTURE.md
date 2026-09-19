@@ -200,13 +200,26 @@ spec:
       - name: antiddos
         containers:
           - { name: operator, image: {...} }
-          - { name: agent,    image: {...}, hostIPC: true }
+          - { name: agent,    image: {...} }
   patches:
     - name: telegraf
       patch:
         spec: { template: { metadata: { annotations: { telegraf...: "8080" } } } }
     - name: cp-resources-release
       patch: ...
+    - name: agent-shmem
+      patch:
+        spec:
+          template:
+            spec:
+              hostIPC: true
+              volumes:
+                - name: agent-shmem
+                  hostPath: {path: /dev/hugepages}
+              containers:
+                - name: agent
+                  volumeMounts:
+                    - {name: agent-shmem, mountPath: /dev/hugepages}
   boxTypes:
     - name: release
       components:
@@ -219,7 +232,7 @@ spec:
           patches: [telegraf, dp-resources]
       operators:
         announcer:    { patches: [telegraf] }
-        antiddos:     { patches: [telegraf] }
+        antiddos:     { patches: [telegraf, agent-shmem] }
 ```
 
 `Yanet` (v2alpha1) — see [`api/v2alpha1/yanet_types.go`](api/v2alpha1/yanet_types.go):
@@ -336,16 +349,8 @@ In `config.args`, `{numa}` is replaced by the physical NUMA index, for example
 `/etc/yanet2/controlplane.d/numa{numa}.yaml` becomes
 `/etc/yanet2/controlplane.d/numa0.yaml`. No extra suffix is added to an argument
 containing the placeholder. Disabled NUMA domains do not renumber the survivors.
-Arguments without the placeholder retain the legacy suffix convention:
-
-```
-args: [-c, /etc/yanet2/controlplane.yaml]
-  ⇒ NUMA 0:  -c /etc/yanet2/controlplane-0.yaml
-  ⇒ NUMA 1:  -c /etc/yanet2/controlplane-1.yaml
-```
-
-Without `{numa}`, only `*.yaml` / `*.yml` argument elements are rewritten;
-other arguments are passed through verbatim. This is required rather than cosmetic: the
+Arguments without the placeholder remain literal, including unrelated YAML
+paths such as a permissions file. The per-NUMA configuration is required: the
 controlplane reads `gateway.instance_id`, the gateway endpoint and every module
 endpoint **from the file**, and the binary accepts only `-c <path>`. A shared
 file would make every instance serve dataplane instance `0` and contend for the
@@ -418,7 +423,8 @@ Patches address original logical container/volume names; composition scopes them
 as `op-<operator-name-hash>-<logical-name>` (long names get a hash suffix).
 ConfigSources, args, image overrides, volume devices and resource
 field references are preserved. Patched config-download init containers precede
-their operator's restartable containers; URL fetching still requires such a patch.
+their operator's restartable containers; remote config fetching needs explicit
+init-container, emptyDir and consumer mount/args patches.
 Explicit probe/lifecycle port references are validated without rewriting numeric
 ports. Unknown TCP names (including names owned only by a sibling) and out-of-range
 ports are rejected. Profiles do not synthesize Kubernetes probes.
@@ -481,7 +487,7 @@ no node-wide allocator or host-port inventory scan.
 
 Automatic env requires the container's managed config mount to resolve to a
 HostPath volume **after patches**. Hugepages, devices and unrelated host mounts
-do not enable the overlay. Inline/ConfigMap content remains opaque; URL and absent
+do not enable the overlay. Inline/ConfigMap content remains opaque; absent
 config also receive no automatic network env. Managed keys override patches;
 unrelated environment variables are preserved.
 
@@ -755,10 +761,9 @@ for the full list.
 
 ### Still deferred / out of scope
 
-- **`ConfigSource.URL`** end-to-end (operator fetching the URL into a
-  ConfigMap). Today: `emptyDir` + a user-supplied patch attaches the init
-  container. See `H7` in the hardening plan.
-- **AutoDiscovery** in v2 — kept v1-only by design.
+- Remote configuration downloads require explicit init-container, emptyDir and
+  mount patches. There is no `ConfigSource.URL` placeholder API.
+- **AutoDiscovery** is v1-only and has no v2 field.
 - **JSON6902** patches — only strategic merge is supported.
 - **Patches on Service / ConfigMap** — generation is hardcoded from the
   component definition.

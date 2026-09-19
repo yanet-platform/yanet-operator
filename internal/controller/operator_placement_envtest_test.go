@@ -8,8 +8,36 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+var _ = DescribeTable("Retired v2 API fields", func(path []string, value interface{}, field string) {
+	config := &api.YanetConfigV2{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalV2ConfigSpec()}
+	config.Spec.Stop = true
+	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(config)
+	Expect(err).NotTo(HaveOccurred())
+	object["apiVersion"], object["kind"] = api.GroupVersion.String(), "YanetConfigV2"
+	Expect(unstructured.SetNestedField(object, value, path...)).To(Succeed())
+	resource := &unstructured.Unstructured{Object: object}
+	err = k8sClient.Create(ctx, resource, &client.CreateOptions{
+		FieldValidation: metav1.FieldValidationStrict,
+	})
+	if err == nil {
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, resource)).To(Succeed()) })
+	}
+	Expect(err).To(HaveOccurred(), "removed fields must not be accepted or silently pruned")
+	Expect(err.Error()).To(ContainSubstring(field))
+},
+	Entry("unused discovery", []string{"spec", "autoDiscovery"}, map[string]interface{}{"enable": true}, "autoDiscovery"),
+	Entry("unimplemented config downloader", []string{"spec", "components", "dataplane", "config"}, map[string]interface{}{"url": "https://config.example/config"}, "url"),
+	Entry("container-level pod IPC", []string{"spec", "components", "operators"}, []interface{}{
+		map[string]interface{}{"name": "worker", "containers": []interface{}{
+			map[string]interface{}{"name": "worker", "image": map[string]interface{}{"name": "worker"}, "hostIPC": true},
+		}},
+	}, "hostIPC"),
 )
 
 var _ = Describe("Ordered sidecar API", func() {
