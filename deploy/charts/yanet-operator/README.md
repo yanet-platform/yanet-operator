@@ -9,7 +9,7 @@ Requires Kubernetes 1.33+ for named Service target ports on native sidecars.
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.1.12 \
+  --version 0.1.13 \
   --namespace yanet-system \
   --create-namespace
 ```
@@ -102,6 +102,14 @@ slot or host-config env. Metrics requires explicit `[http]`. Managed HostPath
 configs receive runtime bind, advertise and complete named NUMA gateway env after
 patches; ConfigMap content stays opaque. Deploy compatible runtime images and
 prepare host gateway identities/TLS before enabling the new profile.
+
+Chart 0.1.13 adds optional `config.mountPath` for every v2 configuration source.
+It selects an absolute container directory and defaults to `/etc/yanet2`.
+HostPath source directories are unchanged; inline data appears as `config` in the
+chosen directory. Supply matching `config.args` explicitly. Patches remain available
+for additional inputs, sockets and permissions; no component name implies a mount.
+The full example uses a generated ConfigMap to select netconfig's Netplan mode and
+mounts only the host `/etc/netplan/00-interfaces.yaml` file as its network input.
 
 With webhooks enabled, chart-managed `yanetconfigV2` requires
 `webhook.failurePolicy: Ignore`. Helm

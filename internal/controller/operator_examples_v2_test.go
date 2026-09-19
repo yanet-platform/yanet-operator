@@ -125,7 +125,7 @@ func assertNetworkSidecarExample(t *testing.T, workloads []renderedWorkloadV2, d
 			t.Fatalf("wrong sidecar images/order: %s, %s", neighbour.Image, netconfig.Image)
 		}
 		if !reflect.DeepEqual(neighbour.Args, []string{"-c", "/etc/yanet2/yanet-neighbour-sidecar.yaml"}) ||
-			!reflect.DeepEqual(netconfig.Args, []string{"-config", "/etc/netconfig/config.yaml"}) {
+			!reflect.DeepEqual(netconfig.Args, []string{"-config", "/etc/netconfig/config"}) {
 			t.Fatalf("wrong runtime args: neighbour=%v netconfig=%v", neighbour.Args, netconfig.Args)
 		}
 		if netconfig.SecurityContext == nil || netconfig.SecurityContext.Privileged == nil || !*netconfig.SecurityContext.Privileged ||
@@ -141,7 +141,7 @@ func assertNetworkSidecarExample(t *testing.T, workloads []renderedWorkloadV2, d
 		for _, tt := range []struct {
 			container corev1.Container
 			paths     []string
-		}{{neighbour, []string{"/etc/yanet2"}}, {netconfig, []string{"/etc/netconfig", "/etc/netplan"}}} {
+		}{{neighbour, []string{"/etc/yanet2"}}, {netconfig, []string{"/etc/netconfig", "/etc/netplan/00-interfaces.yaml"}}} {
 			if len(tt.container.Ports) != 0 || len(tt.container.VolumeMounts) != len(tt.paths) {
 				t.Fatalf("unexpected listeners or mounts for %s: %+v", tt.container.Name, tt.container)
 			}
@@ -152,14 +152,31 @@ func assertNetworkSidecarExample(t *testing.T, workloads []renderedWorkloadV2, d
 						continue
 					}
 					volume := volumes[mount.Name]
-					if !mount.ReadOnly || seen[mount.Name] || volume.HostPath == nil || volume.HostPath.Path != path {
+					if !mount.ReadOnly || seen[mount.Name] {
 						t.Fatalf("expected independently scoped read-only %s mount: %+v", path, mount)
+					}
+					if path == "/etc/netconfig" {
+						if volume.ConfigMap == nil || volume.ConfigMap.Name == "" || volume.HostPath != nil {
+							t.Fatalf("netconfig selector must come from a generated ConfigMap: %+v", volume)
+						}
+					} else if volume.HostPath == nil || volume.HostPath.Path != path {
+						t.Fatalf("wrong host input for %s: %+v", path, volume)
+					} else if path == "/etc/netplan/00-interfaces.yaml" && (volume.HostPath.Type == nil || *volume.HostPath.Type != corev1.HostPathFile) {
+						t.Fatalf("netconfig must receive only the selected Netplan file: %+v", volume)
 					}
 					seen[mount.Name], found = true, true
 				}
 				if !found {
 					t.Fatalf("%s missing config mount %s", tt.container.Name, path)
 				}
+			}
+		}
+		if len(netconfig.Env) != 0 {
+			t.Fatalf("ConfigMap-backed netconfig must not receive host-config network env: %+v", netconfig.Env)
+		}
+		for _, sidecar := range workload.component.Sidecars {
+			if sidecar.Name == "netconfig" && sidecar.Config.Inline != "source: netplan\nnetplan_path: /etc/netplan/00-interfaces.yaml\n" {
+				t.Fatalf("netconfig must use the Netplan selector: %+v", sidecar.Config)
 			}
 		}
 	}

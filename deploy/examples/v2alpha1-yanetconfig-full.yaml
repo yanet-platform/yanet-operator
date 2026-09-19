@@ -34,6 +34,7 @@ spec:
           listeners: []
           config:
             hostPath: /etc/bird
+            mountPath: /etc/bird
         - name: neighbour-sidecar # slot 1: grpc 8082, http 8083
           image: {name: yanet2/neighbour-sidecar, tag: example}
           listeners: [] # Bind/gateway env still applies; no automatic Service.
@@ -44,8 +45,11 @@ spec:
           image: {name: netconfig, tag: example}
           listeners: []
           config:
-            hostPath: /etc/netconfig
-            args: [-config, /etc/netconfig/config.yaml]
+            inline: |
+              source: netplan
+              netplan_path: /etc/netplan/00-interfaces.yaml
+            mountPath: /etc/netconfig
+            args: [-config, /etc/netconfig/config]
     birdAdapter:
       image: {name: yanet2/bird-adapter, tag: example}
       config:
@@ -129,8 +133,6 @@ spec:
                   ports:
                     - {name: bgp, containerPort: 179, protocol: TCP}
                   volumeMounts:
-                    - {mountPath: /etc/yanet2, $patch: delete}
-                    - {name: config, mountPath: /etc/bird, readOnly: true}
                     - {name: bird-socket, mountPath: /run/bird}
               volumes:
                 - name: bird-socket
@@ -169,12 +171,10 @@ spec:
                   securityContext:
                     privileged: true # Netlink and per-interface IPv6 sysctls.
                   volumeMounts:
-                    - {mountPath: /etc/yanet2, $patch: delete}
-                    - {name: config, mountPath: /etc/netconfig, readOnly: true}
-                    - {name: netplan, mountPath: /etc/netplan, readOnly: true}
+                    - {name: netplan, mountPath: /etc/netplan/00-interfaces.yaml, readOnly: true}
               volumes:
                 - name: netplan
-                  hostPath: {path: /etc/netplan, type: Directory}
+                  hostPath: {path: /etc/netplan/00-interfaces.yaml, type: File}
   boxTypes:
     - name: release
       components:

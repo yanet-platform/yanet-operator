@@ -93,6 +93,12 @@ without renumbering the remaining instances. Each node can belong to only
 one `YanetV2`; overlapping selectors are resolved in favour of the existing
 workload owner (or the oldest CR before workloads exist).
 
+Optional v2 `config.mountPath` (chart 0.1.13+) selects the managed configuration
+directory inside any container; the default is `/etc/yanet2`. Inline configuration
+is mounted as `<mountPath>/config`. Source paths and `config.args` are unchanged.
+For example, BIRD can use `/etc/bird`, while netconfig uses `/etc/netconfig` with
+its source selector in a generated ConfigMap and the Netplan input mounted separately.
+
 > **Scope migration:** Kubernetes does not permit changing an installed CRD
 > from namespaced to cluster-scoped. Before upgrading a cluster that already
 > has the older namespaced `YanetConfigV2` CRD, export its spec, remove and

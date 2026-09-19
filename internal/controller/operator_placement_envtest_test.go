@@ -23,7 +23,8 @@ var _ = Describe("Ordered sidecar API", func() {
 		}
 		config.Spec.Components.Dataplane.Sidecars = []api.SidecarSpec{
 			{Name: "monalive", Listeners: &listeners, Image: api.ImageRef{Name: "test"}},
-			{Name: "client", Listeners: &empty, Image: api.ImageRef{Name: "test"}},
+			{Name: "client", Listeners: &empty, Image: api.ImageRef{Name: "test"},
+				Config: &api.ConfigSource{Inline: "opaque", MountPath: "/etc/client"}},
 		}
 		config.Spec.BoxTypes[0].Operators = map[string]api.BoxOperator{"legacy": {}}
 		config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]api.BoxDataplaneSidecar{"monalive": {}, "client": {}}
@@ -36,6 +37,7 @@ var _ = Describe("Ordered sidecar API", func() {
 		Expect(*fresh.Spec.Components.Dataplane.Sidecars[0].Listeners).To(ConsistOf(api.OperatorListener("grpc"), api.OperatorListener("http")))
 		Expect(fresh.Spec.Components.Dataplane.Sidecars[1].Listeners).NotTo(BeNil())
 		Expect(*fresh.Spec.Components.Dataplane.Sidecars[1].Listeners).To(BeEmpty())
+		Expect(fresh.Spec.Components.Dataplane.Sidecars[1].Config.MountPath).To(Equal("/etc/client"))
 		Expect(fresh.Spec.Components.Operators[0].Listeners).To(BeNil())
 		component, err := helpers.ResolveBoxComponent(&fresh.Spec, &api.YanetSpec{BoxType: "release"}, helpers.KindDataplane, "")
 		Expect(err).NotTo(HaveOccurred())
@@ -45,6 +47,8 @@ var _ = Describe("Ordered sidecar API", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(deployments).To(HaveLen(1))
 		Expect(deployments[0].Spec.Template.Spec.InitContainers).To(HaveLen(2))
+		Expect(deployments[0].Spec.Template.Spec.InitContainers[1].VolumeMounts).To(HaveLen(1))
+		Expect(deployments[0].Spec.Template.Spec.InitContainers[1].VolumeMounts[0].MountPath).To(Equal("/etc/client"))
 		Expect(k8sClient.Create(ctx, deployments[0])).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, deployments[0])).To(Succeed()) })
 		operator, err := helpers.ResolveBoxServiceComponent(&fresh.Spec, "release", helpers.KindSidecar, "monalive")

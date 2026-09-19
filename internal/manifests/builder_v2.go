@@ -418,6 +418,9 @@ func buildConfigVolumes(ctx BuildContextV2, c *helpers.ResolvedComponent) (
 		return nil, nil, "", nil
 	}
 	mountPath := defaultConfigMountPath
+	if cs.MountPath != "" {
+		mountPath = cs.MountPath
+	}
 	switch {
 	case cs.HostPath != "":
 		volumes = []corev1.Volume{{
@@ -466,6 +469,9 @@ func buildConfigVolumesForContainer(
 	}
 	volName := fmt.Sprintf("config-%d", idx)
 	mountPath := defaultConfigMountPath
+	if rc.Config.MountPath != "" {
+		mountPath = rc.Config.MountPath
+	}
 	switch {
 	case rc.Config.HostPath != "":
 		volumes = []corev1.Volume{{
@@ -495,7 +501,7 @@ func buildConfigVolumesForContainer(
 	return volumes, mounts, configMapName, append([]string(nil), rc.Config.Args...)
 }
 
-// defaultConfigMountPath is shared by all roles; patches may customize mounts.
+// defaultConfigMountPath is shared by all roles unless ConfigSource overrides it.
 const defaultConfigMountPath = "/etc/yanet2"
 
 // toLowerKebab converts a camelCase or mixed-case string to a lowercase

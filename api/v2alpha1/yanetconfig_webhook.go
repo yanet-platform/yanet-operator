@@ -180,6 +180,9 @@ func validateConfigSources(components *ComponentsSpec) error {
 		if source.HostPath != "" && !path.IsAbs(source.HostPath) {
 			return fmt.Errorf("%s.hostPath must be an absolute path", fieldPath)
 		}
+		if source.MountPath != "" && !path.IsAbs(source.MountPath) {
+			return fmt.Errorf("%s.mountPath must be an absolute path", fieldPath)
+		}
 		if source.URL != "" {
 			parsed, err := url.Parse(source.URL)
 			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {

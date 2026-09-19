@@ -602,6 +602,57 @@ func TestBuildDeployments_Operator_ManagedListener(t *testing.T) {
 
 // --- ConfigSource branches --------------------------------------------------
 
+func TestBuildDeployments_ConfigMountPath(t *testing.T) {
+	for _, kind := range []helpers.ComponentKind{helpers.KindSidecar, helpers.KindOperator} {
+		for _, source := range []struct {
+			name     string
+			config   yanetv2alpha1.ConfigSource
+			readOnly bool
+		}{
+			{"host", yanetv2alpha1.ConfigSource{HostPath: "/host/config"}, true},
+			{"inline", yanetv2alpha1.ConfigSource{Inline: "opaque configuration"}, true},
+			{"url", yanetv2alpha1.ConfigSource{URL: "https://config.example/worker"}, false},
+		} {
+			t.Run(string(kind)+"/"+source.name, func(t *testing.T) {
+				config := source.config
+				config.MountPath = "/etc/worker"
+				config.Args = []string{"-config", "/etc/worker/config"}
+				component := &helpers.ResolvedComponent{
+					Kind: kind, Name: "worker", Enabled: true,
+					Image: helpers.ResolvedImage{Name: "worker"}, Config: &config,
+				}
+				if kind == helpers.KindOperator {
+					component.Config = nil
+					component.Containers = []helpers.ResolvedContainer{{
+						Name: "worker", Image: component.Image, Config: &config,
+					}}
+				}
+				deployments, err := BuildDeployments(ctxV2(), component)
+				if err != nil {
+					t.Fatal(err)
+				}
+				container := deployments[0].Spec.Template.Spec.Containers[0]
+				if len(container.VolumeMounts) != 1 || !hasMount(container.VolumeMounts, "/etc/worker", source.readOnly) {
+					t.Fatalf("managed configuration must use the requested directory: %+v", container.VolumeMounts)
+				}
+				if diff := cmp.Diff(config.Args, container.Args); diff != "" {
+					t.Fatalf("arguments changed (-want +got): %s", diff)
+				}
+				volume := deployments[0].Spec.Template.Spec.Volumes[0]
+				if container.VolumeMounts[0].Name != volume.Name {
+					t.Fatal("mount no longer references its managed config volume")
+				}
+				if source.name == "host" && (volume.HostPath == nil || volume.HostPath.Path != "/host/config") {
+					t.Fatalf("container path changed the host source: %+v", volume)
+				}
+				if source.name == "inline" && (volume.ConfigMap == nil || InlineConfigMaps(ctxV2(), component)[volume.ConfigMap.Name] != "opaque configuration") {
+					t.Fatalf("container path changed the inline config: %+v", volume)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildDeployments_Config_HostPath(t *testing.T) {
 	c := &helpers.ResolvedComponent{
 		Kind: helpers.KindSidecar, Name: "worker", Enabled: true,

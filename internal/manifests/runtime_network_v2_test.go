@@ -93,6 +93,30 @@ func TestRuntimeNetwork_AllSidecarsOwnSlotsAndHostEnvironment(t *testing.T) {
 	}
 }
 
+func TestRuntimeNetwork_CustomConfigMountPath(t *testing.T) {
+	config, spec := runtimeNetworkFixture()
+	config.Components.Dataplane.Sidecars[0].Config.MountPath = "/etc/bird"
+	config.Components.Dataplane.Sidecars[2].Config = &api.ConfigSource{
+		Inline: "opaque application configuration", MountPath: "/etc/worker",
+		Args: []string{"-config", "/etc/worker/config"},
+	}
+	before := config.DeepCopy()
+	deployment, _ := renderRuntimeDataplane(t, config, spec)
+	containers := deployment.Spec.Template.Spec.InitContainers
+	if !hasMount(containers[0].VolumeMounts, "/etc/bird", true) || envValues(containers[0].Env)["YANET_SERVER_ENDPOINT"] != "[::]:8080" {
+		t.Fatalf("custom host config lost its mount or network overlay: %+v", containers[0])
+	}
+	if !hasMount(containers[2].VolumeMounts, "/etc/worker", true) || len(containers[2].Env) != 0 {
+		t.Fatalf("inline config must use its custom mount without host env: %+v", containers[2])
+	}
+	if envValues(containers[1].Env)["YANET_SERVER_ENDPOINT"] != "[::]:8082" {
+		t.Fatal("custom config mounts changed sidecar port allocation")
+	}
+	if !reflect.DeepEqual(before, config) {
+		t.Fatal("rendering mutated the palette")
+	}
+}
+
 func TestRuntimeNetwork_SelectionDoesNotCompactSlots(t *testing.T) {
 	for _, mode := range []string{"disabled", "unwired", "inline", "renamed"} {
 		t.Run(mode, func(t *testing.T) {
