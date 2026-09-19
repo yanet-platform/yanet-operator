@@ -83,12 +83,13 @@ yanet-operator/
 │       ├── yanetconfig_types.go   # Components palette, NamedPatch[], BoxType[]
 │       ├── yanet_webhook.go       # admission.Validator[*Yanet] (immutable boxType, refs)
 │       ├── yanetconfig_webhook.go # Validator (uniqueness, refs, strategic-merge dry-run)
-│       ├── config_source.go       # Inline | HostPath | URL
+│       ├── config_source.go       # Inline | HostPath
 │       └── zz_generated.deepcopy.go
 ├── cmd/main.go
 ├── internal/
 │   ├── controller/                # Reconcilers
-│   │   ├── yanet_controller.go    # Dispatches v2 → v1 by spec.boxType
+│   │   ├── yanet_controller.go    # Independent v1 controller
+│   │   ├── yanetv2_controller.go  # Independent v2 controller
 │   │   ├── yanet_reconciler.go    # v1 path
 │   │   ├── yanet_reconciler_v2.go # v2 path: resolve → build → patch → apply
 │   │   ├── yanetconfig_controller.go    # v1 in-memory snapshot
@@ -104,11 +105,11 @@ yanet-operator/
 │   │   ├── dataplane.go, controlplane.go, announcer.go, bird.go (v1)
 │   │   ├── builder_v2.go          # v2 skeleton: NUMA fan-out, hugepages, ConfigSource
 │   │   ├── patcher.go             # ApplyPatches via strategic merge
-│   │   ├── service_v2.go          # 3 CP categories + operator Local
+│   │   ├── service_v2.go          # explicit per-NUMA/component Local Services
 │   │   └── *_test.go
 │   ├── events/recorder.go         # SA1019 wrapper for EventRecorder
 │   └── names/const.go
-├── deploy/charts/yanet-operator/  # Helm chart (NFD optional dep, yanetconfig-v2 template)
+├── deploy/charts/yanet-operator/  # Helm chart (yanetconfig-v2 template)
 ├── deploy/examples/v2alpha1-*.yaml
 ├── .github/workflows/test.yml
 ├── Makefile
@@ -257,7 +258,8 @@ The current model splits the two API surfaces into **separate CRDs**:
 - v1: `yanets` + `yanetconfigs` (kinds `Yanet`/`YanetConfig`,
   `api/v1alpha1` Go package).
 - v2: `yanetsv2` + `yanetconfigsv2` (kinds `YanetV2`/`YanetConfigV2`,
-  `api/v2alpha1` Go package).
+  `api/v2alpha1` Go package). `YanetConfigV2` is the cluster-scoped singleton
+  named `config`.
 
 Each CRD has exactly one served+storage version, so the API server never
 converts between them and never prunes fields. There is no Reconcile
@@ -334,8 +336,9 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 ### v2alpha1 — three-tier model
 1. **`YanetConfig.spec.components`** — palette of available components:
-   five hardcoded slots (`controlplane`, `dataplane`, `bird`, `birdAdapter`,
-   `announcer`) plus a dynamic `operators[]` array.
+   `controlplane`, `dataplane`, optional `birdAdapter`, ordered atomic
+   `dataplane.sidecars[]` (one `SidecarSpec` per container), and standalone
+   `operators[].containers[]`. Announcer is an ordinary operator.
 2. **`YanetConfig.spec.patches []NamedPatch`** — strategic-merge fragments of
    `appsv1.Deployment` stored as `runtime.RawExtension` (validated via dry-run
    `strategicpatch.StrategicMergePatch(skeleton, patch, appsv1.Deployment{})`
@@ -345,30 +348,45 @@ reconciler reads from it. Same pattern for v1 and v2.
 
 `Yanet` CRs reference a `boxType` by name; per-installation overrides are
 restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-and `enabled` flags. The container key must match the rendered container
-name — the component kind for hardcoded components, the declared
-`OperatorContainer.name` for operators. No inline patches in `Yanet`.
+plus workload `enabled`, controlplane `disabledNuma`, and dataplane `networks`.
+Each typed network entry couples an existing NAD with one extended resource;
+the renderer derives matching requests/limits after patches. A per-installation
+network list replaces the palette list, `[]` clears it, and omitted/null inherits.
+Patches must not duplicate the managed Multus annotation or resource quantities.
+Sidecars use separate
+`dataplane.sidecars.<name>` image/enablement overrides. The container key for
+standalone workloads must match the rendered container name;
+operators use the declared `OperatorContainer.name`. No inline patches in
+`Yanet`.
 
 Reconcile flow:
 ```
 snapshot YanetConfig → resolve box components → build skeleton Deployments
 → ApplyPatches(deployment, patchNames, registry) → CreateOrUpdate
-→ generate Services from components.<name>.port → status
+→ report shared Service names in status
+
+YanetConfig reconciler → aggregate namespace × boxType component roles
+→ CreateOrUpdate shared Services owned by YanetConfigV2/config → prune orphans
 ```
 
 ### Controlplane NUMA fan-out
-Controlplane gets one Deployment per NUMA domain on the node. NUMA count is
-read from the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`
-(falls back to 1 when absent). Each instance listens on `port + numa_index`;
-three Service categories are generated:
-- `<yanet>-<nodehash>-numa{N}` — per-node Local (`internalTrafficPolicy=Local`).
-- `<yanet>-controlplane-numa{N}-cluster` — cluster-wide round-robin per NUMA.
-- `<yanet>-controlplane-all` — cluster-wide round-robin across all instances.
+Controlplane gets one Deployment per configured NUMA domain on the node.
+Set `spec.components.controlplane.numa` explicitly for multi-NUMA hosts;
+the default is 1. Each box-type NUMA role gets one shared
+`yanet-<boxType>-controlplane-numa{N}` Service with `internalTrafficPolicy=Local`
+and fixed `grpc:8080` / `http:8081` ports.
 
 ### Operator Services
-When `OperatorSpec.Port > 0`, **one** cluster-wide `ClusterIP` Service is
-generated, named after the operator, with `internalTrafficPolicy=Local` so
-in-node callers reach the local pod.
+Each operator wired by a box type gets one shared `ClusterIP` Service named
+`yanet-<boxType>-<operator>`, with `internalTrafficPolicy=Local` so in-node
+callers reach the local pod. All v2 workloads use private networking; final
+`hostNetwork: true` and nonzero `hostPort` are rejected. Sidecar index `i` in the
+complete palette reserves `8080+2*i` / `8081+2*i` before enablement/selection.
+Standalone Pods bind `8080/8081`; Service ports always stay `8080/8081`.
+Omitted listeners default to grpc; HTTP-only requires `[http]`. `[]` suppresses
+the Service, not the slot. After patches, only a managed HostPath config enables
+automatic runtime bind, Service advertise and named NUMA gateway env. ConfigMap
+content is opaque. Never add address/port validation of application config data.
 
 ### Webhook pattern (controller-runtime ≥ 0.23)
 Use the generic typed validator:
@@ -387,7 +405,7 @@ Avoid module-level `webhookClient` globals — pass dependencies through the
 validator struct.
 
 ### Controller pattern
-- `YanetReconciler` — manages `Yanet` (both versions) and `Node` events.
+- `YanetReconciler` manages v1 `Yanet`; `YanetV2Reconciler` manages `YanetV2`.
 - `YanetConfigReconciler` (v1) and `YanetConfigReconcilerV2` — keep the
   in-memory snapshots fresh.
 - All reconcilers share `*MutexYanetConfigSpec` via pointer.
@@ -399,16 +417,17 @@ validator struct.
 - ✅ AutoDiscovery without retry / without caching (not priority)
 
 ### To be implemented (v2 deferred)
-- [ ] Finalizers for graceful cleanup on Yanet delete
-- [ ] `updateWindow` global throttling on the v2 path
-- [ ] Formal `metav1.Condition` entries in `Yanet.Status` (currently only `Sync` buckets)
-- [ ] Init-container generation for `ConfigSource.URL` (today: emptyDir + patch)
+- [ ] Observed/applied palette revision tracking
 - [ ] JSON6902 (`jsonPatch`) — out of scope, only strategic merge is supported
 
 ### Done in v2 (was open in v1 era)
+- Global `updateWindow` throttling, conditions and observed generation.
+- Role migration drain guards and shared-Service selector cutover guards.
+- Finalizer cleanup waits for foreground Deployment deletion before releasing
+  the node claim; the global stop switch pauses cleanup too.
 - ✅ Validation webhooks (`vyanet-v2.kb.io`, `vyanetconfig-v2.kb.io`)
 - ✅ Watches: per-version `Yanet`, `Node` (with mapper), `Pod`
-- ✅ Per-component `Service` generation (per-node Local + cluster-wide RR)
+- ✅ Explicit per-component `Service` generation with stable Local endpoints
 
 ## 📚 Resources
 

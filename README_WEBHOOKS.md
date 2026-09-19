@@ -234,7 +234,7 @@ helm upgrade yanet-operator ./deploy/charts/yanet-operator
 - [`api/v1alpha1/yanet_webhook.go`](api/v1alpha1/yanet_webhook.go) — v1 Yanet validation
 - [`api/v1alpha1/yanetconfig_webhook.go`](api/v1alpha1/yanetconfig_webhook.go) — v1 YanetConfig validation
 - [`api/v2alpha1/yanet_webhook.go`](api/v2alpha1/yanet_webhook.go) — v2 YanetV2 validation (boxType refs, immutability)
-- [`api/v2alpha1/yanetconfig_webhook.go`](api/v2alpha1/yanetconfig_webhook.go) — v2 YanetConfigV2 validation (uniqueness, cross-refs, strategic-merge dry-run)
+- [`api/v2alpha1/yanetconfig_webhook.go`](api/v2alpha1/yanetconfig_webhook.go) — v2 YanetConfigV2 validation (fixed singleton identity, cross-refs, strategic-merge dry-run)
 - [`deploy/charts/yanet-operator/templates/webhook-service.yaml`](deploy/charts/yanet-operator/templates/webhook-service.yaml) — Service for webhook
 - [`deploy/charts/yanet-operator/templates/webhook-cert-jobs.yaml`](deploy/charts/yanet-operator/templates/webhook-cert-jobs.yaml) — Jobs for certificate generation
 - [`deploy/charts/yanet-operator/templates/webhook-configuration.yaml`](deploy/charts/yanet-operator/templates/webhook-configuration.yaml) — ValidatingWebhookConfiguration (all four CRDs)

@@ -21,24 +21,22 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// NFDNumaCountLabel is the Node Feature Discovery label that exposes
-// the number of NUMA domains on the host. The operator reads it to
-// decide how many controlplane Deployments to generate per node.
-const NFDNumaCountLabel = "feature.node.kubernetes.io/cpu-numa_nodes_count"
-
 // YanetSpec is the per-installation CR. Everything a "box" looks like
 // (which components are deployed and how they are patched) is defined
 // in YanetConfigV2.spec.boxTypes[<boxType>]. This CR is intentionally
 // tiny: it only selects the target nodes and references a boxType.
 //
-// No patches and no inline component specs are accepted here — the
-// only per-installation customisation knobs are typed point-overrides
-// in components.<name>.{enabled,image}.
+// No patches and no inline component specs are accepted here. The only
+// per-installation customisation knobs are typed point-overrides for images,
+// enablement, controlplane NUMA selection and dataplane network attachments.
+// Native sidecars can also be disabled through components.dataplane.sidecars.
 type YanetSpec struct {
 	// BoxType selects a boxType definition from
 	// YanetConfigV2.spec.boxTypes[]. Required.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	BoxType string `json:"boxType"`
 
 	// NodeSelector restricts the installation to a subset of nodes.
@@ -48,11 +46,11 @@ type YanetSpec struct {
 
 	// Enabled is the "scale-to-zero" switch for the whole
 	// installation. When false, the operator still renders every
-	// Deployment/Service/ConfigMap (so generated specs can be
-	// inspected and patches still apply), but forces replicas=0
-	// on every Deployment regardless of per-component
-	// overrides. Use this to verify the rendered spec without
-	// actually running pods. Defaults to true.
+	// Deployments and ConfigMaps (so generated specs can be inspected and
+	// patches still apply), but forces replicas=0
+	// on every Deployment regardless of per-component overrides. Shared Services
+	// remain available for the box-type roles. Use this to verify the rendered
+	// spec without actually running pods. Defaults to true.
 	//
 	// To freeze the operator's view of the CR (keep existing
 	// Deployments untouched, including hand edits) use
@@ -69,26 +67,22 @@ type YanetSpec struct {
 	AutoSync *bool `json:"autoSync,omitempty"`
 
 	// Components offers narrow, per-installation overrides for
-	// individual components. Only image and enabled flags are
-	// allowed. Anything else (annotations, resources, ...) lives in
-	// YanetConfigV2 patches.
+	// individual components: images, enabled flags, controlplane NUMA selection
+	// and the dataplane's complete network attachment list. General annotations
+	// and resources live in YanetConfigV2 patches.
 	// +optional
 	Components *YanetComponentsOverride `json:"components,omitempty"`
 }
 
-// YanetComponentsOverride holds typed per-installation overrides for
-// the 5 hardcoded components and dynamic operators (by name).
+// YanetComponentsOverride holds typed per-installation overrides for the fixed
+// workload components and dynamic operators (by name).
 type YanetComponentsOverride struct {
 	// +optional
 	Controlplane *YanetControlplaneOverride `json:"controlplane,omitempty"`
 	// +optional
-	Dataplane *YanetComponentOverride `json:"dataplane,omitempty"`
-	// +optional
-	Bird *YanetComponentOverride `json:"bird,omitempty"`
+	Dataplane *YanetDataplaneOverride `json:"dataplane,omitempty"`
 	// +optional
 	BirdAdapter *YanetComponentOverride `json:"birdAdapter,omitempty"`
-	// +optional
-	Announcer *YanetComponentOverride `json:"announcer,omitempty"`
 	// Operators keyed by OperatorSpec.Name.
 	// +optional
 	Operators map[string]YanetComponentOverride `json:"operators,omitempty"`
@@ -103,15 +97,46 @@ type YanetComponentOverride struct {
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Containers overrides image.name and/or image.tag per
-	// container, keyed by container name. For the 5 hardcoded
-	// components (single-container) the key is the kind:
-	// "controlplane", "dataplane", "bird", "birdAdapter",
-	// "announcer". For operators the key is the
+	// Containers overrides image.name and image.tag per container, keyed by
+	// container name. Single-container fixed components use their rendered
+	// container name. The dataplane accepts only "dataplane". Operators use
 	// YanetConfigV2.spec.components.operators[].containers[].name.
-	// Registry/prefix come from YanetConfigV2.spec.images.
+	// Registry/prefix come from the palette image, falling back to
+	// YanetConfigV2.spec.images.
 	// +optional
-	Containers map[string]ImageRef `json:"containers,omitempty"`
+	Containers map[string]YanetContainerOverride `json:"containers,omitempty"`
+}
+
+// YanetDataplaneOverride separates the primary container from named sidecars.
+type YanetDataplaneOverride struct {
+	YanetComponentOverride `json:",inline"`
+
+	// Networks replaces the palette's complete list of Multus attachments.
+	// Omitted/null inherits; [] explicitly removes the declared attachments.
+	// Do not omit an empty list during serialization: it is an explicit override.
+	// +optional
+	// +listType=atomic
+	Networks []NetworkAttachment `json:"networks"`
+
+	// Sidecars overrides enabled and image name/tag for each selected sidecar.
+	// +optional
+	Sidecars map[string]YanetContainerOverride `json:"sidecars,omitempty"`
+}
+
+// YanetContainerOverride is the per-installation image override for one
+// rendered container.
+type YanetContainerOverride struct {
+	// Enabled may only be set under the dataplane sidecars map.
+	// The dataplane field itself uses the component-level Enabled
+	// switch because a Pod cannot run without its primary container.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// +optional
+	Tag string `json:"tag,omitempty"`
 }
 
 // YanetControlplaneOverride is the controlplane flavour of
@@ -133,16 +158,28 @@ type YanetControlplaneOverride struct {
 	//
 	// An empty (but non-nil) list explicitly clears the cluster-wide
 	// default, re-enabling every NUMA index. Leave the field unset
-	// to inherit the default.
+	// or null to inherit the default. Do not omit empty lists on encoding:
+	// controller updates must preserve the explicit clear.
 	// +optional
-	DisabledNuma []int32 `json:"disabledNuma,omitempty"`
+	DisabledNuma []int32 `json:"disabledNuma"`
 }
 
-// ImageRef identifies an image. Registry and prefix come from
-// YanetConfigV2.spec.images.
+// ImageRef identifies a palette image. Registry and prefix default to
+// YanetConfigV2.spec.images but can be overridden independently for each image.
 type ImageRef struct {
-	// Name is the image name without registry/prefix/tag.
+	// Registry overrides the global registry. Nil inherits the global value;
+	// an explicit empty string omits the registry segment.
 	// +optional
+	Registry *string `json:"registry,omitempty"`
+
+	// Prefix overrides the global prefix. Nil inherits the global value;
+	// an explicit empty string omits the prefix segment.
+	// +optional
+	Prefix *string `json:"prefix,omitempty"`
+
+	// Name is the image name without registry/prefix/tag.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name,omitempty"`
 
 	// Tag is the image tag.
@@ -208,6 +245,7 @@ type NodeStatus struct {
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:path=yanetsv2,shortName=yntv2,categories=yanetv2
+//+kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must fit in a 63-character workload label"
 //+kubebuilder:printcolumn:name="BoxType",type=string,JSONPath=`.spec.boxType`
 //+kubebuilder:printcolumn:name="AutoSync",type=boolean,JSONPath=`.spec.autoSync`
 //+kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`

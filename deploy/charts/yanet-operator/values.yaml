@@ -87,16 +87,6 @@ yanetconfig:
 extraManifests: {}
 
 # ============================================================
-# Node Feature Discovery (optional sub-chart).
-# When enabled the chart deploys NFD which exposes
-# feature.node.kubernetes.io/cpu-numa_nodes_count on every node.
-# The v2 reconciler reads this label to decide controlplane NUMA
-# fan-out. If you already run NFD in the cluster, leave this off.
-# ============================================================
-node-feature-discovery:
-  enabled: false
-
-# ============================================================
 # v2alpha1 cluster-wide YanetConfig (optional).
 #
 # When provided, the chart renders templates/yanetconfig-v2.yaml
@@ -107,6 +97,8 @@ node-feature-discovery:
 #
 # Comment out / unset to omit the YanetConfig (e.g. if you manage
 # it through GitOps or applies it manually).
+# Chart-managed YanetConfigV2 requires webhook.failurePolicy=Ignore because the
+# webhook certificate/CA job completes after Helm's main resource phase.
 # ============================================================
 yanetconfigV2: {}
 #  spec:
@@ -117,11 +109,25 @@ yanetconfigV2: {}
 #    components:
 #      controlplane:
 #        image: {name: controlplane, tag: v2.1}
-#        port: 8080
+#        numa: 2
+#        config: {hostPath: /etc/yanet2}
 #      dataplane:
 #        image: {name: dataplane, tag: v2.1}
-#        port: 8090
 #        hugepages: {size: 1Gi, count: 8}
+#        # Existing device-backed NAD; repeat with a different interface for another PF.
+#        networks:
+#          - {name: yanet-pf, interface: eth2, resourceName: yanet-platform.io/pf}
+#          - {name: yanet-pf, interface: eth4, resourceName: yanet-platform.io/pf}
+#        sidecars:
+#          - name: bird
+#            image: {name: bird, tag: "2.15"}
+#            listeners: []
+#          - name: neighbour-sidecar
+#            image: {name: neighbour-sidecar, tag: example}
+#            config: {hostPath: /etc/yanet2}
+#          - name: netconfig
+#            image: {name: netconfig, tag: example}
+#            listeners: []
 #    patches:
 #      - name: telegraf
 #        patch:
@@ -134,4 +140,9 @@ yanetconfigV2: {}
 #      - name: release
 #        components:
 #          controlplane: {patches: [telegraf]}
-#          dataplane: {patches: [telegraf]}
+#          dataplane:
+#            sidecars:
+#              bird: {}
+#              neighbour-sidecar: {}
+#              netconfig: {}
+#            patches: [telegraf]

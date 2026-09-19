@@ -17,26 +17,21 @@ limitations under the License.
 package v2alpha1
 
 // ConfigSource describes where the configuration of a yanet component
-// comes from. Exactly one of Inline, HostPath or URL must be specified.
+// comes from. Exactly one of Inline or HostPath must be specified.
 //
 //   - Inline: configuration is embedded into the CR; the operator creates a
 //     ConfigMap (named deterministically by content hash) and mounts it into
-//     the Pod at the per-component default directory (/etc/bird for bird,
-//     /etc/yanet2 for everything else).
+//     the Pod at MountPath (default /etc/yanet2).
 //   - HostPath: a HOST directory mounted into the Pod as a hostPath volume at
-//     the per-component default directory. The component binary finds its
+//     configured MountPath (default /etc/yanet2). The component binary finds its
 //     config file inside that directory by its own default name (e.g.
 //     controlplane.conf). This is the default for production hosts.
-//   - URL: an HTTP(S) endpoint that returns the configuration body. The
-//     operator generates an initContainer that downloads the file (with
-//     `?node=<nodeName>` appended automatically) into an emptyDir volume
-//     shared with the main container.
 //
 // Args, when set, are passed to the component binary verbatim. For HostPath
 // sources the whole directory is mounted, so args can reference any file in
 // that directory. Inline content is available as <mountDir>/config.
 //
-// Validation that exactly one of Inline/HostPath/URL is filled is enforced
+// Validation that exactly one of Inline/HostPath is filled is enforced
 // by the webhook.
 type ConfigSource struct {
 	// Inline is the literal configuration body. When set, the operator
@@ -46,18 +41,18 @@ type ConfigSource struct {
 
 	// HostPath is the HOST directory to mount into the container via a
 	// hostPath volume. The directory is mounted read-only at the
-	// per-component default path (/etc/bird for bird, /etc/yanet2 for
-	// everything else). The component binary reads its config file from
+	// default path /etc/yanet2, unless MountPath or a patch customizes it.
+	// The component binary reads its config file from
 	// inside that directory using its own default file name.
 	// +optional
 	HostPath string `json:"hostPath,omitempty"`
 
-	// URL is an HTTP(S) endpoint that returns the configuration body.
-	// The operator runs an initContainer that downloads the body into
-	// an emptyDir volume shared with the main container; the parameter
-	// `?node=<nodeName>` is appended automatically.
+	// MountPath is the absolute container directory for the managed config volume.
+	// Defaults to /etc/yanet2 when omitted. Inline content is stored as config
+	// inside this directory; Args are never rewritten to match the mount.
+	// +kubebuilder:validation:Pattern=`^(/.*)?$`
 	// +optional
-	URL string `json:"url,omitempty"`
+	MountPath string `json:"mountPath,omitempty"`
 
 	// Args defines command-line arguments passed to the component verbatim.
 	// Examples: ["/etc/yanet2/dataplane.yaml"] for dataplane, ["-c",
@@ -72,7 +67,7 @@ func (c *ConfigSource) IsZero() bool {
 	if c == nil {
 		return true
 	}
-	return c.Inline == "" && c.HostPath == "" && c.URL == ""
+	return c.Inline == "" && c.HostPath == ""
 }
 
 // VariantsSet returns the number of variants populated. The webhook
@@ -86,9 +81,6 @@ func (c *ConfigSource) VariantsSet() int {
 		n++
 	}
 	if c.HostPath != "" {
-		n++
-	}
-	if c.URL != "" {
 		n++
 	}
 	return n

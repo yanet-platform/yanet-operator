@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/go-logr/logr"
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	corev1 "k8s.io/api/core/v1"
@@ -128,10 +127,9 @@ func computeConditionsV2(yanet *yanetv2alpha1.YanetV2, missingOperators map[stri
 	return mergeConditions(yanet.Status.Conditions, out, now)
 }
 
-// setConditionsV2Degraded is a fast-path used by error-out branches
-// that bail before the full reconcile completes. It sets only the
-// Degraded condition to True with the given reason and leaves other
-// conditions intact (or zero-valued when none existed).
+// setConditionsV2Degraded is a fast-path used by error-out branches that bail
+// before the full reconcile completes. It marks the resource Degraded and
+// explicitly clears Ready so an earlier healthy status cannot remain stale.
 func setConditionsV2Degraded(yanet *yanetv2alpha1.YanetV2, reason, message string) {
 	now := metav1.Now()
 	deg := metav1.Condition{
@@ -142,7 +140,15 @@ func setConditionsV2Degraded(yanet *yanetv2alpha1.YanetV2, reason, message strin
 		Reason:             reason,
 		Message:            message,
 	}
-	yanet.Status.Conditions = mergeConditions(yanet.Status.Conditions, []metav1.Condition{deg}, now)
+	ready := metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: yanet.Generation,
+		LastTransitionTime: now,
+		Reason:             "NotReady",
+		Message:            "See Degraded condition",
+	}
+	yanet.Status.Conditions = mergeConditions(yanet.Status.Conditions, []metav1.Condition{deg, ready}, now)
 }
 
 // mergeConditions overlays new conditions onto existing ones, keeping
@@ -183,15 +189,13 @@ func collectPodsV2(
 	ctx context.Context,
 	cl client.Client,
 	yanet *yanetv2alpha1.YanetV2,
-	logger logr.Logger,
-) map[corev1.PodPhase][]string {
+) (map[corev1.PodPhase][]string, error) {
 	pods := &corev1.PodList{}
 	if err := cl.List(ctx, pods,
 		client.InNamespace(yanet.Namespace),
 		client.MatchingLabels{manifests.LabelYanet: yanet.Name},
 	); err != nil {
-		logger.Info("pod list failed (continuing with empty pod set)", "error", err)
-		return nil
+		return nil, fmt.Errorf("list Pods for YanetV2 %s/%s: %w", yanet.Namespace, yanet.Name, err)
 	}
 	out := map[corev1.PodPhase][]string{}
 	for i := range pods.Items {
@@ -201,5 +205,5 @@ func collectPodsV2(
 	for k := range out {
 		sort.Strings(out[k])
 	}
-	return out
+	return out, nil
 }

@@ -7,8 +7,8 @@
 #   2. Every "valid" CR is accepted by the webhook AND, once reconciled, the
 #      operator generates the expected Deployments (all with replicas=0 because
 #      every component has enabled=false).
-#   3. Every "invalid" CR under cases/invalid/ is REJECTED by the webhook with
-#      a non-empty error message.
+#   3. Every "invalid" CR is rejected by the webhook, or by the specific CRD
+#      validation rule expected for the invalid port-range fixture.
 #   4. The operator log contains no ERROR lines (except known-noise patterns
 #      that are explicitly whitelisted).
 #
@@ -104,7 +104,7 @@ done
 green "  all valid CRs accepted"
 
 # --------------------------------------------------------------------
-# 4) Apply invalid CRs — every one MUST fail with a webhook error.
+# 4) Apply invalid CRs — each must fail at its expected validation boundary.
 # --------------------------------------------------------------------
 blue "[4/5] Applying invalid CRs (must be rejected)..."
 for f in "$INVALID_DIR"/*.yaml; do

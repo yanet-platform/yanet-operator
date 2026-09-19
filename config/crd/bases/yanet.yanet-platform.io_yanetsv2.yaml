@@ -63,9 +63,10 @@ spec:
               in YanetConfigV2.spec.boxTypes[<boxType>]. This CR is intentionally
               tiny: it only selects the target nodes and references a boxType.
 
-              No patches and no inline component specs are accepted here — the
-              only per-installation customisation knobs are typed point-overrides
-              in components.<name>.{enabled,image}.
+              No patches and no inline component specs are accepted here. The only
+              per-installation customisation knobs are typed point-overrides for images,
+              enablement, controlplane NUMA selection and dataplane network attachments.
+              Native sidecars can also be disabled through components.dataplane.sidecars.
             properties:
               autoSync:
                 description: |-
@@ -79,83 +80,17 @@ spec:
                 description: |-
                   BoxType selects a boxType definition from
                   YanetConfigV2.spec.boxTypes[]. Required.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               components:
                 description: |-
                   Components offers narrow, per-installation overrides for
-                  individual components. Only image and enabled flags are
-                  allowed. Anything else (annotations, resources, ...) lives in
-                  YanetConfigV2 patches.
+                  individual components: images, enabled flags, controlplane NUMA selection
+                  and the dataplane's complete network attachment list. General annotations
+                  and resources live in YanetConfigV2 patches.
                 properties:
-                  announcer:
-                    description: |-
-                      YanetComponentOverride is the only per-installation customisation
-                      surface for a component. Anything broader belongs to a patch.
-                    properties:
-                      containers:
-                        additionalProperties:
-                          description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
-                          properties:
-                            name:
-                              description: Name is the image name without registry/prefix/tag.
-                              type: string
-                            tag:
-                              description: Tag is the image tag.
-                              type: string
-                          type: object
-                        description: |-
-                          Containers overrides image.name and/or image.tag per
-                          container, keyed by container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
-                          YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
-                        type: object
-                      enabled:
-                        description: |-
-                          Enabled toggles this component for this installation only.
-                          true → replicas=1, false → replicas=0 (component still
-                          rendered, but with zero pods).
-                        type: boolean
-                    type: object
-                  bird:
-                    description: |-
-                      YanetComponentOverride is the only per-installation customisation
-                      surface for a component. Anything broader belongs to a patch.
-                    properties:
-                      containers:
-                        additionalProperties:
-                          description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
-                          properties:
-                            name:
-                              description: Name is the image name without registry/prefix/tag.
-                              type: string
-                            tag:
-                              description: Tag is the image tag.
-                              type: string
-                          type: object
-                        description: |-
-                          Containers overrides image.name and/or image.tag per
-                          container, keyed by container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
-                          YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
-                        type: object
-                      enabled:
-                        description: |-
-                          Enabled toggles this component for this installation only.
-                          true → replicas=1, false → replicas=0 (component still
-                          rendered, but with zero pods).
-                        type: boolean
-                    type: object
                   birdAdapter:
                     description: |-
                       YanetComponentOverride is the only per-installation customisation
@@ -164,24 +99,27 @@ spec:
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation image override for one
+                            rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set under the dataplane sidecars map.
+                                The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
-                          container, keyed by container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          Containers overrides image.name and image.tag per container, keyed by
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts only "dataplane". Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       enabled:
                         description: |-
@@ -199,24 +137,27 @@ spec:
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation image override for one
+                            rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set under the dataplane sidecars map.
+                                The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
-                          container, keyed by container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          Containers overrides image.name and image.tag per container, keyed by
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts only "dataplane". Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       disabledNuma:
                         description: |-
@@ -233,7 +174,8 @@ spec:
 
                           An empty (but non-nil) list explicitly clears the cluster-wide
                           default, re-enabling every NUMA index. Leave the field unset
-                          to inherit the default.
+                          or null to inherit the default. Do not omit empty lists on encoding:
+                          controller updates must preserve the explicit clear.
                         items:
                           format: int32
                           type: integer
@@ -246,31 +188,33 @@ spec:
                         type: boolean
                     type: object
                   dataplane:
-                    description: |-
-                      YanetComponentOverride is the only per-installation customisation
-                      surface for a component. Anything broader belongs to a patch.
+                    description: YanetDataplaneOverride separates the primary container
+                      from named sidecars.
                     properties:
                       containers:
                         additionalProperties:
                           description: |-
-                            ImageRef identifies an image. Registry and prefix come from
-                            YanetConfigV2.spec.images.
+                            YanetContainerOverride is the per-installation image override for one
+                            rendered container.
                           properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set under the dataplane sidecars map.
+                                The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
                             name:
-                              description: Name is the image name without registry/prefix/tag.
                               type: string
                             tag:
-                              description: Tag is the image tag.
                               type: string
                           type: object
                         description: |-
-                          Containers overrides image.name and/or image.tag per
-                          container, keyed by container name. For the 5 hardcoded
-                          components (single-container) the key is the kind:
-                          "controlplane", "dataplane", "bird", "birdAdapter",
-                          "announcer". For operators the key is the
+                          Containers overrides image.name and image.tag per container, keyed by
+                          container name. Single-container fixed components use their rendered
+                          container name. The dataplane accepts only "dataplane". Operators use
                           YanetConfigV2.spec.components.operators[].containers[].name.
-                          Registry/prefix come from YanetConfigV2.spec.images.
+                          Registry/prefix come from the palette image, falling back to
+                          YanetConfigV2.spec.images.
                         type: object
                       enabled:
                         description: |-
@@ -278,6 +222,63 @@ spec:
                           true → replicas=1, false → replicas=0 (component still
                           rendered, but with zero pods).
                         type: boolean
+                      networks:
+                        description: |-
+                          Networks replaces the palette's complete list of Multus attachments.
+                          Omitted/null inherits; [] explicitly removes the declared attachments.
+                          Do not omit an empty list during serialization: it is an explicit override.
+                        items:
+                          description: NetworkAttachment couples one Multus attachment
+                            with one extended resource.
+                          properties:
+                            interface:
+                              description: Interface is the interface name inside
+                                the dataplane Pod.
+                              maxLength: 15
+                              minLength: 1
+                              type: string
+                            name:
+                              description: Name references an existing NetworkAttachmentDefinition.
+                              maxLength: 253
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: Namespace defaults to the YanetV2 installation
+                                namespace.
+                              maxLength: 63
+                              type: string
+                            resourceName:
+                              description: ResourceName must match the NAD's k8s.v1.cni.cncf.io/resourceName
+                                annotation.
+                              minLength: 1
+                              type: string
+                          required:
+                          - interface
+                          - name
+                          - resourceName
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      sidecars:
+                        additionalProperties:
+                          description: |-
+                            YanetContainerOverride is the per-installation image override for one
+                            rendered container.
+                          properties:
+                            enabled:
+                              description: |-
+                                Enabled may only be set under the dataplane sidecars map.
+                                The dataplane field itself uses the component-level Enabled
+                                switch because a Pod cannot run without its primary container.
+                              type: boolean
+                            name:
+                              type: string
+                            tag:
+                              type: string
+                          type: object
+                        description: Sidecars overrides enabled and image name/tag
+                          for each selected sidecar.
+                        type: object
                     type: object
                   operators:
                     additionalProperties:
@@ -288,24 +289,27 @@ spec:
                         containers:
                           additionalProperties:
                             description: |-
-                              ImageRef identifies an image. Registry and prefix come from
-                              YanetConfigV2.spec.images.
+                              YanetContainerOverride is the per-installation image override for one
+                              rendered container.
                             properties:
+                              enabled:
+                                description: |-
+                                  Enabled may only be set under the dataplane sidecars map.
+                                  The dataplane field itself uses the component-level Enabled
+                                  switch because a Pod cannot run without its primary container.
+                                type: boolean
                               name:
-                                description: Name is the image name without registry/prefix/tag.
                                 type: string
                               tag:
-                                description: Tag is the image tag.
                                 type: string
                             type: object
                           description: |-
-                            Containers overrides image.name and/or image.tag per
-                            container, keyed by container name. For the 5 hardcoded
-                            components (single-container) the key is the kind:
-                            "controlplane", "dataplane", "bird", "birdAdapter",
-                            "announcer". For operators the key is the
+                            Containers overrides image.name and image.tag per container, keyed by
+                            container name. Single-container fixed components use their rendered
+                            container name. The dataplane accepts only "dataplane". Operators use
                             YanetConfigV2.spec.components.operators[].containers[].name.
-                            Registry/prefix come from YanetConfigV2.spec.images.
+                            Registry/prefix come from the palette image, falling back to
+                            YanetConfigV2.spec.images.
                           type: object
                         enabled:
                           description: |-
@@ -321,11 +325,11 @@ spec:
                 description: |-
                   Enabled is the "scale-to-zero" switch for the whole
                   installation. When false, the operator still renders every
-                  Deployment/Service/ConfigMap (so generated specs can be
-                  inspected and patches still apply), but forces replicas=0
-                  on every Deployment regardless of per-component
-                  overrides. Use this to verify the rendered spec without
-                  actually running pods. Defaults to true.
+                  Deployments and ConfigMaps (so generated specs can be inspected and
+                  patches still apply), but forces replicas=0
+                  on every Deployment regardless of per-component overrides. Shared Services
+                  remain available for the box-type roles. Use this to verify the rendered
+                  spec without actually running pods. Defaults to true.
 
                   To freeze the operator's view of the CR (keep existing
                   Deployments untouched, including hand edits) use
@@ -463,6 +467,9 @@ spec:
                 type: object
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must fit in a 63-character workload label
+          rule: size(self.metadata.name) <= 63
     served: true
     storage: true
     subresources:

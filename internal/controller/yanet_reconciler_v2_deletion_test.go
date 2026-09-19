@@ -62,7 +62,8 @@ func TestHandleYanetV2Deletion_NoFinalizer_ReturnsImmediately(t *testing.T) {
 
 // TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources verifies that
 // when the finalizer is present, handleYanetV2Deletion prunes all owned
-// resources and removes the finalizer.
+// resources and removes the finalizer. Shared Services are owned by
+// YanetConfigV2 and must not be deleted here.
 func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 	yanet := &yanetv2alpha1.YanetV2{
 		ObjectMeta: metav1.ObjectMeta{
@@ -98,6 +99,8 @@ func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 		},
 	}
 
+	dep.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
+	cm.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, dep, svc, cm)
 
 	result, err := r.handleYanetV2Deletion(context.Background(), yanet, silentLogger())
@@ -110,12 +113,12 @@ func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 		t.Errorf("expected no requeue after successful cleanup, got %+v", result)
 	}
 
-	// Verify all owned resources were deleted
+	// Verify YanetV2-owned resources were deleted.
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-dep", Namespace: "yanet"}, &appsv1.Deployment{}); !apierrors.IsNotFound(err) {
 		t.Errorf("owned Deployment must be deleted, got err=%v", err)
 	}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-svc", Namespace: "yanet"}, &corev1.Service{}); !apierrors.IsNotFound(err) {
-		t.Errorf("owned Service must be deleted, got err=%v", err)
+	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-svc", Namespace: "yanet"}, &corev1.Service{}); err != nil {
+		t.Errorf("Service must be left for YanetConfigV2 reconciliation, got err=%v", err)
 	}
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "owned-cm", Namespace: "yanet"}, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
 		t.Errorf("owned ConfigMap must be deleted, got err=%v", err)
@@ -127,45 +130,6 @@ func TestHandleYanetV2Deletion_WithFinalizer_CleansUpResources(t *testing.T) {
 	}
 	if controllerutil.ContainsFinalizer(yanet, yanetFinalizer) {
 		t.Errorf("finalizer must be removed after cleanup, got finalizers=%v", yanet.Finalizers)
-	}
-}
-
-// TestHandleYanetV2Deletion_CleanupError_RetainsFinalizer verifies that
-// when cleanup fails, the finalizer is retained and the error is returned
-// for retry.
-func TestHandleYanetV2Deletion_CleanupError_RetainsFinalizer(t *testing.T) {
-	yanet := &yanetv2alpha1.YanetV2{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "y",
-			Namespace:  "yanet",
-			Finalizers: []string{yanetFinalizer},
-		},
-	}
-
-	r, _ := makeReconcilerEnv(t, yanet)
-
-	// Note: In a real scenario, cleanup might fail due to API errors.
-	// With fake client, pruneOrphans should succeed, so this test
-	// primarily verifies the error handling path exists.
-	// For a true error test, we'd need a client that can simulate failures.
-
-	result, err := r.handleYanetV2Deletion(context.Background(), yanet, silentLogger())
-
-	// With fake client, cleanup should succeed
-	if err != nil {
-		t.Logf("cleanup error (expected in some scenarios): %v", err)
-		// Verify requeue is set on error
-		if result.RequeueAfter == 0 {
-			t.Errorf("expected RequeueAfter > 0 on cleanup error")
-		}
-	} else {
-		// Cleanup succeeded, finalizer should be removed
-		if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
-			t.Fatalf("re-get yanet: %v", err)
-		}
-		if controllerutil.ContainsFinalizer(yanet, yanetFinalizer) {
-			t.Errorf("finalizer must be removed after successful cleanup")
-		}
 	}
 }
 
@@ -198,6 +162,7 @@ func TestHandleYanetV2Deletion_ForeignResources_NotDeleted(t *testing.T) {
 		},
 	}
 
+	owned.OwnerReferences = []metav1.OwnerReference{yanetV2OwnerReferenceForTest()}
 	r, _ := makeReconcilerEnv(t, yanet, owned, foreign)
 
 	result, err := r.handleYanetV2Deletion(context.Background(), yanet, silentLogger())
