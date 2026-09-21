@@ -1,5 +1,5 @@
 # Minimal Yanet CR (boxType=release).
-# Uses the boxType definition from YanetConfig "cluster-defaults".
+# Uses the boxType definition from the cluster-scoped YanetConfigV2 "config".
 ---
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetV2

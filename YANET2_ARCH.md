@@ -11,7 +11,7 @@
 |---|---|
 | **Module** | Code that obtains an *arena* from the dataplane and writes to shmem via the IPC namespace; compiles data into a binary format. May live either inside the `controlplane` or as a standalone process. Examples: `acl`, `route`, `decap`, `nat64`, `balancer`, `forward`. |
 | **Operator** | Userspace wrapper around a module. Holds the pre-compilation ("source") state, supplies data to be compiled, talks gRPC with other entities (via `gateway`), and collects metrics. Examples: `yanet-pipeline-operator`, `yanet-route-operator`, `yanet-forward-operator`. |
-| **Agent** | Same as an operator, but requires **direct access to the host IPC namespace** (`hostIPC: true`). From the CRD point of view it is identical to an operator — only the flag differs. Planned example: `antiddos`. |
+| **Agent** | An operator container that also accesses shared memory. Its mounts and any Pod IPC requirements are explicit Deployment patches. Planned example: `antiddos`. |
 | **Bundle** | A set of modules inside `controlplane` that work via shmem: `acl`, `route`, `decap`, `nat`, `balancer`. |
 | **Built-in** | Services inside `controlplane` that do not perform networking tasks but are required to assemble the pipeline: `pipe`, `function`, `counters`, `inspect`, `logging`. They are auto-registered in the gateway (see [`gateway.go`](../yanet2/controlplane/internal/gateway/gateway.go:179)). |
 | **Gateway** | gRPC + HTTP/gRPC-proxy inside `controlplane`. The registration entry point for external operators (`Register` in [`service.go`](../yanet2/controlplane/internal/gateway/service.go:63)) and the entry point for CLI / web / metrics-collector. |
@@ -23,26 +23,54 @@
 
 | Component | Deployment | IPC / network | Config |
 |---|---|---|---|
-| `dataplane` (`yanet-dataplane`) | One Deployment per node | `hostNetwork: true`, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet` | hostPath (`/etc/yanet2/dataplane.yaml`), as in v1 |
-| `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` (for shmem) | hostPath, inline or URL |
+| `dataplane` (`yanet-dataplane`) | One Deployment per node | Private Pod network, `hostIPC: true`, hugepages, shmem `/dev/hugepages/yanet`; native sidecars share its network namespace | hostPath (`/etc/yanet2/dataplane.yaml`) |
+| `controlplane` (`yanet-controlplane-director`) | One Deployment **per NUMA domain** | gRPC `[::]:8080` / HTTP `[::]:8081` (inside the Pod), `hostIPC` | hostPath or inline; `{numa}` explicitly selects per-NUMA files |
 | `metrics-collector` | DaemonSet (out of yanet-operator scope in Phase 4) | gRPC to gateway service | — |
 
-### 2.2. BIRD
+### 2.2. Dataplane network sidecars and BIRD
 
 | Component | Deployment | Wiring |
 |---|---|---|
-| `bird` (BIRD2) | Standalone Deployment | hostPath config (as in v1); shared volume `/run/bird` for the unix socket |
+| `bird` (BIRD2) | Native sidecar in the dataplane Pod | hostPath config; owns `/run/bird`; shares dataplane network namespace |
+| `netconfig` | Generic single-container sidecar in the dataplane Pod | bootstraps KNI/VLAN/lo/dummy; privileged for netlink and per-interface IPv6 sysctls; read-only `/etc/netconfig` and `/etc/netplan`; no RPC listener |
+| `neighbour-sidecar` | Generic single-container sidecar in the dataplane Pod | observes kernel neighbours and publishes `SwapNeighbours` through outbound gateways; own gRPC `Ready/Watch`; read-only config, no interface-configuration privileges |
 | `bird-adapter` (`yanet-bird-adapter`) | Standalone Deployment | shared `/run/bird` (reads BIRD socket); gRPC → gateway service and/or route-operator service |
 
-> In the CRD, `bird` and `bird-adapter` are represented as **a single entity**:
-> bird without an adapter is useless, and the adapter without bird is useless.
-> Two distinct Deployments are kept so they can be upgraded independently.
+> All three use `spec.components.dataplane.sidecars[]`, an ordered atomic list of
+> `SidecarSpec` (`name`, `image`, `config`, `listeners`). Each entry creates exactly
+> one restartable init container (`restartPolicy: Always`). Box types select names
+> through `components.dataplane.sidecars`; startup and port slots follow the complete
+> palette order, including disabled/unselected entries. BIRD, neighbour-sidecar,
+> netconfig reserve respectively 8080/8081, 8082/8083 and 8084/8085.
+> During migration, stop the old operator and delete its standalone v2 BIRD
+> Deployments before enabling this sidecar. Both variants own the node-local
+> `/run/bird` control-socket directory and cannot run concurrently.
+
+BIRD is optional and has no name-based dependency checks in the controller.
+Declare its config, socket mounts, ports and permissions through scoped patches;
+declare socket mounts for its consumers separately.
+
+Netconfig must retry absent KNI asynchronously: dataplane creates KNI only after
+the native sidecars start. No blocking init/PostStart hook or runtime Kubernetes
+probes are configured. Announcer owns application readiness decisions through
+YANET gRPC readiness APIs; operator consumption of these APIs is deferred.
+Neighbour-sidecar does not register with gateway. For a managed host config its
+bind is overridden to `[::]:8082`; `[grpc]` creates a Service on external port 8080,
+while `[]` leaves the bind/gateway env but suppresses the Service.
+It reports publication status, not FIB/forwarding readiness.
+
+There are no fixed BIRD/netlink slots. See the
+[full example](deploy/examples/v2alpha1-yanetconfig-full.yaml) for separate images,
+config mounts, and the netconfig-specific security patch. Image release/pinning,
+host config generation, and a real Kubernetes forwarding smoke are rollout steps.
 
 ### 2.3. Operators and Agents
 
-The list comes from CRD field `OperatorsSpec.Items[]`.
-For each item a separate Deployment + ClusterIP Service is created.
-The link to `gateway` is bidirectional over gRPC: an operator registers itself in the gateway, and the gateway calls the operator back at the address of its Service.
+The list comes from `spec.components.operators[]` and creates standalone
+Deployments. Dataplane roles use the separate sidecar list. Service-backed roles receive a shared box-type
+ClusterIP Service. Explicit `listeners: []` suppresses managed listeners and
+Services. Registering operators talk bidirectionally with gateway; the two
+network sidecars above do not register.
 
 | Operator | Binary | Example config file |
 |---|---|---|
@@ -52,26 +80,27 @@ The link to `gateway` is bidirectional over gRPC: an operator registers itself i
 | acl | `yanet-operator-acl` | `/etc/yanet/operator-acl.yaml` |
 | (planned) antiddos | operator + agent in one Pod | — |
 
-An agent is functionally identical to an operator but requires `hostIPC: true`
-(direct access to the host IPC namespace). Two deployment shapes are supported:
+Agents use the same container-group API as operators. Two shapes are supported:
 
 - **Single-container Deployment** — the most common case (`pipeline`, `route`,
-  `forward`, `acl`). One container per Pod, optionally with `hostIPC: true`.
+  `forward`, `acl`).
 - **Multi-container Deployment** — needed when an operator and a paired agent
   must live in **the same Pod** (shared lifecycle, shared volumes, the same
   IPC/network namespaces). The reference case is `antiddos`: an `operator`
-  container + an `agent` container with `hostIPC: true`.
+  container + an `agent` container with an explicitly patched shared-memory mount.
 
-The CRD therefore models each item via `containers[]` (see [`13-operators-spec.md`](YANET2_MIGRATION_PLAN/13-operators-spec.md) §4):
+The CRD models each item via `containers[]`:
 single-container is `containers: [{...}]`, multi-container is
-`containers: [{name: operator, ...}, {name: agent, hostIPC: true, ...}]`.
-The Pod-level `hostIPC` is set if **any** container in the list requests it.
+`containers: [{name: operator, ...}, {name: agent, ...}]`.
+There is no container-level `hostIPC` field and no inferred hugepages mount.
+Set `spec.template.spec.hostIPC` when required, declare the shared volume, and
+mount it only into the intended containers through a Deployment patch.
 
-### 2.4. Announcer (planned, shown on the diagram)
+### 2.4. Announcer
 
-- Standalone Deployment.
+- Standalone Deployment declared as an ordinary `operators[name=announcer]`.
 - Watches host health and decides whether the node should be in service.
-- Primary channel: gRPC to `gateway`.
+- Readiness targets are direct application gRPC endpoints configured in `operators[]`.
 - Additionally needs the **bird unix socket** (shared volume `/run/bird`)
   in order to withdraw the announcement when controlplane fails.
 
@@ -83,30 +112,43 @@ The Pod-level `hostIPC` is set if **any** container in the list requests it.
 
 ## 3. Service Topology
 
-Created by yanet-operator:
+Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`:
 
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
-| `controlplane-numa{N}` | `app=controlplane,numa=N,node=<host>` | ClusterIP, `internalTrafficPolicy: Local`, headless if needed | Pod-local operators and dataplane on the same node reach their controlplane |
-| `controlplane-numa{N}-cluster` | `app=controlplane,numa=N` | ClusterIP, round-robin across all nodes | External clients (CLI, web, metrics-collector) reach the gateway of a specific NUMA domain across the cluster |
-| `controlplane-all-cluster` | `app=controlplane` | ClusterIP, round-robin | Universal entry point for metrics-collector / CLI when NUMA affinity is irrelevant |
-| `<operator>-svc` | `app=<operator>,node=<host>` | ClusterIP | Backconnect from gateway → operator (using its registered address) |
-| `bird-svc` / `bird-adapter-svc` | `app=bird*` | ClusterIP | For debug / tooling |
-| `announcer-svc` | `app=announcer` | ClusterIP | Internal |
+| `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>,component=controlplane,numa=N` | ClusterIP, `internalTrafficPolicy: Local` | Reach the local gateway for one NUMA role; exposes `grpc:8080` and `http:8081` |
+| `yanet-<boxType>-<operator>` | `box-type=<boxType>,component=<operator>` | ClusterIP, `internalTrafficPolicy: Local` | Stable address advertised by an operator for gateway callbacks on `grpc:8080` |
+| `yanet-<boxType>-announcer` | `box-type=<boxType>,component=announcer` | ClusterIP, `internalTrafficPolicy: Local` | Internal announcer entry point on `grpc:8080` |
+
+Services are unconditional for service-backed roles wired by a box type, even when an
+installation or component has zero replicas. Their selectors omit Yanet and node
+identity so installations of the same box type share the stable DNS names in a
+namespace. Named targets resolve standalone `8080/8081` or the sidecar's reserved
+pair, with stable external `8080/8081`. Sidecars use membership-label selectors.
+
+Every role defaults omitted listeners to `[grpc]`; metrics must explicitly select
+`[http]`. `listeners: []` disables Service exposure, not the slot or host-config env.
+Only the managed config volume after patches enables the HostPath overlay; inline
+ConfigMap/no-config roles receive none. Runtime gateway env selects active
+physical `numa<N>` entries and preserves their TLS. See
+[the environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
 
 ## 4. Dependencies
 
-- **Node Feature Discovery (NFD)** — optional helm-chart dependency.
-  - `helm install -n node-feature-discovery --create-namespace nfd oci://registry.k8s.io/nfd/charts/node-feature-discovery --version 0.19.0`
-  - The label `feature.node.kubernetes.io/cpu-numa_nodes_count` is used to determine how many controlplane Deployments to generate per node.
-- Host requirements: hugepages, `hostNetwork`, `hostIPC` capability.
+- **Kubernetes 1.33+** — required so EndpointSlice resolves named Service
+  target ports exposed by restartable init-container sidecars.
+- Host requirements: hugepages, `hostIPC`, DPDK devices, and netplan input.
+  Final v2 `hostNetwork: true` and nonzero `hostPort` are unsupported.
+- Compatible runtime images and prepared host configs for named gateway overrides.
+  ACL runtime support is an external integration prerequisite.
 
 ## 5. Mermaid diagram
 
 > Simplified single-NUMA view (in production a node has N NUMA domains and N
 > `controlplane` Deployments). Modules live **inside** `controlplane` (bundle).
-> Operators are **separate Deployments** outside `controlplane`. The BIRD unix
-> socket (`/run/bird`) is shared **only** with `bird-adapter` and `announcer`.
+> Standalone operators run outside `controlplane`. BIRD, netconfig and
+> neighbour-sidecar share the dataplane Pod. The BIRD unix socket
+> (`/run/bird`) is also mounted into `bird-adapter` and `announcer`.
 
 ```mermaid
 flowchart TB
@@ -121,12 +163,10 @@ flowchart TB
     classDef svc fill:#fff,stroke:#444,stroke-dasharray:3 2,color:#000
     classDef plan fill:#fff,stroke:#999,stroke-dasharray:5 4,color:#666
 
-    subgraph TOP[" External & cluster-wide Services "]
+    subgraph TOP[" Stable Service entry points "]
         direction LR
         EXT["External clients<br/>cli / web / metrics-collector<br/>(not deployed by operator)"]:::plan
-        SVCALL["Service: controlplane-all<br/>(cluster-wide RR)"]:::svc
-        SVCNUMA["Service: controlplane-numa{N}-cluster<br/>(per-NUMA cluster-wide RR)"]:::svc
-        EXT -->|gRPC/HTTP| SVCALL
+        SVCNUMA["Service: yanet-&lt;boxType&gt;-controlplane-numa{N}<br/>internalTrafficPolicy: Local"]:::svc
         EXT -->|gRPC/HTTP| SVCNUMA
     end
 
@@ -136,7 +176,13 @@ flowchart TB
         HUGE[("hugepages<br/>/dev/hugepages/yanet")]:::host
         BIRDSOCK[("shared volume<br/>/run/bird")]:::host
 
-        DP["dataplane Deployment<br/>hostNetwork + hostIPC + hugepages"]:::dp
+        subgraph DPPOD[" dataplane Deployment / shared Pod network namespace "]
+            DP["dataplane<br/>hostIPC + hugepages"]:::dp
+            NC["netconfig<br/>privileged bootstrap"]:::op
+            NS["neighbour-sidecar<br/>discovery and publication"]:::op
+            KNI["KNI / VLAN / lo / dummy"]:::host
+            BIRD["bird (BIRD2)"]:::bird
+        end
 
         subgraph CP[" controlplane Deployment (per NUMA) "]
             direction TB
@@ -153,7 +199,7 @@ flowchart TB
             end
         end
 
-        SVCCP["Service: controlplane-numa{N}<br/>(per-node, internalTrafficPolicy: Local)"]:::svc
+        SVCCP["Service: yanet-&lt;boxType&gt;-controlplane-numa{N}<br/>gRPC + HTTP"]:::svc
         SVCCP --- GW
 
         OP_PIPE["yanet-pipeline-operator<br/>Deployment + Service"]:::op
@@ -162,7 +208,6 @@ flowchart TB
 
         AG_DDOS["antiddos Deployment<br/>2 containers in one Pod:<br/>operator + agent (hostIPC=true)<br/>+ Service"]:::agent
 
-        BIRD["bird (BIRD2)<br/>Deployment"]:::bird
         BADAPT["bird-adapter<br/>Deployment"]:::bird
         ANN["announcer<br/>Deployment (planned)"]:::plan
     end
@@ -170,6 +215,10 @@ flowchart TB
     %% dataplane <-> controlplane via shmem (host IPC)
     DP <-. shmem .-> BUNDLE
     DP --- HUGE
+    DP -->|create KNI| KNI
+    NC -->|bootstrap| KNI
+    KNI -->|kernel neighbours| NS
+    NS -->|gRPC SwapNeighbours| GW
 
     %% Operators register with gateway and serve callbacks
     OP_PIPE  <-->|gRPC Register / callback| GW
@@ -180,7 +229,7 @@ flowchart TB
     %% Antiddos agent container needs host IPC
     AG_DDOS -. hostIPC ns .-> HUGE
 
-    %% BIRD socket shared ONLY with bird-adapter and announcer
+    %% BIRD publishes its socket from the dataplane Pod
     BIRD   ---|unix sock rw| BIRDSOCK
     BADAPT ---|unix sock ro| BIRDSOCK
     ANN    ---|unix sock ro| BIRDSOCK
@@ -190,50 +239,35 @@ flowchart TB
     BADAPT -->|gRPC| OP_ROUTE
 
     %% announcer -> gateway
-    ANN -->|gRPC| SVCALL
+    ANN -->|gRPC| SVCNUMA
 
-    %% Cluster-wide RR Services point to per-NUMA controlplane(s)
-    SVCALL  -.-> GW
+    %% Stable per-NUMA Service points to the local gateway
     SVCNUMA -.-> GW
 ```
 
 > The diagram shows **one** NUMA domain. For an N-NUMA host the operator
 > generates N copies of the `controlplane Deployment` and matching
-> `controlplane-numa{N}` / `controlplane-numa{N}-cluster` Services
+> `yanet-<boxType>-controlplane-numa{N}` Services
 > (see §3 above).
 
-## 6. yanet-operator Requirements (Phase 4 input)
+## 6. Configuration contract
 
-The architecture above translates into the following items in the implementation plan
-([`YANET2_MIGRATION_PLAN/16-phase4-plan.md`](YANET2_MIGRATION_PLAN/16-phase4-plan.md)):
+`components` declares the palette; `boxTypes` selects components and ordered
+Deployment patches; `YanetV2` selects a box and per-installation overrides.
+The current types and runnable examples are the source of truth:
 
-1. **Optional NFD dependency** in the helm chart; read
-   `feature.node.kubernetes.io/cpu-numa_nodes_count` to determine how many controlplane Deployments to generate per node.
-2. **dataplane Deployment** with `hostIPC: true`, `hostNetwork: true`, hugepages,
-   `securityContext`, and a hostPath config.
-3. **N controlplane Deployments per node** plus Services:
-   `controlplane-numa{N}` (per-node, `internalTrafficPolicy: Local`),
-   `controlplane-numa{N}-cluster` (cluster-wide round-robin),
-   `controlplane-all` (universal RR).
-4. **bird + bird-adapter** — a single CRD entity producing two independent Deployments,
-   shared volume `/run/bird`, hostPath bird config.
-5. **Operators / agents — array in CRD** with fields:
-   - `name`, `replicas` / `nodeSelector`, `service`,
-   - `config: { inline | hostPath | url }` (see §7),
-   - `containers[]` — one or more containers in the same Pod, each with
-     its own `image`, `args`, `env`, `resources`, `hostIPC`,
-     `extraVolumes` / `extraVolumeMounts`. Pod-level `hostIPC` is enabled
-     if any container sets it. This supports both classical operators
-     (single-container) and operator+agent pairs (e.g. `antiddos`) in
-     a single Deployment.
-   For each item a separate Deployment and Service are generated.
-6. **Announcer Deployment** — separate CRD section, with `/run/bird` mount
-   and access to the gateway service.
+- [v2 API](api/v2alpha1/yanetconfig_types.go).
+- [Full configuration](deploy/examples/v2alpha1-yanetconfig-full.yaml).
+- [Rendering and ownership](ARCHITECTURE.md).
+
+There is no fixed announcer/BIRD/netlink slot, placement switch, host-network
+allocator or v2 auto-discovery. Announcer is an ordinary operator; BIRD and the
+network sidecars are declarations in `dataplane.sidecars[]`.
 
 ## 7. Component Config Sources
 
 CRD `v2alpha1` introduces a unified `config` schema (shared by controlplane,
-dataplane, bird, all operators / agents / announcer):
+dataplane, dataplane native sidecars, all operators / agents / announcer):
 
 ```yaml
 config:
@@ -242,13 +276,15 @@ config:
     logging: { level: info }
     ...
   # variant 2 — hostPath (as in v1)
-  hostPath: /etc/yanet2/dataplane.yaml
-  # variant 3 — HTTP URL; the parameter ?node=<nodeName> is appended automatically
-  url: https://config-server.example/yanet2/controlplane
+  hostPath: /etc/yanet2
+  # Optional container directory; default /etc/yanet2
+  mountPath: /etc/yanet2
 ```
 
 Exactly **one** of the variants may be specified. Validation lives in the webhook.
-For `url`, an initContainer downloads the config into an emptyDir before the main container starts.
+Remote configuration downloads are entirely described by Deployment patches:
+an init container, an emptyDir, and the consumer mounts/args. The typed API
+does not offer an unimplemented URL source.
 
 ## 8. Open Questions / Deferred
 

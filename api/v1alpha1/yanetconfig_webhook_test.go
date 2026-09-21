@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,11 +26,11 @@ import (
 
 func TestYanetConfigValidateCreate(t *testing.T) {
 	tests := []struct {
-		name        string
-		config      *YanetConfig
-		wantErr     bool
-		errMsg      string
-		wantWarning bool
+		name         string
+		config       *YanetConfig
+		wantErr      bool
+		errMsg       string
+		wantWarnings []string
 	}{
 		{
 			name: "valid config with positive updatewindow",
@@ -42,8 +43,7 @@ func TestYanetConfigValidateCreate(t *testing.T) {
 					Stop:         false,
 				},
 			},
-			wantErr:     false,
-			wantWarning: false,
+			wantErr: false,
 		},
 		{
 			name: "valid config with zero updatewindow",
@@ -56,8 +56,7 @@ func TestYanetConfigValidateCreate(t *testing.T) {
 					Stop:         false,
 				},
 			},
-			wantErr:     false,
-			wantWarning: false,
+			wantErr: false,
 		},
 		{
 			name: "invalid config with negative updatewindow",
@@ -84,8 +83,8 @@ func TestYanetConfigValidateCreate(t *testing.T) {
 					Stop:         true,
 				},
 			},
-			wantErr:     false,
-			wantWarning: true,
+			wantErr:      false,
+			wantWarnings: []string{"Stop is enabled - operator will not reconcile resources"},
 		},
 		{
 			name: "config with autodiscovery but no typeuri (warning)",
@@ -96,13 +95,14 @@ func TestYanetConfigValidateCreate(t *testing.T) {
 				Spec: YanetConfigSpec{
 					UpdateWindow: 0,
 					AutoDiscovery: AutoDiscovery{
-						Enable:  true,
-						TypeUri: "",
+						Enable:    true,
+						TypeUri:   "",
+						Namespace: "default",
 					},
 				},
 			},
-			wantErr:     false,
-			wantWarning: true,
+			wantErr:      false,
+			wantWarnings: []string{"AutoDiscovery is enabled but TypeUri is not set"},
 		},
 		{
 			name: "config with autodiscovery but no namespace (warning)",
@@ -119,8 +119,8 @@ func TestYanetConfigValidateCreate(t *testing.T) {
 					},
 				},
 			},
-			wantErr:     false,
-			wantWarning: true,
+			wantErr:      false,
+			wantWarnings: []string{"AutoDiscovery is enabled but Namespace is not set, using default"},
 		},
 	}
 
@@ -138,12 +138,8 @@ func TestYanetConfigValidateCreate(t *testing.T) {
 				t.Errorf("ValidateCreate() error message = %v, want %v", err.Error(), tt.errMsg)
 			}
 
-			if tt.wantWarning && len(warnings) == 0 {
-				t.Errorf("ValidateCreate() expected warnings but got none")
-			}
-
-			if !tt.wantWarning && len(warnings) > 0 {
-				t.Errorf("ValidateCreate() unexpected warnings: %v", warnings)
+			if !reflect.DeepEqual([]string(warnings), tt.wantWarnings) {
+				t.Errorf("ValidateCreate() warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
 	}

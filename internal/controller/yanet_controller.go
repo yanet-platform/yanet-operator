@@ -144,15 +144,3 @@ func (r *YanetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Complete(r)
 }
-
-// labelsMatchSelector returns true if every key in selector is
-// present in labels with the same value. An empty selector matches
-// every node. Shared with the v2 controller.
-func labelsMatchSelector(labels, selector map[string]string) bool {
-	for k, v := range selector {
-		if labels[k] != v {
-			return false
-		}
-	}
-	return true
-}

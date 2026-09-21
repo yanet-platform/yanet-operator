@@ -20,39 +20,29 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 
 	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
 
-// ShortNodeKey returns a stable short hex key derived from the node
-// name. The reconciler uses it to build deterministic per-node
-// resource names that fit within the 63-character DNS label limit.
+// ShortNodeKey returns the stable short identity used in generated names.
 func ShortNodeKey(nodeName string) string {
 	h := sha256.Sum256([]byte(nodeName))
 	return hex.EncodeToString(h[:4])
 }
 
-// ComponentKind identifies which component is being resolved. The five
-// hardcoded kinds match the fixed slots in YanetConfigV2.spec.components;
-// KindOperator covers any element of the dynamic operators[] array.
+// ComponentKind distinguishes independently deployed roles from native sidecars.
 type ComponentKind string
 
 const (
 	KindControlplane ComponentKind = "controlplane"
 	KindDataplane    ComponentKind = "dataplane"
-	KindBird         ComponentKind = "bird"
 	KindBirdAdapter  ComponentKind = "birdAdapter"
-	KindAnnouncer    ComponentKind = "announcer"
 	KindOperator     ComponentKind = "operator"
+	KindSidecar      ComponentKind = "sidecar"
 )
 
-// ResolvedImage is the image reference after merging the component
-// definition from YanetConfigV2.spec.components with the optional
-// per-installation override from YanetV2.spec.components.
-//
-// Registry and Prefix come straight from YanetConfigV2.spec.images and
-// are kept here so the builder can render the full path without
-// touching the global config again.
+// ResolvedImage contains the palette image with installation overrides applied.
 type ResolvedImage struct {
 	Registry string
 	Prefix   string
@@ -60,85 +50,40 @@ type ResolvedImage struct {
 	Tag      string
 }
 
-// ResolvedComponent is the merged view of a single Deployment slot
-// requested by a YanetV2 CR. It feeds the builder (Партия R3): the
-// builder turns this struct into one or more Deployment skeletons and
-// then ApplyPatches (Партия R3.5) layers strategic-merge patches on
-// top.
-//
-// Numa is only populated for KindControlplane.
-// Containers is only populated for KindOperator (the multi-container
-// Pod case). Other kinds always render a single container.
+// ResolvedComponent is the immutable rendering input for one workload or sidecar.
 type ResolvedComponent struct {
-	Kind ComponentKind
-	// Name is the canonical component name. For the 5 hardcoded
-	// kinds it equals the kind ("controlplane", "dataplane", ...).
-	// For operators it is OperatorSpec.Name.
-	Name string
-
-	// Enabled is the effective replicas gate. true → 1, false → 0.
-	// Defaults to true unless the per-installation override sets it
-	// explicitly to false.
-	Enabled bool
-
-	// Image is the merged image reference (registry/prefix/name:tag).
-	// For operators this is the image of the first container; the
-	// rest are exposed via Containers.
-	Image ResolvedImage
-
-	// Port is the primary service port. Zero means "no Service".
-	Port int32
-
-	// PortRange controls per-NUMA controlplane listen ports
-	// (Port..Port+PortRange-1). Ignored for non-controlplane kinds.
-	PortRange int32
-
-	// Config carries the resolved config source (inline | hostPath |
-	// URL). nil means the component does not need a config volume.
-	Config *yanetv2alpha1.ConfigSource
-
-	// Hugepages is only set for KindDataplane.
-	Hugepages *yanetv2alpha1.Hugepages
-
-	// HostNetwork applies to KindDataplane (default true) and is nil
-	// for the other kinds.
-	HostNetwork *bool
-
-	// Numa is the NUMA fan-out count for KindControlplane.
-	// Zero means "use the NFD label / fall back to 1".
-	Numa int32
-
-	// DisabledNuma is the resolved set of NUMA indices that must not
-	// get a controlplane instance. Only populated for
-	// KindControlplane. The per-installation override in
-	// YanetV2 replaces the cluster-wide YanetConfigV2 list rather
-	// than merging with it, so what lands here is already final.
+	Kind         ComponentKind
+	Name         string
+	Enabled      bool
+	Image        ResolvedImage
+	Config       *yanetv2alpha1.ConfigSource
+	Hugepages    *yanetv2alpha1.Hugepages
+	Numa         int32
 	DisabledNuma []int32
+	Networks     []yanetv2alpha1.NetworkAttachment
+	// NetworkResources includes inherited and overridden names, so patches
+	// cannot retain stale device reservations when an override replaces a pool.
+	NetworkResources []string
 
-	// Containers is the resolved per-container view of an operator
-	// Pod. The first element is the primary container and backs the
-	// optional per-operator Service.
+	// Containers belongs only to standalone operators. The first owns listeners.
 	Containers []ResolvedContainer
-
-	// Patches is the ordered list of patch NAMES that the box wires
-	// to this component. Resolution into actual NamedPatch objects
-	// happens in the patcher package, where dry-run is also done.
-	Patches []string
+	// Sidecars retains the entire ordered palette, including unselected and
+	// disabled entries, so selection and enablement never compact port slots.
+	Sidecars []*ResolvedComponent
+	// Nil listeners defaults to grpc; an explicit empty slice exposes no Service.
+	ListenerNames []string
+	PortIndex     int
+	Patches       []string
 }
 
-// ResolvedContainer carries the operator-container view after image
-// override resolution.
+// ResolvedContainer carries a standalone operator container's effective inputs.
 type ResolvedContainer struct {
-	Name    string
-	Image   ResolvedImage
-	Config  *yanetv2alpha1.ConfigSource
-	HostIPC bool
+	Name   string
+	Image  ResolvedImage
+	Config *yanetv2alpha1.ConfigSource
 }
 
-// FindBoxType returns the BoxType with the given name, or an error if
-// it does not exist. Webhook validation guarantees existence at admit
-// time, but the reconciler can be invoked between admission and the
-// next config refresh, so we double-check.
+// FindBoxType returns the requested preset from the current configuration.
 func FindBoxType(config *yanetv2alpha1.YanetConfigSpec, name string) (*yanetv2alpha1.BoxType, error) {
 	if config == nil {
 		return nil, fmt.Errorf("yanetConfig is nil")
@@ -151,8 +96,7 @@ func FindBoxType(config *yanetv2alpha1.YanetConfigSpec, name string) (*yanetv2al
 	return nil, fmt.Errorf("boxType %q not found in YanetConfigV2", name)
 }
 
-// FindOperator returns the OperatorSpec with the given name, or an
-// error if the operator is not declared in the components palette.
+// FindOperator returns a declared standalone operator.
 func FindOperator(config *yanetv2alpha1.YanetConfigSpec, name string) (*yanetv2alpha1.OperatorSpec, error) {
 	if config == nil {
 		return nil, fmt.Errorf("yanetConfig is nil")
@@ -165,29 +109,10 @@ func FindOperator(config *yanetv2alpha1.YanetConfigSpec, name string) (*yanetv2a
 	return nil, fmt.Errorf("operator %q not found in YanetConfigV2.spec.components.operators", name)
 }
 
-// ResolveBoxComponent merges three layers for one component slot in
-// the requested boxType:
-//
-//  1. YanetConfigV2.spec.components.<kind|operator-name> (palette).
-//  2. The boxType slot in YanetConfigV2.spec.boxTypes[name] (the list
-//     of patch names — copied verbatim into ResolvedComponent.Patches;
-//     actual patch fetching/dry-run is done by the patcher).
-//  3. YanetV2.spec.components.<kind|operators[name]> (typed
-//     per-installation overrides: enabled, image.name, image.tag).
-//
-// kind is one of the constants above. For KindOperator the operator
-// name is taken from the boxType.operators map and the overrides come
-// from YanetV2.spec.components.operators[name]. For the 5 hardcoded
-// kinds the operatorName argument is ignored.
-//
-// A nil result with a nil error means the component is disabled in
-// the boxType (no slot at all, or operator key absent in
-// boxType.operators). Callers must skip the component in this case.
-func ResolveBoxComponent(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
-	kind ComponentKind,
-	operatorName string,
+// ResolveBoxComponent combines palette definitions, box wiring and typed overrides.
+// An unwired independent component has no rendering input.
+func ResolveBoxComponent(config *yanetv2alpha1.YanetConfigSpec, yanet *yanetv2alpha1.YanetSpec,
+	kind ComponentKind, operatorName string,
 ) (*ResolvedComponent, error) {
 	if config == nil {
 		return nil, fmt.Errorf("yanetConfig is nil")
@@ -199,18 +124,70 @@ func ResolveBoxComponent(
 	if err != nil {
 		return nil, err
 	}
-
 	switch kind {
 	case KindControlplane:
-		return resolveControlplane(config, yanet, box)
+		if box.Components.Controlplane == nil {
+			return nil, nil
+		}
+		cp := config.Components.Controlplane
+		override := componentOverride(yanet, kind, "")
+		return &ResolvedComponent{
+			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),
+			Image:  mergeImage(config.Images, cp.Image, containerOverride(override, "controlplane")),
+			Config: cp.Config, Numa: Int32Value(cp.Numa, 0),
+			DisabledNuma: resolveDisabledNuma(cp.DisabledNuma, yanet), Patches: box.Components.Controlplane.Patches,
+		}, nil
 	case KindDataplane:
-		return resolveDataplane(config, yanet, box)
-	case KindBird:
-		return resolveBird(config, yanet, box)
+		if box.Components.Dataplane == nil {
+			return nil, nil
+		}
+		sidecars, err := resolveDataplaneSidecars(config, yanet, box)
+		if err != nil {
+			return nil, err
+		}
+		dp := config.Components.Dataplane
+		networks, resources, err := resolveDataplaneNetworks(dp.Networks, yanet)
+		if err != nil {
+			return nil, err
+		}
+		override := componentOverride(yanet, kind, "")
+		return &ResolvedComponent{
+			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),
+			Image:  mergeImage(config.Images, dp.Image, containerOverride(override, "dataplane")),
+			Config: dp.Config, Hugepages: dp.Hugepages, Sidecars: sidecars, Patches: box.Components.Dataplane.Patches,
+			Networks: networks, NetworkResources: resources,
+		}, nil
+	case KindSidecar:
+		if box.Components.Dataplane == nil {
+			return nil, nil
+		}
+		if _, wired := box.Components.Dataplane.Sidecars[operatorName]; !wired {
+			return nil, nil
+		}
+		sidecars, err := resolveDataplaneSidecars(config, yanet, box)
+		if err != nil {
+			return nil, err
+		}
+		for _, sidecar := range sidecars {
+			if sidecar.Name == operatorName {
+				return sidecar, nil
+			}
+		}
+		return nil, fmt.Errorf("sidecar %q is not declared in the dataplane palette", operatorName)
 	case KindBirdAdapter:
-		return resolveBirdAdapter(config, yanet, box)
-	case KindAnnouncer:
-		return resolveAnnouncer(config, yanet, box)
+		if box.Components.BirdAdapter == nil {
+			return nil, nil
+		}
+		if config.Components.BirdAdapter == nil {
+			return nil, fmt.Errorf("boxType %q wires birdAdapter but YanetConfigV2.spec.components.birdAdapter is not defined", box.Name)
+		}
+		adapter := config.Components.BirdAdapter
+		override := componentOverride(yanet, kind, "")
+		return &ResolvedComponent{
+			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),
+			Image:  mergeImage(config.Images, adapter.Image, containerOverride(override, "bird-adapter")),
+			Config: adapter.Config, Patches: box.Components.BirdAdapter.Patches,
+		}, nil
 	case KindOperator:
 		return resolveOperator(config, yanet, box, operatorName)
 	default:
@@ -218,23 +195,55 @@ func ResolveBoxComponent(
 	}
 }
 
-// EnabledComponentsForBox returns the set of (kind, operatorName)
-// pairs that the boxType actually wires up. The reconciler calls this
-// to know which ResolveBoxComponent invocations to make.
-//
-// For hardcoded kinds operatorName is empty.
+func resolveDataplaneNetworks(defaults []yanetv2alpha1.NetworkAttachment, yanet *yanetv2alpha1.YanetSpec) ([]yanetv2alpha1.NetworkAttachment, []string, error) {
+	if err := yanetv2alpha1.ValidateNetworkAttachments(defaults); err != nil {
+		return nil, nil, err
+	}
+	selected := defaults
+	if yanet.Components != nil && yanet.Components.Dataplane != nil && yanet.Components.Dataplane.Networks != nil {
+		selected = yanet.Components.Dataplane.Networks
+	}
+	if err := yanetv2alpha1.ValidateNetworkAttachments(selected); err != nil {
+		return nil, nil, err
+	}
+	resources := make(map[string]bool)
+	for _, group := range [][]yanetv2alpha1.NetworkAttachment{defaults, selected} {
+		for _, attachment := range group {
+			resources[attachment.ResourceName] = true
+		}
+	}
+	names := make([]string, 0, len(resources))
+	for name := range resources {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return slices.Clone(selected), names, nil
+}
+
+// ResolveBoxServiceComponent ignores installation enablement and NUMA opt-outs.
+// Shared role Services outlive temporarily disabled workloads.
+func ResolveBoxServiceComponent(config *yanetv2alpha1.YanetConfigSpec, boxName string,
+	kind ComponentKind, operatorName string,
+) (*ResolvedComponent, error) {
+	return ResolveBoxComponent(config, &yanetv2alpha1.YanetSpec{BoxType: boxName}, kind, operatorName)
+}
+
+// ComponentRef identifies a selected workload or sidecar Service role.
 type ComponentRef struct {
 	Kind         ComponentKind
 	OperatorName string
 }
 
-// EnabledComponentsForBox lists every component slot wired by the
-// boxType (in stable order: hardcoded first, then operators sorted by
-// declaration order in YanetConfigV2.spec.components.operators).
+// EnabledComponentsForBox enumerates wired roles in declaration order.
 func EnabledComponentsForBox(config *yanetv2alpha1.YanetConfigSpec, boxName string) ([]ComponentRef, error) {
 	box, err := FindBoxType(config, boxName)
 	if err != nil {
 		return nil, err
+	}
+	for name := range box.Operators {
+		if _, err := FindOperator(config, name); err != nil {
+			return nil, err
+		}
 	}
 	var refs []ComponentRef
 	if box.Components.Controlplane != nil {
@@ -242,293 +251,192 @@ func EnabledComponentsForBox(config *yanetv2alpha1.YanetConfigSpec, boxName stri
 	}
 	if box.Components.Dataplane != nil {
 		refs = append(refs, ComponentRef{Kind: KindDataplane})
-	}
-	if box.Components.Bird != nil {
-		refs = append(refs, ComponentRef{Kind: KindBird})
+		sidecars, err := resolveDataplaneSidecars(config, &yanetv2alpha1.YanetSpec{BoxType: boxName}, box)
+		if err != nil {
+			return nil, err
+		}
+		for _, sidecar := range sidecars {
+			if _, wired := box.Components.Dataplane.Sidecars[sidecar.Name]; wired {
+				refs = append(refs, ComponentRef{Kind: KindSidecar, OperatorName: sidecar.Name})
+			}
+		}
 	}
 	if box.Components.BirdAdapter != nil {
 		refs = append(refs, ComponentRef{Kind: KindBirdAdapter})
 	}
-	if box.Components.Announcer != nil {
-		refs = append(refs, ComponentRef{Kind: KindAnnouncer})
-	}
-	// Walk operators in declaration order (stable rendering).
-	for i := range config.Components.Operators {
-		op := &config.Components.Operators[i]
-		if _, ok := box.Operators[op.Name]; ok {
-			refs = append(refs, ComponentRef{Kind: KindOperator, OperatorName: op.Name})
+	for _, operator := range config.Components.Operators {
+		if _, wired := box.Operators[operator.Name]; wired {
+			refs = append(refs, ComponentRef{Kind: KindOperator, OperatorName: operator.Name})
 		}
 	}
 	return refs, nil
 }
 
-// -- internal resolvers -------------------------------------------------------
-
-func resolveControlplane(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
-	box *yanetv2alpha1.BoxType,
-) (*ResolvedComponent, error) {
-	slot := box.Components.Controlplane
-	if slot == nil {
-		return nil, nil
-	}
-	cp := config.Components.Controlplane
-	override := componentOverride(yanet, KindControlplane, "")
-	return &ResolvedComponent{
-		Kind:         KindControlplane,
-		Name:         string(KindControlplane),
-		Enabled:      resolveEnabled(override),
-		Image:        mergeImage(config.Images, cp.Image, containerOverride(override, string(KindControlplane))),
-		Port:         cp.Port,
-		PortRange:    cp.PortRange,
-		Config:       cp.Config,
-		Numa:         Int32Value(cp.Numa, 0),
-		DisabledNuma: resolveDisabledNuma(cp.DisabledNuma, yanet),
-		Patches:      slot.Patches,
-	}, nil
-}
-
-// resolveDisabledNuma picks the effective disabled-NUMA list for the
-// controlplane. The per-installation list in
-// YanetV2.spec.components.controlplane.disabledNuma REPLACES the
-// cluster-wide default from YanetConfigV2 when it is non-nil — an empty
-// but non-nil list therefore clears the default and re-enables every
-// NUMA index. A nil list inherits the cluster-wide value.
 func resolveDisabledNuma(clusterWide []int32, yanet *yanetv2alpha1.YanetSpec) []int32 {
-	if yanet.Components != nil &&
-		yanet.Components.Controlplane != nil &&
-		yanet.Components.Controlplane.DisabledNuma != nil {
+	if yanet.Components != nil && yanet.Components.Controlplane != nil && yanet.Components.Controlplane.DisabledNuma != nil {
 		return append([]int32(nil), yanet.Components.Controlplane.DisabledNuma...)
 	}
 	return append([]int32(nil), clusterWide...)
 }
 
-func resolveDataplane(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
+func resolveDataplaneSidecars(config *yanetv2alpha1.YanetConfigSpec, yanet *yanetv2alpha1.YanetSpec,
 	box *yanetv2alpha1.BoxType,
-) (*ResolvedComponent, error) {
-	slot := box.Components.Dataplane
-	if slot == nil {
-		return nil, nil
+) ([]*ResolvedComponent, error) {
+	palette := config.Components.Dataplane.Sidecars
+	if len(palette) > yanetv2alpha1.MaxDataplaneSidecars {
+		return nil, fmt.Errorf("dataplane sidecars exhaust the listener port range")
 	}
-	dp := config.Components.Dataplane
-	override := componentOverride(yanet, KindDataplane, "")
-	return &ResolvedComponent{
-		Kind:        KindDataplane,
-		Name:        string(KindDataplane),
-		Enabled:     resolveEnabled(override),
-		Image:       mergeImage(config.Images, dp.Image, containerOverride(override, string(KindDataplane))),
-		Port:        dp.Port,
-		Config:      dp.Config,
-		Hugepages:   dp.Hugepages,
-		HostNetwork: dp.HostNetwork,
-		Patches:     slot.Patches,
-	}, nil
+	declared := map[string]bool{}
+	identities := map[string]string{}
+	var resolved []*ResolvedComponent
+	for index, sidecar := range palette {
+		if declared[sidecar.Name] {
+			return nil, fmt.Errorf("duplicate dataplane sidecar %q", sidecar.Name)
+		}
+		declared[sidecar.Name] = true
+		identity := ShortNodeKey(sidecar.Name)
+		if previous, collision := identities[identity]; collision {
+			return nil, fmt.Errorf("sidecars %q and %q have colliding role identities", previous, sidecar.Name)
+		}
+		identities[identity] = sidecar.Name
+		if err := yanetv2alpha1.ValidateListeners(sidecar.Name, sidecar.Listeners); err != nil {
+			return nil, err
+		}
+		slot, wired := box.Components.Dataplane.Sidecars[sidecar.Name]
+		var override *yanetv2alpha1.YanetContainerOverride
+		if wired && yanet.Components != nil && yanet.Components.Dataplane != nil {
+			if value, present := yanet.Components.Dataplane.Sidecars[sidecar.Name]; present {
+				override = &value
+			}
+		}
+		enabled := wired && BoolValue(slot.Enabled, true)
+		if override != nil && override.Enabled != nil {
+			enabled = *override.Enabled
+		}
+		resolved = append(resolved, &ResolvedComponent{
+			Kind: KindSidecar, Name: sidecar.Name, Enabled: enabled,
+			Image: mergeImage(config.Images, sidecar.Image, override), Config: sidecar.Config,
+			ListenerNames: resolveListeners(sidecar.Listeners), PortIndex: index, Patches: slot.Patches,
+		})
+	}
+	for name := range box.Components.Dataplane.Sidecars {
+		if !declared[name] {
+			return nil, fmt.Errorf("boxType %q wires dataplane sidecar %q but the palette does not define it", box.Name, name)
+		}
+	}
+	return resolved, nil
 }
 
-func resolveBird(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
-	box *yanetv2alpha1.BoxType,
+func resolveOperator(config *yanetv2alpha1.YanetConfigSpec, yanet *yanetv2alpha1.YanetSpec,
+	box *yanetv2alpha1.BoxType, name string,
 ) (*ResolvedComponent, error) {
-	slot := box.Components.Bird
-	if slot == nil {
+	slot, wired := box.Operators[name]
+	if !wired {
 		return nil, nil
 	}
-	if config.Components.Bird == nil {
-		return nil, fmt.Errorf("boxType %q wires bird but YanetConfigV2.spec.components.bird is not defined", box.Name)
-	}
-	bird := config.Components.Bird
-	override := componentOverride(yanet, KindBird, "")
-	return &ResolvedComponent{
-		Kind:    KindBird,
-		Name:    string(KindBird),
-		Enabled: resolveEnabled(override),
-		Image:   mergeImage(config.Images, bird.Image, containerOverride(override, string(KindBird))),
-		Port:    bird.Port,
-		Config:  bird.Config,
-		Patches: slot.Patches,
-	}, nil
-}
-
-func resolveBirdAdapter(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
-	box *yanetv2alpha1.BoxType,
-) (*ResolvedComponent, error) {
-	slot := box.Components.BirdAdapter
-	if slot == nil {
-		return nil, nil
-	}
-	if config.Components.BirdAdapter == nil {
-		return nil, fmt.Errorf("boxType %q wires birdAdapter but YanetConfigV2.spec.components.birdAdapter is not defined", box.Name)
-	}
-	ad := config.Components.BirdAdapter
-	override := componentOverride(yanet, KindBirdAdapter, "")
-	return &ResolvedComponent{
-		Kind:    KindBirdAdapter,
-		Name:    string(KindBirdAdapter),
-		Enabled: resolveEnabled(override),
-		Image:   mergeImage(config.Images, ad.Image, containerOverride(override, string(KindBirdAdapter))),
-		Port:    ad.Port,
-		Config:  ad.Config,
-		Patches: slot.Patches,
-	}, nil
-}
-
-func resolveAnnouncer(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
-	box *yanetv2alpha1.BoxType,
-) (*ResolvedComponent, error) {
-	slot := box.Components.Announcer
-	if slot == nil {
-		return nil, nil
-	}
-	if config.Components.Announcer == nil {
-		return nil, fmt.Errorf("boxType %q wires announcer but YanetConfigV2.spec.components.announcer is not defined", box.Name)
-	}
-	an := config.Components.Announcer
-	override := componentOverride(yanet, KindAnnouncer, "")
-	return &ResolvedComponent{
-		Kind:    KindAnnouncer,
-		Name:    string(KindAnnouncer),
-		Enabled: resolveEnabled(override),
-		Image:   mergeImage(config.Images, an.Image, containerOverride(override, string(KindAnnouncer))),
-		Port:    an.Port,
-		Config:  an.Config,
-		Patches: slot.Patches,
-	}, nil
-}
-
-func resolveOperator(
-	config *yanetv2alpha1.YanetConfigSpec,
-	yanet *yanetv2alpha1.YanetSpec,
-	box *yanetv2alpha1.BoxType,
-	operatorName string,
-) (*ResolvedComponent, error) {
-	slot, ok := box.Operators[operatorName]
-	if !ok {
-		return nil, nil
-	}
-	op, err := FindOperator(config, operatorName)
+	operator, err := FindOperator(config, name)
 	if err != nil {
 		return nil, err
 	}
-	if len(op.Containers) == 0 {
-		return nil, fmt.Errorf("operator %q has no containers", operatorName)
+	if len(operator.Containers) == 0 {
+		return nil, fmt.Errorf("operator %q has no containers", name)
 	}
-	override := componentOverride(yanet, KindOperator, operatorName)
-
-	containers := make([]ResolvedContainer, 0, len(op.Containers))
-	for i := range op.Containers {
-		c := &op.Containers[i]
-		img := mergeImage(config.Images, c.Image, containerOverride(override, c.Name))
+	if err := yanetv2alpha1.ValidateListeners(name, operator.Listeners); err != nil {
+		return nil, err
+	}
+	override := componentOverride(yanet, KindOperator, name)
+	containers := make([]ResolvedContainer, 0, len(operator.Containers))
+	for _, container := range operator.Containers {
 		containers = append(containers, ResolvedContainer{
-			Name:    c.Name,
-			Image:   img,
-			Config:  c.Config,
-			HostIPC: BoolValue(c.HostIPC, false),
+			Name: container.Name, Image: mergeImage(config.Images, container.Image, containerOverride(override, container.Name)),
+			Config: container.Config,
 		})
 	}
-
 	return &ResolvedComponent{
-		Kind:       KindOperator,
-		Name:       op.Name,
-		Enabled:    resolveEnabled(override),
-		Image:      containers[0].Image,
-		Port:       op.Port,
-		Containers: containers,
-		Patches:    slot.Patches,
+		Kind: KindOperator, Name: name, Enabled: resolveEnabled(override),
+		Image: containers[0].Image, Containers: containers, Patches: slot.Patches,
+		ListenerNames: resolveListeners(operator.Listeners),
 	}, nil
 }
 
-// componentOverride returns the per-installation override block that
-// matches the requested kind/operator. The result is always safe to
-// dereference for nil-safe field reads.
-func componentOverride(
-	yanet *yanetv2alpha1.YanetSpec,
-	kind ComponentKind,
-	operatorName string,
-) *yanetv2alpha1.YanetComponentOverride {
+func resolveListeners(listeners *[]yanetv2alpha1.OperatorListener) []string {
+	if listeners == nil {
+		return nil
+	}
+	result := make([]string, 0, len(*listeners))
+	for _, protocol := range []yanetv2alpha1.OperatorListener{"grpc", "http"} {
+		for _, listener := range *listeners {
+			if listener == protocol {
+				result = append(result, string(listener))
+			}
+		}
+	}
+	return result
+}
+
+// IsColocated identifies a role composed into the dataplane workload.
+func (c *ResolvedComponent) IsColocated() bool {
+	return c != nil && c.Kind == KindSidecar
+}
+
+func componentOverride(yanet *yanetv2alpha1.YanetSpec, kind ComponentKind, operatorName string) *yanetv2alpha1.YanetComponentOverride {
 	if yanet.Components == nil {
 		return nil
 	}
 	switch kind {
 	case KindControlplane:
-		if yanet.Components.Controlplane == nil {
-			return nil
+		if yanet.Components.Controlplane != nil {
+			return &yanet.Components.Controlplane.YanetComponentOverride
 		}
-		return &yanet.Components.Controlplane.YanetComponentOverride
 	case KindDataplane:
-		return yanet.Components.Dataplane
-	case KindBird:
-		return yanet.Components.Bird
+		if yanet.Components.Dataplane != nil {
+			return &yanet.Components.Dataplane.YanetComponentOverride
+		}
 	case KindBirdAdapter:
 		return yanet.Components.BirdAdapter
-	case KindAnnouncer:
-		return yanet.Components.Announcer
 	case KindOperator:
-		if v, ok := yanet.Components.Operators[operatorName]; ok {
-			return &v
+		if override, present := yanet.Components.Operators[operatorName]; present {
+			return &override
 		}
 	}
 	return nil
 }
 
-// resolveEnabled defaults to true and honours the override when set.
 func resolveEnabled(override *yanetv2alpha1.YanetComponentOverride) bool {
-	if override == nil {
-		return true
-	}
-	return BoolValue(override.Enabled, true)
+	return override == nil || BoolValue(override.Enabled, true)
 }
 
-// mergeImage builds the final image reference. When the per-container
-// override carries Name or Tag, those win over the palette values.
-// Registry / Prefix always come from YanetConfigV2.spec.images.
-func mergeImage(
-	images yanetv2alpha1.ImagesSpec,
-	base yanetv2alpha1.ImageRef,
-	override *yanetv2alpha1.ImageRef,
+func mergeImage(images yanetv2alpha1.ImagesSpec, base yanetv2alpha1.ImageRef,
+	override *yanetv2alpha1.YanetContainerOverride,
 ) ResolvedImage {
-	out := ResolvedImage{
-		Registry: images.Registry,
-		Prefix:   images.Prefix,
-		Name:     base.Name,
-		Tag:      base.Tag,
+	result := ResolvedImage{Registry: images.Registry, Prefix: images.Prefix, Name: base.Name, Tag: base.Tag}
+	if base.Registry != nil {
+		result.Registry = *base.Registry
+	}
+	if base.Prefix != nil {
+		result.Prefix = *base.Prefix
 	}
 	if override != nil {
 		if override.Name != "" {
-			out.Name = override.Name
+			result.Name = override.Name
 		}
 		if override.Tag != "" {
-			out.Tag = override.Tag
+			result.Tag = override.Tag
 		}
 	}
-	return out
+	return result
 }
 
-// containerOverride looks up the per-container image override for the
-// given container name in the component-level override block. Returns
-// nil when no override is set, which lets mergeImage skip the merge.
-func containerOverride(
-	override *yanetv2alpha1.YanetComponentOverride,
-	containerName string,
-) *yanetv2alpha1.ImageRef {
-	if override == nil || len(override.Containers) == 0 {
-		return nil
-	}
-	if v, ok := override.Containers[containerName]; ok {
-		return &v
+func containerOverride(override *yanetv2alpha1.YanetComponentOverride, name string) *yanetv2alpha1.YanetContainerOverride {
+	if override != nil {
+		if container, present := override.Containers[name]; present {
+			return &container
+		}
 	}
 	return nil
 }
 
-// FullPath assembles the full image reference (registry/prefix/name:tag).
-// Empty registry/prefix segments are skipped.
+// FullPath assembles an image reference, including digest-qualified tags.
 func (i ResolvedImage) FullPath() string {
 	path := i.Name
 	if i.Prefix != "" {
@@ -538,7 +446,7 @@ func (i ResolvedImage) FullPath() string {
 		path = i.Registry + "/" + path
 	}
 	if i.Tag != "" {
-		path = path + ":" + i.Tag
+		path += ":" + i.Tag
 	}
 	return path
 }

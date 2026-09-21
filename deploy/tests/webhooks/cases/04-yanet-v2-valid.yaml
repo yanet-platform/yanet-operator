@@ -17,7 +17,9 @@ spec:
       enabled: false
     dataplane:
       enabled: false
-    bird:
-      enabled: false
-    announcer:
-      enabled: false
+      sidecars:
+        bird:
+          enabled: false
+    operators:
+      announcer:
+        enabled: false

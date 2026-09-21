@@ -17,10 +17,13 @@ limitations under the License.
 package helpers
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -85,32 +88,36 @@ func TestHttpGet_ErrorStatus(t *testing.T) {
 }
 
 func TestHttpGet_NetworkError(t *testing.T) {
-	// Use invalid URL to trigger network error
-	_, err := HttpGet("http://invalid-host-that-does-not-exist-12345.local")
+	server := httptest.NewServer(http.NotFoundHandler())
+	server.Close()
+	_, err := HttpGet(server.URL)
 	if err == nil {
-		t.Fatal("expected error for invalid host, got nil")
+		t.Fatal("expected connection error from closed server, got nil")
 	}
 }
 
+// Keep the real http.Client timeout machinery while replacing network I/O.
+type stalledTransport struct{}
+
+func (stalledTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	<-request.Context().Done()
+	return nil, request.Context().Err()
+}
+
 func TestHttpGet_Timeout(t *testing.T) {
-	// This test would take 30+ seconds to run, so we skip it in normal test runs
-	// It's here for documentation purposes
-	t.Skip("Skipping timeout test as it takes 30+ seconds")
+	synctest.Test(t, func(t *testing.T) {
+		previous := httpClient
+		isolated := *httpClient
+		isolated.Transport = stalledTransport{}
+		httpClient = &isolated
+		defer func() { httpClient = previous }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(35 * time.Second) // Longer than httpClient timeout (30s)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	_, err := HttpGet(server.URL)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-
-	if !strings.Contains(err.Error(), "timeout") && !strings.Contains(err.Error(), "deadline") {
-		t.Errorf("expected timeout/deadline error, got: %v", err)
-	}
+		start := time.Now()
+		result, err := HttpGet("http://example.test/config")
+		if result != "" || !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != 30*time.Second {
+			t.Fatalf("stalled GET must return a timeout after 30s: result=%q err=%v elapsed=%v", result, err, time.Since(start))
+		}
+	})
 }
 
 func TestHttpGet_EmptyResponse(t *testing.T) {

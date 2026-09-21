@@ -1,11 +1,10 @@
 # v2alpha1 YanetConfig — must be ACCEPTED.
 # Trimmed version of deploy/examples/v2alpha1-yanetconfig-full.yaml: two patches,
-# one boxType (release) referencing them, all five hardcoded components present.
+# one boxType (release) referencing them, including both dataplane sidecars.
 apiVersion: yanet.yanet-platform.io/v2alpha1
 kind: YanetConfigV2
 metadata:
-  name: config-v2
-  namespace: yanet
+  name: config
 spec:
   stop: false
   updateWindow: 60
@@ -14,20 +13,21 @@ spec:
   components:
     controlplane:
       image: {name: controlplane, tag: test}
-      port: 8080
-      portRange: 1
     dataplane:
       image: {name: dataplane, tag: test}
-      port: 8090
-    bird:
-      image: {name: bird, tag: test}
-      port: 179
+      sidecars:
+        - name: bird
+          image: {name: bird, tag: test}
+          listeners: []
+        - name: neighbour-sidecar
+          image: {name: neighbour-sidecar, tag: test}
     birdAdapter:
       image: {name: bird-adapter, tag: test}
-      port: 50052
-    announcer:
-      image: {name: announcer, tag: test}
-      port: 9090
+    operators:
+      - name: announcer
+        containers:
+          - name: announcer
+            image: {name: announcer, tag: test}
   patches:
     - name: telegraf
       patch:
@@ -49,8 +49,10 @@ spec:
         controlplane:
           patches: [telegraf, checkpointer]
         dataplane:
+          sidecars:
+            bird: {}
+            neighbour-sidecar: {}
           patches: [telegraf, checkpointer]
-        bird:
-          patches: [checkpointer]
+      operators:
         announcer:
           patches: [checkpointer]

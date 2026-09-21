@@ -1,13 +1,14 @@
 # Testing yanet-operator
 
-## 📊 Current Status
+## Test Strategy
 
-- **Coverage:** ~80% overall (89.2% helpers, 91.3% manifests, 75.8% controller)
-- **Unit tests:** 80+ tests, all passing
-- **Integration tests:** 10+ Ginkgo scenarios (4 existing + 6 new E2E tests)
-- **E2E tests:** 4 test suites (Throttling, Webhook, AutoSync, Status) - all via Docker
-- **Test Results:** 44 passed | 4 failed (in progress)
-- **CI/CD:** GitHub Actions (tests + Docker + Helm)
+- Check public behavior, persisted state, and required absence of side effects.
+- Use envtest where correctness depends on admission, API defaulting, or storage semantics.
+- Keep error fixtures valid apart from the condition under test; assert the intended error.
+- For regressions, observe the expected failure on the original code, then success after the fix.
+  For tests of existing correct behavior, temporarily introduce a relevant fault and verify failure.
+- Control time and dependencies rather than adding sleeps, permanent skips, or external DNS requests.
+- CI runs unit/integration tests, lint, Docker builds, and Helm installation tests.
 
 ## 🧪 Running Tests
 
@@ -60,7 +61,7 @@ internal/
 └── controller/
     ├── yanet_reconciler_v2_test.go          # v2: reconcileYanetV2 (basic)
     ├── yanet_reconciler_v2_extended_test.go # v2: edge cases, throttling, orphans (11 tests)
-    ├── yanet_reconciler_v2_deletion_test.go # v2: deletion, ConfigMaps (9 tests)
+    ├── yanet_reconciler_v2_deletion_test.go # v2: deletion, ConfigMaps
     ├── yanet_reconciler_v2_h9_test.go       # v2: H9 edge cases
     ├── yanet_reconciler_v2_hardening_test.go # v2: hardening scenarios
     ├── yanet_reconciler_test.go             # v1: checkUpdateRequeue
@@ -68,7 +69,9 @@ internal/
     ├── yanet_conditions_v2_test.go          # v2 conditions
     ├── node_deletion_test.go                # handleNodeDeletion
     ├── yanet_controller_integration_test.go # Ginkgo integration tests (v1)
-    ├── yanet_throttling_e2e_test.go         # E2E: throttling (v1 + v2)
+    ├── cleanup_regression_test.go          # Public Reconcile: cleanup retries/ownership, throttle convergence
+    ├── defaulting_v2_envtest_test.go        # Real API defaults, no-op writes, autosync, patch removal
+    ├── operator_examples_v2_test.go        # Admission/rendered runtime contract, overrides, read-only scopes
     ├── yanet_webhook_e2e_test.go            # E2E: webhook validation (v1 + v2)
     ├── yanet_autosync_e2e_test.go           # E2E: autoSync behavior (v1 + v2)
     ├── yanet_status_e2e_test.go             # E2E: status reporting (v1 + v2)
@@ -81,12 +84,8 @@ internal/
 **e2e_helpers_test.go** provides utility functions for reliable E2E testing:
 
 ```go
-// waitForGlobalConfigV1 - polls GlobalConfig until non-zero UpdateWindow
-// Replaces time.Sleep for reliable synchronization
-func waitForGlobalConfigV1(timeout time.Duration) error
-
-// waitForGlobalConfigV2 - polls GlobalConfigV2 until BoxTypes populated
-func waitForGlobalConfigV2(timeout time.Duration) error
+// countDeployments - returns count and any API error, for polling assertions
+func countDeployments(ctx context.Context, ns string) (int, error)
 
 // ensureNamespace - creates namespace if it doesn't exist
 func ensureNamespace(ctx context.Context, ns string)
@@ -94,50 +93,54 @@ func ensureNamespace(ctx context.Context, ns string)
 // cleanupDeployments, cleanupServices, cleanupYanetV1/V2 - cleanup helpers
 ```
 
-**Usage example** (replacing `time.Sleep`):
+**Usage example** (failed API reads must not count as zero Deployments):
 ```go
-Expect(k8sClient.Create(ctx, config)).Should(Succeed())
-// Instead of: time.Sleep(2000 * time.Millisecond)
-// Use:
-Expect(waitForGlobalConfigV1(5 * time.Second)).Should(Succeed())
+Eventually(func() (int, error) {
+    return countDeployments(ctx, namespace)
+}, 5*time.Second).Should(Equal(0))
 ```
 
 ## 🎯 Coverage Goals
 
 | Package | Current | Target | Status |
 |---------|---------|--------|--------|
-| manifests | 91.3% | 90%+ | ✅ |
-| helpers | 89.2% | 70%+ | ✅ |
-| controller | 75.8% | 70%+ | ✅ Achieved |
+| manifests | 90.9% | 90%+ | ✅ |
+| helpers | 86.4% | 70%+ | ✅ |
+| controller | 85.7% | 70%+ | ✅ |
 
-### Controller Package Details
-
-| Function | Coverage | Status |
-|----------|----------|--------|
-| `applyInlineConfigMapsV2` | 84.0% | ✅ |
-| `reconcileYanetV2` | 77.1% | ✅ |
-| `pruneOrphans` | 73.6% | ✅ |
-| `handleYanetV2Deletion` | 61.5% | 🔄 |
+Measured by `make test-docker-race` with Go 1.26.2 / Kubernetes 1.35.0 envtest on 2026-09-17. Use coverage
+to locate untested paths, not as proof that assertions catch regressions.
 
 ## 🚀 Test Suites
 
-### Unit Tests (20 tests)
+### Controller Unit Tests
 
 **yanet_reconciler_v2_extended_test.go (11 tests):**
 - Edge cases: empty nodeSelector, config not loaded, boxType not found, global stop
 - UpdateWindow throttling: same node, different nodes, expired window
 - Orphan cleanup: multiple types, foreign labels, empty desired set, autoSync=false
 
-**yanet_reconciler_v2_deletion_test.go (9 tests):**
-- Deletion handling: no finalizer, with finalizer, cleanup errors, foreign resources
+**yanet_reconciler_v2_deletion_test.go:**
+- Deletion handling: no finalizer, with finalizer, foreign resources
 - ConfigMap management: no inline, autoSync true/false, updates
 
-### E2E Tests (4 test suites, 15+ scenarios) - All via Docker + envtest
+**cleanup_regression_test.go:**
+- Public Reconcile retains finalizers while owned Deployments remain, even with missing/changed labels.
+- Cleanup errors propagate; a successful retry finishes deletion without touching another owner's resources.
+- A throttled image update leaves the old workload intact and converges after the window expires, without sleeps.
+- The former pending throttling suite and its duplicated fixtures were removed.
 
-**yanet_throttling_e2e_test.go:**
-- V1 API: UpdateWindow throttling with `enabled=false`
-- V2 API: UpdateWindow throttling with `enabled=false`
-- Verifies: replicas=0 when disabled, config changes propagate, throttling works
+### API-server Tests — Docker + envtest
+
+**defaulting_v2_envtest_test.go:**
+- Public reconcilers use an independent API server: fake clients cannot establish server defaulting.
+- Observe both persisted update requests and resource versions; an unnecessary PUT can leave the version unchanged.
+- Check no-op/throttle/autosync behavior, real image/field changes, patch removal, and dry-run failures.
+- Reproduce an informer cache miss after Service creation; read-before-write must use the direct API reader.
+
+The manager-backed Ginkgo suites below wait for manager shutdown before stopping
+envtest. Deployment-count assertions propagate API list errors instead of
+treating a failed observation as an empty namespace.
 
 **yanet_webhook_e2e_test.go:**
 - V1 API: YanetConfig/Yanet validation (negative updateWindow, empty nodeName, invalid type)
@@ -196,9 +199,8 @@ make test-docker-race
 # Check coverage for specific file (after make test-docker)
 go tool cover -func=cover.out | grep yanet_reconciler_v2.go
 
-# For local debugging (requires Go 1.26.2 + envtest):
-KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.0 -p path) \
-  go test ./internal/controller/... -run TestHandleYanetV2Deletion_WithFinalizer -v
+# Focused helper test through the same Docker toolchain:
+make --eval 'check-http: ; $(call docker-go,go test -count=1 ./internal/helpers -run TestHttpGet)' check-http
 ```
 
 ## 📚 References
@@ -206,4 +208,7 @@ KUBEBUILDER_ASSETS=$(setup-envtest use 1.35.0 -p path) \
 - [Kubebuilder Testing](https://book.kubebuilder.io/cronjob-tutorial/writing-tests.html)
 - [Ginkgo/Gomega](https://onsi.github.io/ginkgo/)
 - [Controller-runtime Testing](https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/envtest)
+- [Fake-client limitations](https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/client/fake)
+- [Test behavior, not implementation](https://testing.googleblog.com/2013/08/testing-on-toilet-test-behavior-not.html)
+- [Idempotent reconciliation](https://book.kubebuilder.io/reference/good-practices)
 - [AGENTS.md](AGENTS.md) - Development guidelines (MUST READ)

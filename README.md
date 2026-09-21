@@ -52,10 +52,87 @@ component spec embedded directly in the `Yanet` CR.
 
 ### v2alpha1 — `yanetsv2` / `yanetconfigsv2` ✨
 Component palette + named strategic-merge patches + named `boxTypes`
-live in `YanetConfigV2`. The `YanetV2` CR is minimal: pick a `boxType`,
+live in the cluster-scoped `YanetConfigV2` singleton named `config`. The
+`YanetV2` CR is minimal: pick a `boxType`,
 select nodes via `nodeSelector`, optionally override per-container
-`image.{name,tag}` and `enabled` flags. Per-NUMA controlplane fan-out is
-driven by the NFD label `feature.node.kubernetes.io/cpu-numa_nodes_count`.
+`image.{name,tag}`, workload/native-sidecar `enabled`, and controlplane
+`disabledNuma`. Standalone groups use `components.operators[].containers[]`.
+Dataplane sidecars use the ordered, atomic `components.dataplane.sidecars[]` list:
+one `SidecarSpec` (`name`, `image`, `config`, `listeners`) per native container.
+Box types select sidecars by name; installation overrides use
+`components.dataplane.sidecars.<name>`. BIRD, neighbour-sidecar and netconfig are
+ordinary entries with declarative mounts and permissions. See the
+[full example](deploy/examples/v2alpha1-yanetconfig-full.yaml); replace illustrative
+image tags with tested releases before deployment.
+
+Runtime Kubernetes probes and blocking KNI startup hooks are intentionally absent:
+dataplane must start to create KNI. Application readiness belongs to announcer and
+the YANET gRPC readiness APIs; operator consumption of this readiness is deferred.
+Neighbour-sidecar exposes its own `Ready/Watch`, without gateway registration.
+Omitted listeners default to `[grpc]` for every role; HTTP-only roles explicitly
+declare `[http]`. `listeners: []` suppresses the Service, not the reserved slot or
+host-config bind/gateway env.
+
+Shared Services
+are unconditional for service-backed roles and are named
+`yanet-<boxType>-<component>[-numa<N>]` within each namespace. They expose
+stable gRPC/HTTP ports `8080/8081`. All v2 Pods use private networking; final
+`hostNetwork: true` and nonzero `hostPort` are rejected. Sidecar index `i` reserves
+`8080+2*i` and `8081+2*i` before selection/enablement filtering. Append preserves
+existing indices; reorder/insertion/removal changes the Pod template. For a managed
+HostPath config after patches, the operator injects runtime bind env, Service FQDN
+advertise and complete named NUMA gateway overrides. Inline/ConfigMap data stays
+opaque and receives no automatic env. Compatible gateway runtimes must support
+`YANET_KUBERNETES_GATEWAYS`; preparing their images and host configs is a rollout
+prerequisite. See [the runtime contract](ARCHITECTURE.md#listener-endpoint-configuration).
+Per-NUMA controlplane
+fan-out is configured by `YanetConfigV2.spec.components.controlplane.numa`
+(default 1). Set it explicitly for multi-NUMA hosts before upgrading; node
+labels do not determine the fan-out. `disabledNuma` excludes physical domains
+without renumbering the remaining instances. Each node can belong to only
+one `YanetV2`; overlapping selectors are resolved in favour of the existing
+workload owner (or the oldest CR before workloads exist).
+
+Optional v2 `config.mountPath` (chart 0.1.13+) selects the managed configuration
+directory inside any container; the default is `/etc/yanet2`. Inline configuration
+is mounted as `<mountPath>/config`. Source paths and `config.args` are unchanged.
+For example, BIRD can use `/etc/bird`, while netconfig uses `/etc/netconfig` with
+its source selector in a generated ConfigMap and the Netplan input mounted separately.
+
+> **Scope migration:** Kubernetes does not permit changing an installed CRD
+> from namespaced to cluster-scoped. Before upgrading a cluster that already
+> has the older namespaced `YanetConfigV2` CRD, export its spec, remove and
+> reinstall that CRD, then recreate the configuration manually as cluster-scoped
+> `metadata.name: config` or let Helm create it through `yanetconfigV2` values.
+> Rename any
+> `spec.components.birdAdapter.containers.birdAdapter` override key to the
+> rendered container name `bird-adapter`.
+> Delete old per-installation v2 Services before enabling the shared-Service
+> model; the operator deliberately does not take over resources with another owner.
+> Before enabling the native BIRD sidecar, stop the old operator and delete its
+> standalone v2 BIRD Deployments. The old and new BIRD processes share the
+> node-local `/run/bird` control-socket directory and must not overlap.
+>
+> **v2 schema change in chart 0.1.12:** replace fixed sidecar maps with the ordered
+> list; move colocated operator declarations into it and announcer into ordinary
+> operators. Remove legacy placement, host-network fields and endpoint patches.
+> Coordinate CRD, controller and spec updates; there is no automatic conversion.
+> Drain existing workloads before changing networking or moving a role between
+> standalone and dataplane. Preflight retains Deployment/ReplicaSet/Pod producer
+> guards and shared-Service cutover guards. `enabled: false` with `autoSync: true`
+> drains; `stop: true` only freezes reconciliation and does not stop Pods.
+> v1 resources and controllers are unchanged.
+
+Palette images may override `registry` and `prefix` independently: omission
+inherits `spec.images`, while `""` clears that part. Installation container
+overrides still only support `name`, `tag`, and native-sidecar `enabled`.
+Controlplane `config.args` supports `{numa}` for the physical NUMA index;
+arguments without it remain literal, including other YAML file paths.
+
+Chart **0.1.14** removes unused v2 `autoDiscovery`, the unimplemented `config.url`
+source and container-level `hostIPC`. Config downloads, optional Pod IPC settings
+and agent shared-memory mounts use explicit Deployment patches. Controlplane
+config paths must use `{numa}` when they vary by NUMA; no suffix is inferred.
 
 See [YANET2_ARCH.md](YANET2_ARCH.md) for the full design and
 [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) for runnable
@@ -272,4 +349,3 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-
