@@ -308,7 +308,8 @@ func TestUpdateWindow_SameNode_NoThrottle(t *testing.T) {
 	snap.Config = cfg
 
 	// Install finalizer first
-	if _, err := r.reconcileYanet(context.Background(), yanet); err != nil {
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(yanet)}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("finalizer install: %v", err)
 	}
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
@@ -316,7 +317,7 @@ func TestUpdateWindow_SameNode_NoThrottle(t *testing.T) {
 	}
 
 	// First reconcile creates resources
-	if _, err := r.reconcileYanet(context.Background(), yanet); err != nil {
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("first reconcile: %v", err)
 	}
 
@@ -332,9 +333,11 @@ func TestUpdateWindow_SameNode_NoThrottle(t *testing.T) {
 	// Now simulate a recent update on node-1 and reconcile again
 	r.lastUpdateTS = time.Now().Add(-5 * time.Minute)
 	r.lastUpdateHost = "node-1"
+	// Real drift is necessary: a no-op returns before the throttle check.
+	snap.Config.Components.Dataplane.Image.Tag = "v2"
 
 	// Second reconcile - should NOT be throttled because it's the same node
-	result, err := r.reconcileYanet(context.Background(), yanet)
+	result, err := r.Reconcile(context.Background(), request)
 	if err != nil {
 		t.Fatalf("second reconcile: %v", err)
 	}
@@ -342,6 +345,21 @@ func TestUpdateWindow_SameNode_NoThrottle(t *testing.T) {
 	// Verify no throttle requeue
 	if result.RequeueAfter > 0 {
 		t.Errorf("expected no throttle requeue for same node, got RequeueAfter=%v", result.RequeueAfter)
+	}
+	if err := r.Client.List(context.Background(), deps, client.InNamespace("yanet"), client.MatchingLabels{manifests.LabelComponent: "dataplane"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(deps.Items) != 1 {
+		t.Fatalf("expected one dataplane Deployment, got %d", len(deps.Items))
+	}
+	if got := deps.Items[0].Spec.Template.Spec.Containers[0].Image; got != "dp:v2" {
+		t.Fatalf("same-node image: got %q, want dp:v2", got)
+	}
+	if err := r.Client.Get(context.Background(), client.ObjectKeyFromObject(yanet), yanet); err != nil {
+		t.Fatal(err)
+	}
+	if len(yanet.Status.Sync.SyncWaiting) != 0 {
+		t.Fatalf("same-node update must not wait: %+v", yanet.Status.Sync)
 	}
 }
 
@@ -538,8 +556,8 @@ func TestOrphanCleanup_MultipleResourceTypes(t *testing.T) {
 	}
 
 	// Verify count includes only Yanet-owned orphans.
-	if count != 2 {
-		t.Errorf("expected 2 orphans deleted (dep+cm), got %d", count)
+	if count.Deleted != 2 {
+		t.Errorf("expected 2 orphans deleted (dep+cm), got %d", count.Deleted)
 	}
 
 	// Verify orphans are deleted
@@ -601,8 +619,8 @@ func TestOrphanCleanup_ForeignLabels_NotTouched(t *testing.T) {
 	}
 
 	// Verify nothing was deleted (count=0)
-	if count != 0 {
-		t.Errorf("expected 0 deletions for foreign labels, got %d", count)
+	if count.Deleted != 0 {
+		t.Errorf("expected 0 deletions for foreign labels, got %d", count.Deleted)
 	}
 
 	// Verify all foreign resources remain
@@ -662,8 +680,8 @@ func TestOrphanCleanup_EmptyDesiredSet_DeletesAll(t *testing.T) {
 	}
 
 	// Verify Yanet-owned resources were deleted.
-	if count != 2 {
-		t.Errorf("expected 2 Deployment deletions, got %d", count)
+	if count.Deleted != 2 {
+		t.Errorf("expected 2 Deployment deletions, got %d", count.Deleted)
 	}
 
 	// Verify resources are gone
@@ -705,8 +723,8 @@ func TestOrphanCleanup_AutoSyncFalse_OnlyCounts(t *testing.T) {
 	}
 
 	// Verify orphan was counted
-	if count != 1 {
-		t.Errorf("expected 1 orphan counted, got %d", count)
+	if count.Deleted != 0 || len(count.RetainedDeployments) != 1 {
+		t.Errorf("expected 1 retained orphan and no deletions, got %+v", count)
 	}
 
 	// Verify orphan was NOT deleted

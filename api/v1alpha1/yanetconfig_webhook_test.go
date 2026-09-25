@@ -520,16 +520,22 @@ func TestYanetConfigWebhook_Numa(t *testing.T) {
 		{name: "negative", count: -1, wantErr: true},
 		{name: "single domain", count: 1},
 		{name: "duplicate and out of range exclusions", count: 2, disabled: []int32{1, 1, 99}},
-		{name: "large count with sparse exclusions", count: math.MaxInt32, disabled: []int32{1}},
+		{name: "maximum supported count", count: 4, disabled: []int32{0, 2}},
+		{name: "above supported count", count: 5, wantErr: true},
+		{name: "large count with sparse exclusions", count: math.MaxInt32, disabled: []int32{1}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.Spec.Components.Controlplane.Numa = ptrInt32(tt.count)
 			cfg.Spec.Components.Controlplane.DisabledNuma = tt.disabled
-			_, err := (&YanetConfigCustomValidator{}).ValidateCreate(context.Background(), cfg)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("validation error = %v, want error %t", err, tt.wantErr)
+			validator := &YanetConfigCustomValidator{}
+			_, createErr := validator.ValidateCreate(context.Background(), cfg)
+			_, updateErr := validator.ValidateUpdate(context.Background(), validConfig(), cfg)
+			for _, err := range []error{createErr, updateErr} {
+				if (err != nil) != tt.wantErr || tt.wantErr && !strings.Contains(err.Error(), "controlplane.numa") {
+					t.Fatalf("validation error = %v, want NUMA error %t", err, tt.wantErr)
+				}
 			}
 		})
 	}

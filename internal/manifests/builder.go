@@ -78,6 +78,11 @@ func BuildDeployments(ctx BuildContext, c *helpers.ResolvedComponent) ([]*appsv1
 	if c == nil {
 		return nil, fmt.Errorf("buildDeployments: nil ResolvedComponent")
 	}
+	if c.Kind == helpers.KindControlplane {
+		if err := yanetv1alpha1.ValidateControlplaneNuma(effectiveNuma(c)); err != nil {
+			return nil, err
+		}
+	}
 	if c.Hugepages != nil {
 		if _, err := c.Hugepages.TotalQuantity(); err != nil {
 			return nil, fmt.Errorf("buildDeployments: invalid hugepages for component %q: %w", c.Name, err)
@@ -162,7 +167,7 @@ func numaConfigArgs(args []string, numa int32) []string {
 
 // effectiveNuma resolves the configured NUMA count, defaulting to one domain.
 func effectiveNuma(c *helpers.ResolvedComponent) int32 {
-	if c.Numa > 0 {
+	if c.Numa != 0 {
 		return c.Numa
 	}
 	return 1

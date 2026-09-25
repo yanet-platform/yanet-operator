@@ -123,6 +123,18 @@ type ComponentsSpec struct {
 	Operators []OperatorSpec `json:"operators,omitempty"`
 }
 
+// MaxControlplaneNuma bounds the supported physical NUMA fan-out per node.
+const MaxControlplaneNuma int32 = 4
+
+// ValidateControlplaneNuma checks an explicit (non-defaulted) domain count.
+// Admission and rendering share this bound, including for persisted configs.
+func ValidateControlplaneNuma(count int32) error {
+	if count < 1 || count > MaxControlplaneNuma {
+		return fmt.Errorf("spec.components.controlplane.numa must be between 1 and %d, got %d", MaxControlplaneNuma, count)
+	}
+	return nil
+}
+
 // ControlplaneSpec describes the controlplane component. Multi-NUMA nodes get
 // one Deployment and one stable Service per NUMA domain.
 type ControlplaneSpec struct {
@@ -133,9 +145,10 @@ type ControlplaneSpec struct {
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 
-	// Numa is the configured controlplane NUMA fan-out per node.
+	// Numa is the configured controlplane NUMA fan-out per node (1 through 4).
 	// Defaults to 1 when omitted. Set it explicitly for multi-NUMA hosts.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4
 	// +optional
 	Numa *int32 `json:"numa,omitempty"`
 

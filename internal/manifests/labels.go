@@ -138,11 +138,17 @@ func RestoreWorkloadIdentity(deployment *appsv1.Deployment, identity WorkloadIde
 }
 
 func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
+	// Only captured containers are operator-owned. A patch may add an ordinary
+	// one-shot initializer whose name happens to start with the same prefix.
+	managed := make(map[string]bool, len(expected))
+	for _, container := range expected {
+		managed[container.Name] = true
+	}
 	patched := make(map[string]corev1.Container, len(expected))
 	lastFixed := -1
 	for i := range pod.InitContainers {
 		container := pod.InitContainers[i]
-		if isManagedNativeContainer(container.Name) {
+		if managed[container.Name] {
 			patched[container.Name] = container
 			lastFixed = i
 		}
@@ -170,7 +176,7 @@ func restoreNativeSidecars(pod *corev1.PodSpec, expected []corev1.Container) {
 	nextExpected := 0
 	for i := range pod.InitContainers {
 		container := pod.InitContainers[i]
-		if isManagedNativeContainer(container.Name) {
+		if managed[container.Name] {
 			if nextExpected < len(restoredExpected) {
 				restored = append(restored, restoredExpected[nextExpected])
 				nextExpected++

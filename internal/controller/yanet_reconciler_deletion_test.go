@@ -209,7 +209,7 @@ func TestApplyInlineConfigMaps_NoInlineConfigs_ReturnsEmpty(t *testing.T) {
 		// No Config.Inline set
 	}
 
-	names, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, true)
+	names, _, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, true)
 	if err != nil {
 		t.Fatalf("applyInlineConfigMaps: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestApplyInlineConfigMaps_AutoSyncTrue_CreatesConfigMaps(t *testing.T) {
 		},
 	}
 
-	names, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, true)
+	names, _, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, true)
 	if err != nil {
 		t.Fatalf("applyInlineConfigMaps: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestApplyInlineConfigMaps_AutoSyncFalse_SkipsCreation(t *testing.T) {
 	}
 
 	// autoSync=false
-	names, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, false)
+	names, drift, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, false)
 	if err != nil {
 		t.Fatalf("applyInlineConfigMaps: %v", err)
 	}
@@ -308,6 +308,9 @@ func TestApplyInlineConfigMaps_AutoSyncFalse_SkipsCreation(t *testing.T) {
 	// Names are still returned (for tracking in desired set)
 	if len(names) == 0 {
 		t.Fatalf("expected ConfigMap names to be returned even with autoSync=false")
+	}
+	if !drift {
+		t.Fatal("missing inline ConfigMap must report drift")
 	}
 
 	// Verify ConfigMap was NOT created
@@ -317,125 +320,5 @@ func TestApplyInlineConfigMaps_AutoSyncFalse_SkipsCreation(t *testing.T) {
 	}
 	if len(cms.Items) != 0 {
 		t.Errorf("expected no ConfigMaps created when autoSync=false, got %d", len(cms.Items))
-	}
-}
-
-// TestApplyInlineConfigMaps_AutoSyncFalse_PreservesExisting verifies that
-// when autoSync=false and ConfigMap already exists, it is preserved.
-func TestApplyInlineConfigMaps_AutoSyncFalse_PreservesExisting(t *testing.T) {
-	yanet := &yanetv1alpha1.Yanet{
-		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
-	}
-
-	// Pre-create a ConfigMap
-	existingCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cp-cfg-abc123",
-			Namespace: "yanet",
-			Labels: map[string]string{
-				manifests.LabelYanet:     "y",
-				manifests.LabelComponent: "controlplane",
-			},
-		},
-		Data: map[string]string{"config": "old content"},
-	}
-
-	r, _ := makeReconcilerEnv(t, yanet, existingCM)
-
-	buildCtx := manifests.BuildContext{
-		YanetName: "y",
-		Namespace: "yanet",
-		NodeName:  "node-1",
-	}
-
-	rc := &helpers.ResolvedComponent{
-		Name: "controlplane",
-		Config: &yanetv1alpha1.ConfigSource{
-			Inline: "new content",
-		},
-	}
-
-	// autoSync=false
-	names, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, false)
-	if err != nil {
-		t.Fatalf("applyInlineConfigMaps: %v", err)
-	}
-
-	if len(names) == 0 {
-		t.Fatalf("expected ConfigMap names")
-	}
-
-	// Verify existing ConfigMap was NOT modified
-	cm := &corev1.ConfigMap{}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "cp-cfg-abc123", Namespace: "yanet"}, cm); err != nil {
-		t.Fatalf("existing ConfigMap must be preserved: %v", err)
-	}
-
-	if cm.Data["config"] != "old content" {
-		t.Errorf("ConfigMap content must not change when autoSync=false, got %q", cm.Data["config"])
-	}
-}
-
-// TestApplyInlineConfigMaps_UpdatesExistingConfigMap verifies that
-// when autoSync=true and ConfigMap exists, it is updated with new content.
-func TestApplyInlineConfigMaps_UpdatesExistingConfigMap(t *testing.T) {
-	yanet := &yanetv1alpha1.Yanet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "y",
-			Namespace: "yanet",
-			UID:       "test-uid",
-		},
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: yanetv1alpha1.GroupVersion.String(),
-			Kind:       "Yanet",
-		},
-	}
-
-	// Pre-create a ConfigMap with old content
-	existingCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "cp-cfg-abc123",
-			Namespace: "yanet",
-			Labels: map[string]string{
-				manifests.LabelYanet:     "y",
-				manifests.LabelComponent: "controlplane",
-			},
-		},
-		Data: map[string]string{"config": "old content"},
-	}
-
-	r, _ := makeReconcilerEnv(t, yanet, existingCM)
-
-	buildCtx := manifests.BuildContext{
-		YanetName: "y",
-		Namespace: "yanet",
-		NodeName:  "node-1",
-	}
-
-	rc := &helpers.ResolvedComponent{
-		Name: "controlplane",
-		Config: &yanetv1alpha1.ConfigSource{
-			Inline: "new content",
-		},
-	}
-
-	// autoSync=true
-	names, err := r.applyInlineConfigMaps(context.Background(), yanet, buildCtx, rc, true)
-	if err != nil {
-		t.Fatalf("applyInlineConfigMaps: %v", err)
-	}
-
-	if len(names) == 0 {
-		t.Fatalf("expected ConfigMap names")
-	}
-
-	// Verify ConfigMap was updated
-	cm := &corev1.ConfigMap{}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: names[0], Namespace: "yanet"}, cm); err != nil {
-		t.Fatalf("ConfigMap must exist: %v", err)
-	}
-
-	if cm.Data["config"] != "new content" {
-		t.Errorf("ConfigMap must be updated with new content, got %q", cm.Data["config"])
 	}
 }

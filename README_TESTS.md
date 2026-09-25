@@ -31,6 +31,7 @@ make test-docker-race          # Full suite with race detector
 make lint
 make vet
 make helm-lint
+make test-packaging            # Rendered Helm/Kustomize contracts; requires Helm, Python 3 + PyYAML
 make docker-build
 ```
 
@@ -47,6 +48,7 @@ make docker-build
 | `internal/controller/yanet_*_e2e_test.go` | Manager-backed admission, autosync and status |
 | `internal/controller/dataplane_networks_envtest_test.go` | Persisted network inheritance/replacement/explicit clear |
 | `deploy/tests/webhooks/run.sh` | Existing Helm CI install/admission/reconcile smoke on kind |
+| `deploy/tests/test_packaging.py` | Rendered TLS/Service/RBAC wiring, chart options and CI failure propagation |
 
 `suite_test.go` registers only the component-based `v1alpha1` scheme and both
 validators/controllers. Teardown waits for manager shutdown before stopping

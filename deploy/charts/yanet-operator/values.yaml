@@ -10,6 +10,7 @@ nameOverride: ""
 fullnameOverride: "yanet-operator"
 
 serviceAccount:
+  create: true
   name: "controller-manager"
 
 podAnnotations: {}

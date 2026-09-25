@@ -197,8 +197,8 @@ func TestPruneOrphans_DeletesUnknownDeployments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 orphan deleted, got %d", count)
+	if count.Deleted != 1 {
+		t.Errorf("expected 1 orphan deleted, got %d", count.Deleted)
 	}
 	// keep present
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "keep", Namespace: "yanet"}, &appsv1.Deployment{}); err != nil {
@@ -260,8 +260,8 @@ func TestPruneOrphans_DeletesStaleInlineConfigMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected exactly 1 orphan deleted, got %d", count)
+	if count.Deleted != 1 {
+		t.Errorf("expected exactly 1 orphan deleted, got %d", count.Deleted)
 	}
 
 	// Stale CM (old hash) must be gone.
@@ -295,8 +295,8 @@ func TestPruneOrphans_AutoSyncFalse_DoesNotDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected 1 orphan reported, got %d", count)
+	if count.Deleted != 0 || len(count.RetainedDeployments) != 1 {
+		t.Errorf("expected 1 retained orphan and no deletions, got %+v", count)
 	}
 	// not actually deleted
 	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "drop", Namespace: "yanet"}, &appsv1.Deployment{}); err != nil {

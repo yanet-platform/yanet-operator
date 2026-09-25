@@ -61,8 +61,20 @@ webhook:
   enabled: true
   port: 9443
   certManager:
-    enabled: false  # Set to true if using cert-manager
+    enabled: false  # true requires cert-manager v1 and its CA injector
 ```
+
+The default uses certgen install/upgrade hooks. With `certManager.enabled: true`,
+the chart creates a namespaced self-signed Issuer and Certificate, mounts its TLS
+Secret and configures CA injection. cert-manager handles renewal. Wait for the
+Certificate, operator and CA injection before relying on admission. Switching an
+existing release between providers requires coordinated certificate/Secret handover;
+it is not an automatic migration. `webhook.port` configures both the container port
+and the manager listener (default 9443).
+
+The chart creates `serviceAccount.name` (default `controller-manager`) and binds
+operator RBAC to it. Set `serviceAccount.create: false` to use an existing account;
+the chart still binds its RBAC but does not create/delete that account.
 
 ### YanetConfig
 

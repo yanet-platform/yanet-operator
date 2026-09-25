@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -92,6 +93,8 @@ func (p ServicePlan) Validate() error {
 // BuildServices returns the stable Service plans for one component. Services
 // are unconditional for every service-backed box slot, even when a particular
 // Yanet or NUMA workload is scaled to zero. Sidecar exposure follows listeners.
+// Invalid NUMA fan-out returns no plans. ResolveBoxServiceComponent reports the
+// validation error to reconcilers before they reach this rendering boundary.
 func BuildServices(ctx BuildContext, component *helpers.ResolvedComponent) []ServicePlan {
 	listeners := ListenerPorts(component)
 	if len(listeners) == 0 {
@@ -102,6 +105,9 @@ func BuildServices(ctx BuildContext, component *helpers.ResolvedComponent) []Ser
 	}
 
 	numa := effectiveNuma(component)
+	if err := api.ValidateControlplaneNuma(numa); err != nil {
+		return nil
+	}
 	plans := make([]ServicePlan, 0, numa)
 	for index := int32(0); index < numa; index++ {
 		index := index

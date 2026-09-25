@@ -225,8 +225,10 @@ func validateConfigSources(components *ComponentsSpec) error {
 //
 // An omitted `numa` uses the same single-domain default as the builder.
 func validateDisabledNuma(cp *ControlplaneSpec) error {
-	if cp.Numa != nil && *cp.Numa <= 0 {
-		return fmt.Errorf("spec.components.controlplane.numa must be greater than zero, got %d", *cp.Numa)
+	if cp.Numa != nil {
+		if err := ValidateControlplaneNuma(*cp.Numa); err != nil {
+			return err
+		}
 	}
 	if len(cp.DisabledNuma) == 0 {
 		return nil

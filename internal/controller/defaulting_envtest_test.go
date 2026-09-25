@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -97,6 +98,51 @@ func TestAPIServerDefaulting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	t.Run("numa-bound", func(t *testing.T) {
+		// This API server has the CRDs but no admission webhooks: exercise the
+		// stored schema boundary independently of the Go validators and renderer.
+		before := &yanetv1alpha1.YanetConfig{}
+		key := client.ObjectKeyFromObject(config)
+		if err := apiClient.Get(testContext, key, before); err != nil {
+			t.Fatal(err)
+		}
+		candidate := before.DeepCopy()
+		four := int32(4)
+		candidate.Spec.Components.Controlplane.Numa = &four
+		if err := apiClient.Update(testContext, candidate, client.DryRunAll); err != nil {
+			t.Fatalf("CRD must accept NUMA=4: %v", err)
+		}
+		if candidate.Spec.Components.Controlplane.Numa == nil || *candidate.Spec.Components.Controlplane.Numa != 4 {
+			t.Fatal("API server must preserve accepted NUMA=4")
+		}
+		candidate = before.DeepCopy()
+		five := int32(5)
+		candidate.Spec.Components.Controlplane.Numa = &five
+		updateErr := apiClient.Update(testContext, candidate, client.DryRunAll)
+		if !apierrors.IsInvalid(updateErr) {
+			t.Fatalf("CRD must reject NUMA=5 as Invalid, got %v", updateErr)
+		}
+		var statusErr *apierrors.StatusError
+		if !errors.As(updateErr, &statusErr) || statusErr.ErrStatus.Details == nil {
+			t.Fatalf("expected field validation details, got %v", updateErr)
+		}
+		foundNumaCause := false
+		for _, cause := range statusErr.ErrStatus.Details.Causes {
+			if cause.Field == "spec.components.controlplane.numa" && cause.Type == metav1.CauseTypeFieldValueInvalid {
+				foundNumaCause = true
+			}
+		}
+		if !foundNumaCause {
+			t.Fatalf("expected NUMA field validation cause, got %+v", statusErr.ErrStatus.Details.Causes)
+		}
+		after := &yanetv1alpha1.YanetConfig{}
+		if err := apiClient.Get(testContext, key, after); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(before, after) {
+			t.Fatal("NUMA boundary requests changed stored config")
+		}
+	})
 	snapshot := &yanetv1alpha1.MutexYanetConfigSpec{}
 	r := &YanetReconciler{Client: c, Scheme: scheme, GlobalConfig: snapshot}
 	cr := &YanetConfigReconciler{Client: c, APIReader: apiClient, Scheme: scheme, GlobalConfig: snapshot}

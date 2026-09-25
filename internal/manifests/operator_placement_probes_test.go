@@ -2,6 +2,7 @@ package manifests
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
@@ -86,9 +87,12 @@ func TestOperatorPlacementRejectsUnresolvedProbes(t *testing.T) {
 	}
 	// A sibling's named listener does not resolve in the probed container.
 	config, component := manifestPlacementConfig(t)
-	config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"agent","startupProbe":{"tcpSocket":{"port":"grpc"}}}]}}}}`)
-	if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
-		t.Fatal("probe must not resolve a sibling's named listener")
+	component.Sidecars[0].Patches = nil
+	component.Sidecars[1].Patches = []string{"configure"}
+	target := BuildServices(BuildContext{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
+	config.Patches[0].Patch.Raw = []byte(fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":"agent","startupProbe":{"tcpSocket":{"port":%q}}}]}}}}`, target))
+	if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil || !strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), "does not name a TCP port in that container") {
+		t.Fatalf("probe must not resolve a sibling's named listener: %v", err)
 	}
 }
 

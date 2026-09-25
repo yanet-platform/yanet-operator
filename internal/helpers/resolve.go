@@ -130,6 +130,11 @@ func ResolveBoxComponent(config *yanetv1alpha1.YanetConfigSpec, yanet *yanetv1al
 			return nil, nil
 		}
 		cp := config.Components.Controlplane
+		if cp.Numa != nil {
+			if err := yanetv1alpha1.ValidateControlplaneNuma(*cp.Numa); err != nil {
+				return nil, err
+			}
+		}
 		override := componentOverride(yanet, kind, "")
 		return &ResolvedComponent{
 			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),

@@ -85,6 +85,33 @@ Configure the Grafana namespace or disable dashboard creation as appropriate.
 Existing installations must follow the [replacement notes](release-notes/v3.0.0.md)
 instead of applying this command over incompatible CRDs.
 
+### Standalone installer prerequisites
+
+`install.yaml` (also `make deploy`) requires **cert-manager v1 with its webhook and
+CA injector running before applying the installer**. It creates a namespaced
+self-signed Issuer and serving Certificate, mounts the resulting TLS Secret and
+connects both validating webhooks to the operator Service. It does not install
+cert-manager. The Kubernetes API server must be able to reach the webhook Service.
+
+On a clean cluster with cert-manager already installed:
+
+```bash
+kubectl apply -f install.yaml
+kubectl wait -n yanet-operator-system --for=condition=Ready \
+  certificate/yanet-operator-serving-cert --timeout=120s
+kubectl rollout status -n yanet-operator-system \
+  deployment/yanet-operator-controller-manager --timeout=120s
+kubectl get validatingwebhookconfiguration \
+  yanet-operator-validating-webhook-configuration -o yaml
+```
+
+Verify both `clientConfig.caBundle` fields are populated before creating
+`YanetConfig` or `Yanet` objects: certificate readiness and Deployment rollout
+alone do not prove that asynchronous CA injection has completed. The installer
+uses fail-closed admission. Unlike the default Helm certgen hooks, cert-manager
+renews certificates and maintains the CA bundle. Do not enable the commented CRD
+conversion patches: this release has a single API version and no conversion server.
+
 ## Failed publication
 
 Inspect the failed Actions job with `gh run view <run-id> --log-failed`.

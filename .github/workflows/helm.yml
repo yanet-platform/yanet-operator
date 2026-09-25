@@ -33,6 +33,11 @@ jobs:
       run: |
         helm template test deploy/charts/yanet-operator --debug
 
+    - name: Test packaging contracts
+      run: |
+        python3 -m pip install PyYAML==6.0.3
+        make test-packaging
+
   package:
     name: Package Helm Chart
     runs-on: ubuntu-latest

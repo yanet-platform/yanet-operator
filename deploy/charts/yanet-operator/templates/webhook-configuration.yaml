@@ -3,6 +3,10 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: {{ include "yanet-operator.fullname" . }}-validating-webhook-configuration
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "yanet-operator.fullname" . }}-webhook-cert
+  {{- end }}
   labels:
     {{- include "yanet-operator.labels" . | nindent 4 }}
 webhooks:

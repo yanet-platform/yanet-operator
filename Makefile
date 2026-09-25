@@ -84,6 +84,10 @@ helm-lint: ## Lint and template Helm chart.
 	helm lint deploy/charts/yanet-operator
 	helm template test deploy/charts/yanet-operator --debug >/dev/null
 
+.PHONY: test-packaging
+test-packaging: kustomize ## Test rendered Helm/Kustomize wiring (Python 3 + PyYAML required).
+	KUSTOMIZE=$(KUSTOMIZE) python3 deploy/tests/test_packaging.py -v $(PACKAGING_TEST_ARGS)
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	$(call docker-go,go fmt ./...)

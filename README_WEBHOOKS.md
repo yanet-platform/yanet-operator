@@ -67,6 +67,18 @@ cannot be reached.
 Setting `webhook.enabled: false` disables the server flag, webhook configuration,
 certificate mounts and certificate jobs. Structural CRD validation still applies.
 
+Set `webhook.certManager.enabled: true` to use an already installed cert-manager v1
+with its CA injector instead of certgen hooks. The chart creates a namespaced
+self-signed Issuer and Certificate and annotates the webhook configuration for CA
+injection. cert-manager owns certificate renewal. Wait for Certificate readiness,
+operator rollout and populated CA bundles before relying on admission; `Ignore`
+also permits requests during asynchronous issuance/injection. Switching certificate
+providers on an existing release requires a coordinated certificate/Secret handover;
+it is not an automatic migration of an existing certgen Secret.
+
+The standalone Kustomize/release installer always uses cert-manager; see
+[installer prerequisites](README_RELEASES.md#standalone-installer-prerequisites).
+
 ## Troubleshooting
 
 Inspect the webhook Service, operator logs, TLS Secret and CA configuration in

@@ -217,6 +217,11 @@ jobs:
 
           ### Quick Install (kubectl)
 
+          Requires cert-manager v1 (including its webhook and CA injector) already
+          installed and running. This manifest does not install cert-manager.
+          Wait for the serving Certificate, operator rollout and webhook CA injection
+          before creating YanetConfig/Yanet resources; see the release guide.
+
           ```bash
           kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
           ```
@@ -245,7 +250,7 @@ jobs:
 
           ### Kubernetes Manifests
 
-          - `install.yaml` — Complete installation manifest (CRDs + Operator)
+          - `install.yaml` — CRDs, operator and admission TLS wiring (requires cert-manager)
 
           ## 📚 Documentation
 

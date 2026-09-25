@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -510,8 +511,10 @@ func TestReconcileYanet_PruneFailureReturnsErrorAndDegrades(t *testing.T) {
 // wiping ports of an existing Service when the builder accidentally
 // returns an empty Ports slice.
 func TestApplySharedService_RefusesEmptyPorts(t *testing.T) {
+	config := &yanetv1alpha1.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName, UID: "config-uid"}}
+	owner := *metav1.NewControllerRef(config, yanetv1alpha1.GroupVersion.WithKind("YanetConfig"))
 	existing := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet", OwnerReferences: []metav1.OwnerReference{owner}},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{manifests.LabelYanet: "y"},
 			Ports: []corev1.ServicePort{
@@ -521,7 +524,7 @@ func TestApplySharedService_RefusesEmptyPorts(t *testing.T) {
 		},
 	}
 	desired := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet", OwnerReferences: []metav1.OwnerReference{owner}},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{manifests.LabelYanet: "y"},
 			Ports:    nil, // bug from builder
@@ -530,31 +533,36 @@ func TestApplySharedService_RefusesEmptyPorts(t *testing.T) {
 	s := newSchemeForTest(t)
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 	r := &YanetConfigReconciler{Client: cl, Scheme: s}
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(existing), existing); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := r.applySharedService(context.Background(), desired); err == nil {
-		t.Fatal("applySharedService must report an empty-ports builder error")
+	if err := r.applySharedService(context.Background(), desired); err == nil || !strings.Contains(err.Error(), "refusing to apply invalid shared Service") {
+		t.Fatalf("applySharedService must report an empty-ports builder error, got %v", err)
 	}
 	got := &corev1.Service{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if len(got.Spec.Ports) != 2 {
-		t.Errorf("existing Service must keep its 2 Ports, got %d (%+v)", len(got.Spec.Ports), got.Spec.Ports)
+	if !reflect.DeepEqual(existing, got) {
+		t.Errorf("invalid desired ports changed existing Service")
 	}
 }
 
 // TestApplySharedService_RefusesEmptySelector mirrors the above but for
 // the Selector guard.
 func TestApplySharedService_RefusesEmptySelector(t *testing.T) {
+	config := &yanetv1alpha1.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName, UID: "config-uid"}}
+	owner := *metav1.NewControllerRef(config, yanetv1alpha1.GroupVersion.WithKind("YanetConfig"))
 	existing := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet", OwnerReferences: []metav1.OwnerReference{owner}},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{manifests.LabelYanet: "y"},
 			Ports:    []corev1.ServicePort{{Port: 80}},
 		},
 	}
 	desired := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet"},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "yanet", OwnerReferences: []metav1.OwnerReference{owner}},
 		Spec: corev1.ServiceSpec{
 			Ports:    []corev1.ServicePort{{Port: 80}},
 			Selector: nil,
@@ -563,16 +571,19 @@ func TestApplySharedService_RefusesEmptySelector(t *testing.T) {
 	s := newSchemeForTest(t)
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
 	r := &YanetConfigReconciler{Client: cl, Scheme: s}
+	if err := cl.Get(context.Background(), client.ObjectKeyFromObject(existing), existing); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := r.applySharedService(context.Background(), desired); err == nil {
-		t.Fatal("applySharedService must report an empty-selector builder error")
+	if err := r.applySharedService(context.Background(), desired); err == nil || !strings.Contains(err.Error(), "refusing to apply invalid shared Service") {
+		t.Fatalf("applySharedService must report an empty-selector builder error, got %v", err)
 	}
 	got := &corev1.Service{}
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "yanet"}, got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if len(got.Spec.Selector) != 1 {
-		t.Errorf("existing Selector must remain, got %v", got.Spec.Selector)
+	if !reflect.DeepEqual(existing, got) {
+		t.Errorf("invalid desired selector changed existing Service")
 	}
 }
 

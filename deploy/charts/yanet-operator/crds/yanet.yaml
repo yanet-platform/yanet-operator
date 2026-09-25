@@ -331,9 +331,10 @@ spec:
                         type: object
                       numa:
                         description: |-
-                          Numa is the configured controlplane NUMA fan-out per node.
+                          Numa is the configured controlplane NUMA fan-out per node (1 through 4).
                           Defaults to 1 when omitted. Set it explicitly for multi-NUMA hosts.
                         format: int32
+                        maximum: 4
                         minimum: 1
                         type: integer
                     required:

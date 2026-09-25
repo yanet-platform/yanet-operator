@@ -50,13 +50,12 @@ var (
 		[]string{"name", "namespace"},
 	)
 
-	// yanetOrphansPruned counts orphan resources deleted by the
-	// pruner. It is incremented per resource (Deployment, Service
-	// or ConfigMap) deleted in a reconcile cycle.
+	// yanetOrphansPruned counts successful orphan Deployment/ConfigMap deletion
+	// requests. Foreground garbage collection can finish after the request.
 	yanetOrphansPruned = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "yanet_orphans_pruned_total",
-			Help: "Number of orphan resources pruned by the reconciler",
+			Help: "Number of successful orphan resource deletion requests by the reconciler",
 		},
 		[]string{"name", "namespace"},
 	)

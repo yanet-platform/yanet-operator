@@ -339,7 +339,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 
 			// ConfigMaps for inline configs (must land before the
 			// Deployment to avoid CreateContainerConfigError).
-			cmNames, cmErr := r.applyInlineConfigMaps(ctx, yanet, buildCtx, rc, autoSync)
+			cmNames, configDrift, cmErr := r.applyInlineConfigMaps(ctx, yanet, buildCtx, rc, autoSync)
 			if cmErr != nil {
 				logger.Error(cmErr, "configmap apply failed", "component", rc.Name)
 				reconcileErrs = append(reconcileErrs, cmErr)
@@ -361,6 +361,9 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 				}
 				normalizeDeploymentReplicas(d, rc.Enabled, installationEnabled)
 				state, requeue, applyErr := r.applyDeployment(ctx, d, autoSync, updateWindow, node.Name, logger)
+				if configDrift && state == "synced" {
+					state = "out-of-sync (inline config)"
+				}
 				ns.Deployments[d.Name] = state
 				desired.Deployments[d.Name] = struct{}{}
 				if applyErr != nil {
@@ -412,7 +415,22 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	}
 
 	// 8. Orphan cleanup ----------------------------------------
-	orphanCount, err := r.pruneOrphans(ctx, yanet, desired, autoSync, logger)
+	pruned, err := r.pruneOrphans(ctx, yanet, desired, autoSync, logger)
+	for _, deployment := range pruned.RetainedDeployments {
+		nodeName := deployment.Labels[manifests.LabelNode]
+		ns := nodesStatus[nodeName]
+		ns.NodeName = nodeName
+		if ns.Deployments == nil {
+			ns.Deployments = make(map[string]string)
+		}
+		ns.Deployments[deployment.Name] = "out-of-sync (orphan)"
+		nodesStatus[nodeName] = ns
+	}
+	yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Add(float64(pruned.Deleted))
+	if pruned.Deleted > 0 && r.Recorder != nil && r.checkGlobalStop() == nil {
+		r.Recorder.Eventf(yanet, nil, corev1.EventTypeNormal, "OrphanPruned", "Cleanup",
+			"Requested deletion of %d orphan resources no longer in desired set", pruned.Deleted)
+	}
 	if err != nil {
 		logger.Error(err, "prune orphans failed")
 		pruneErr := fmt.Errorf("prune orphans: %w", err)
@@ -427,11 +445,6 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(pruneErr, statusErr)
 	}
-	yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Add(float64(orphanCount))
-	if orphanCount > 0 && r.Recorder != nil && r.checkGlobalStop() == nil {
-		r.Recorder.Eventf(yanet, nil, corev1.EventTypeNormal, "OrphanPruned", "Cleanup",
-			"Pruned %d orphan resources no longer in desired set", orphanCount)
-	}
 
 	// 9. Status -------------------------------------------------
 	yanet.Status.NodesStatus = nodesStatus
@@ -439,6 +452,10 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	yanet.Status.Sync = aggregateSyncStatus(nodesStatus)
 	yanet.Status.Pods = pods
 	yanet.Status.Conditions = computeConditions(yanet, missingOperators)
+	if len(pruned.RetainedConfigMaps) > 0 {
+		sort.Strings(pruned.RetainedConfigMaps)
+		setConditionsDegraded(yanet, "OrphansRetained", fmt.Sprintf("ConfigMaps retained with autoSync=false: %v", pruned.RetainedConfigMaps))
+	}
 
 	// metrics: deployments out-of-sync counter
 	outOfSyncCount := len(yanet.Status.Sync.OutOfSync) + len(yanet.Status.Sync.Error)
@@ -789,6 +806,19 @@ func (r *YanetReconciler) validateExclusiveNodes(
 	if len(conflicts) == 0 {
 		return nil
 	}
+	// Acquisition conflicts must not block releasing former nodes, otherwise
+	// two installations swapping selectors wait on one another forever. Keep
+	// foreground deletion so an incumbent's claim survives until its Pods drain.
+	selected := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		selected[node.Name] = struct{}{}
+	}
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		if _, keep := selected[deployment.Labels[manifests.LabelNode]]; !keep && controlledByYanet(deployment, yanet) {
+			cleanupNodes[deployment.Labels[manifests.LabelNode]] = struct{}{}
+		}
+	}
 	sort.Strings(conflicts)
 	return &nodeSelectionConflict{messages: conflicts, cleanupNodeNames: cleanupNodes}
 }
@@ -810,19 +840,20 @@ func yanetPrecedes(left, right *yanetv1alpha1.Yanet) bool {
 // a fresh ConfigMap and a Pod rollout.
 //
 // Returns the slice of ConfigMap names that should belong to the
-// desired set so the prune helper does not delete them.
+// desired set so the prune helper does not delete them, and whether a
+// read-only observation found configuration drift for the component.
 func (r *YanetReconciler) applyInlineConfigMaps(
 	ctx context.Context,
 	yanet *yanetv1alpha1.Yanet,
 	buildCtx manifests.BuildContext,
 	rc *helpers.ResolvedComponent,
 	autoSync bool,
-) ([]string, error) {
+) (names []string, drift bool, resultErr error) {
 	cmaps := manifests.InlineConfigMaps(buildCtx, rc)
 	if len(cmaps) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
-	names := make([]string, 0, len(cmaps))
+	names = make([]string, 0, len(cmaps))
 	for name, content := range cmaps {
 		names = append(names, name)
 		cm := &corev1.ConfigMap{
@@ -841,13 +872,14 @@ func (r *YanetReconciler) applyInlineConfigMaps(
 			// the Pod to mount them; track desired names but do
 			// not create when the user explicitly opted out.
 			existing := &corev1.ConfigMap{}
-			if err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: buildCtx.Namespace}, existing); err == nil {
-				continue
-			} else if !apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("configmap get %s/%s: %w", buildCtx.Namespace, name, err)
+			err := r.Client.Get(ctx, types.NamespacedName{Name: name, Namespace: buildCtx.Namespace}, existing)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return nil, false, fmt.Errorf("configmap get %s/%s: %w", buildCtx.Namespace, name, err)
 			}
-			// Missing ConfigMap and AutoSync=false: skip; the
-			// Pod will fail until the user enables AutoSync.
+			if apierrors.IsNotFound(err) || !controlledByYanet(existing, yanet) ||
+				!existing.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(existing.Data, cm.Data) {
+				drift = true
+			}
 			continue
 		}
 		_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
@@ -870,10 +902,10 @@ func (r *YanetReconciler) applyInlineConfigMaps(
 			return r.checkGlobalStop()
 		})
 		if err != nil {
-			return nil, fmt.Errorf("configmap %s/%s: %w", buildCtx.Namespace, name, err)
+			return nil, false, fmt.Errorf("configmap %s/%s: %w", buildCtx.Namespace, name, err)
 		}
 	}
-	return names, nil
+	return names, drift, nil
 }
 
 // applyDeployment creates/updates a Deployment when AutoSync is on.

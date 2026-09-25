@@ -62,11 +62,14 @@ func RenderDeployments(ctx BuildContext, component *helpers.ResolvedComponent, r
 			if err := validateSidecarComposition(&deployment.Spec.Template.Spec, component); err != nil {
 				return nil, err
 			}
+		}
+		RestoreWorkloadIdentity(deployment, identity)
+		if component.Kind == helpers.KindDataplane {
+			// Default NAD namespaces must use the installation identity, not a patch's metadata.
 			if err := configureDataplaneNetworks(deployment, component); err != nil {
 				return nil, err
 			}
 		}
-		RestoreWorkloadIdentity(deployment, identity)
 		if err := api.ValidatePrivatePodNetwork(&deployment.Spec.Template.Spec); err != nil {
 			return nil, err
 		}
