@@ -32,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
 
 // resourceMustParse is a thin wrapper around resource.MustParse used by
@@ -79,25 +78,14 @@ func ensureNamespace(ctx context.Context, ns string) {
 	_ = k8sClient.Create(ctx, namespace)
 }
 
-// cleanupYanetV1 best-effort deletes every v1 Yanet CR in ns. The
-// finalizer is removed by the reconciler; here we just issue Delete.
-func cleanupYanetV1(ctx context.Context, ns string) {
-	list := &yanetv1alpha1.YanetList{}
-	if err := k8sClient.List(ctx, list, client.InNamespace(ns)); err == nil {
-		for i := range list.Items {
-			_ = k8sClient.Delete(ctx, &list.Items[i])
-		}
-	}
-}
-
-// cleanupYanetV2 completes test teardown without relying on garbage collection:
+// cleanupYanet completes test teardown without relying on garbage collection:
 // envtest has neither a Deployment controller nor a garbage-collector controller.
-func cleanupYanetV2(ctx context.Context, ns string) {
-	Expect(cleanupYanetV2ResourcesForTest(ctx, k8sClient, ns)).To(Succeed())
+func cleanupYanet(ctx context.Context, ns string) {
+	Expect(cleanupYanetResourcesForTest(ctx, k8sClient, ns)).To(Succeed())
 }
 
-func cleanupYanetV2ResourcesForTest(ctx context.Context, c client.Client, ns string) error {
-	list := &yanetv2alpha1.YanetV2List{}
+func cleanupYanetResourcesForTest(ctx context.Context, c client.Client, ns string) error {
+	list := &yanetv1alpha1.YanetList{}
 	if err := c.List(ctx, list, client.InNamespace(ns)); err != nil {
 		return err
 	}
@@ -122,7 +110,7 @@ func cleanupYanetV2ResourcesForTest(ctx context.Context, c client.Client, ns str
 			pending := false
 			for j := range deployments.Items {
 				deployment := &deployments.Items[j]
-				if !controlledByYanetV2(deployment, yanet) {
+				if !controlledByYanet(deployment, yanet) {
 					continue
 				}
 				pending = true
@@ -140,7 +128,7 @@ func cleanupYanetV2ResourcesForTest(ctx context.Context, c client.Client, ns str
 				}
 				for j := range configMaps.Items {
 					cm := &configMaps.Items[j]
-					if controlledByYanetV2(cm, yanet) {
+					if controlledByYanet(cm, yanet) {
 						if err := c.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
 							return false, err
 						}

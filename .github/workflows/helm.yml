@@ -1,13 +1,9 @@
-# Package and publish Helm chart to GHCR
-# Triggered on: push to main/master, version tags, and PRs
+# Validate and package Helm charts. release.yml publishes tagged releases.
 name: Helm Chart
 
 on:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'        # Version tags like v0.1.0
-      - 'chart-v*'  # Chart-specific tags like chart-v0.1.0
   pull_request:
     branches: [ main, master ]
 
@@ -37,12 +33,11 @@ jobs:
       run: |
         helm template test deploy/charts/yanet-operator --debug
 
-  package-and-push:
-    name: Package and Push Helm Chart
+  package:
+    name: Package Helm Chart
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     
     steps:
     - name: Checkout code
@@ -53,10 +48,6 @@ jobs:
       with:
         version: 'latest'
     
-    - name: Log in to GitHub Container Registry
-      run: |
-        echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.GHCR_REGISTRY }} --username ${{ github.actor }} --password-stdin
-
     - name: Extract chart version
       id: chart_version
       run: |
@@ -64,20 +55,10 @@ jobs:
         echo "version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
         echo "Chart version: ${CHART_VERSION}"
     
-    - name: Sync appVersion with version
-      run: |
-        CHART_VERSION=$(grep '^version:' deploy/charts/yanet-operator/Chart.yaml | awk '{print $2}')
-        sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
-        echo "Synced appVersion to ${CHART_VERSION}"
-    
     - name: Package Helm chart
       run: |
         helm package deploy/charts/yanet-operator
     
-    - name: Push Helm chart to GitHub Container Registry
-      run: |
-        helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.GHCR_REGISTRY }}/${{ github.repository_owner }}
-
     - name: Upload chart artifact
       uses: actions/upload-artifact@v4
       with:
@@ -124,7 +105,7 @@ jobs:
       run: |
         # webhook.enabled=true exercises:
         #   - kube-webhook-certgen pre-install Job → Secret with TLS cert
-        #   - ValidatingWebhookConfiguration for v1alpha1 + v2alpha1
+        #   - ValidatingWebhookConfiguration for Yanet and YanetConfig
         #   - post-install Job that patches caBundle
         helm install test deploy/charts/yanet-operator \
           --wait \
@@ -143,12 +124,8 @@ jobs:
       run: |
         kubectl get deployment -n yanet
         kubectl get pods -n yanet
-        # v1 CRDs
         kubectl get crd yanets.yanet.yanet-platform.io
         kubectl get crd yanetconfigs.yanet.yanet-platform.io
-        # v2 CRDs (separate CRDs, not extra versions of v1)
-        kubectl get crd yanetsv2.yanet.yanet-platform.io
-        kubectl get crd yanetconfigsv2.yanet.yanet-platform.io
         echo "=== ValidatingWebhookConfiguration ==="
         kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io \
           -l app.kubernetes.io/name=yanet-operator -o yaml
@@ -159,11 +136,11 @@ jobs:
 
     - name: Wait for webhook server to become ready
       run: |
-        # Give the operator a chance to register all 4 webhook paths
+        # Give the operator a chance to register both webhook paths
         # (controller-runtime registers them lazily after leader election).
         for i in $(seq 1 30); do
           if kubectl -n yanet logs -l app.kubernetes.io/name=yanet-operator --tail=-1 \
-              | grep -q "Registering webhook.*/validate-yanet-yanet-platform-io-v2alpha1-yanetconfig"; then
+              | grep -q "Registering webhook.*/validate-yanet-yanet-platform-io-v1alpha1-yanetconfig"; then
             echo "webhook server ready"
             exit 0
           fi

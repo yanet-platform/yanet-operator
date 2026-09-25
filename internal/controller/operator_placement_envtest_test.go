@@ -3,7 +3,7 @@ package controller
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,11 +15,11 @@ import (
 )
 
 var _ = DescribeTable("Retired v2 API fields", func(path []string, value interface{}, field string) {
-	config := &api.YanetConfigV2{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalV2ConfigSpec()}
+	config := &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalConfigSpec()}
 	config.Spec.Stop = true
 	object, err := runtime.DefaultUnstructuredConverter.ToUnstructured(config)
 	Expect(err).NotTo(HaveOccurred())
-	object["apiVersion"], object["kind"] = api.GroupVersion.String(), "YanetConfigV2"
+	object["apiVersion"], object["kind"] = api.GroupVersion.String(), "YanetConfig"
 	Expect(unstructured.SetNestedField(object, value, path...)).To(Succeed())
 	resource := &unstructured.Unstructured{Object: object}
 	err = k8sClient.Create(ctx, resource, &client.CreateOptions{
@@ -44,7 +44,7 @@ var _ = Describe("Ordered sidecar API", func() {
 	It("round-trips explicit empty listeners and preserves atomic SSA order", func() {
 		listeners := []api.OperatorListener{"grpc", "http"}
 		empty := []api.OperatorListener{}
-		config := &api.YanetConfigV2{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalV2ConfigSpec()}
+		config := &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalConfigSpec()}
 		config.Spec.Stop = true
 		config.Spec.Components.Operators = []api.OperatorSpec{
 			{Name: "legacy", Containers: []api.OperatorContainer{{Name: "worker", Image: api.ImageRef{Name: "test"}}}},
@@ -58,7 +58,7 @@ var _ = Describe("Ordered sidecar API", func() {
 		config.Spec.BoxTypes[0].Components.Dataplane.Sidecars = map[string]api.BoxDataplaneSidecar{"monalive": {}, "client": {}}
 		Expect(k8sClient.Create(ctx, config, client.FieldOwner("palette-author"))).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, config)).To(Succeed()) })
-		fresh := &api.YanetConfigV2{}
+		fresh := &api.YanetConfig{}
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(config), fresh)).To(Succeed())
 		Expect(fresh.Spec.Components.Dataplane.Sidecars[0].Name).To(Equal("monalive"))
 		Expect(fresh.Spec.Components.Dataplane.Sidecars[0].Listeners).NotTo(BeNil())
@@ -69,8 +69,8 @@ var _ = Describe("Ordered sidecar API", func() {
 		Expect(fresh.Spec.Components.Operators[0].Listeners).To(BeNil())
 		component, err := helpers.ResolveBoxComponent(&fresh.Spec, &api.YanetSpec{BoxType: "release"}, helpers.KindDataplane, "")
 		Expect(err).NotTo(HaveOccurred())
-		build := manifests.BuildContextV2{YanetName: "placement-api", Namespace: whTestNS, BoxType: "release",
-			OwnerRef: metav1.OwnerReference{APIVersion: api.GroupVersion.String(), Kind: "YanetConfigV2", Name: config.Name, UID: config.UID}}
+		build := manifests.BuildContext{YanetName: "placement-api", Namespace: whTestNS, BoxType: "release",
+			OwnerRef: metav1.OwnerReference{APIVersion: api.GroupVersion.String(), Kind: "YanetConfig", Name: config.Name, UID: config.UID}}
 		deployments, err := manifests.RenderDeployments(build, component, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(deployments).To(HaveLen(1))
@@ -86,7 +86,7 @@ var _ = Describe("Ordered sidecar API", func() {
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, service)).To(Succeed()) })
 
 		// Another manager cannot independently append, reorder or own one entry.
-		reorder := client.RawPatch(types.ApplyPatchType, []byte(`{"apiVersion":"yanet.yanet-platform.io/v2alpha1","kind":"YanetConfigV2","metadata":{"name":"config"},"spec":{"components":{"dataplane":{"sidecars":[{"name":"client","image":{"name":"test"},"listeners":[]},{"name":"monalive","image":{"name":"test"},"listeners":["grpc","http"]}]}}}}`))
+		reorder := client.RawPatch(types.ApplyPatchType, []byte(`{"apiVersion":"yanet.yanet-platform.io/v1alpha1","kind":"YanetConfig","metadata":{"name":"config"},"spec":{"components":{"dataplane":{"sidecars":[{"name":"client","image":{"name":"test"},"listeners":[]},{"name":"monalive","image":{"name":"test"},"listeners":["grpc","http"]}]}}}}`))
 		Expect(apierrors.IsConflict(k8sClient.Patch(ctx, fresh, reorder, client.FieldOwner("another-author")))).To(BeTrue())
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(config), fresh)).To(Succeed())
 		Expect(fresh.Spec.Components.Dataplane.Sidecars[0].Name).To(Equal("monalive"))

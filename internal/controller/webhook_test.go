@@ -19,7 +19,6 @@ package controller
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,7 +28,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 )
 
 // Webhook integration suite. The webhook server runs in-process and the
@@ -61,24 +59,24 @@ func expectWebhookRejection(err error, wantSubstr string) {
 	}
 }
 
-// minimalV2ConfigSpec builds the smallest YanetConfigV2 spec that the v2
+// minimalConfigSpec builds the smallest YanetConfig spec that the
 // webhook accepts: cp + dp components, one boxType referencing both.
-func minimalV2ConfigSpec() yanetv2alpha1.YanetConfigSpec {
-	return yanetv2alpha1.YanetConfigSpec{
-		Components: yanetv2alpha1.ComponentsSpec{
-			Controlplane: yanetv2alpha1.ControlplaneSpec{
-				Image: yanetv2alpha1.ImageRef{Name: "controlplane", Tag: "test"},
+func minimalConfigSpec() yanetv1alpha1.YanetConfigSpec {
+	return yanetv1alpha1.YanetConfigSpec{
+		Components: yanetv1alpha1.ComponentsSpec{
+			Controlplane: yanetv1alpha1.ControlplaneSpec{
+				Image: yanetv1alpha1.ImageRef{Name: "controlplane", Tag: "test"},
 			},
-			Dataplane: yanetv2alpha1.DataplaneSpec{
-				Image: yanetv2alpha1.ImageRef{Name: "dataplane", Tag: "test"},
+			Dataplane: yanetv1alpha1.DataplaneSpec{
+				Image: yanetv1alpha1.ImageRef{Name: "dataplane", Tag: "test"},
 			},
 		},
-		BoxTypes: []yanetv2alpha1.BoxType{
+		BoxTypes: []yanetv1alpha1.BoxType{
 			{
 				Name: "release",
-				Components: yanetv2alpha1.BoxComponents{
-					Controlplane: &yanetv2alpha1.BoxComponent{},
-					Dataplane:    &yanetv2alpha1.BoxDataplane{},
+				Components: yanetv1alpha1.BoxComponents{
+					Controlplane: &yanetv1alpha1.BoxComponent{},
+					Dataplane:    &yanetv1alpha1.BoxDataplane{},
 				},
 			},
 		},
@@ -88,132 +86,56 @@ func minimalV2ConfigSpec() yanetv2alpha1.YanetConfigSpec {
 var _ = Describe("Validating webhooks", func() {
 
 	// -----------------------------------------------------------
-	// v1alpha1 — YanetV2
+	// v1alpha1 — YanetConfig
 	// -----------------------------------------------------------
-	Context("v1alpha1 YanetV2", func() {
-		It("accepts a well-formed CR", func() {
-			cr := &yanetv1alpha1.Yanet{
-				ObjectMeta: metav1.ObjectMeta{Name: "v1-valid", Namespace: whTestNS},
-				Spec:       yanetv1alpha1.YanetSpec{NodeName: "node-a", Type: "release"},
-			}
-			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
-		})
-
-		It("rejects an empty nodename", func() {
-			cr := &yanetv1alpha1.Yanet{
-				ObjectMeta: metav1.ObjectMeta{Name: "v1-empty-nodename", Namespace: whTestNS},
-				Spec:       yanetv1alpha1.YanetSpec{Type: "release"},
-			}
-			expectWebhookRejection(k8sClient.Create(ctx, cr), "nodename")
-		})
-
-		It("rejects an unknown type", func() {
-			cr := &yanetv1alpha1.Yanet{
-				ObjectMeta: metav1.ObjectMeta{Name: "v1-bad-type", Namespace: whTestNS},
-				Spec:       yanetv1alpha1.YanetSpec{NodeName: "node-a", Type: "gibberish"},
-			}
-			expectWebhookRejection(k8sClient.Create(ctx, cr), "type")
-		})
-
-		It("forbids changing nodename on update", func() {
-			cr := &yanetv1alpha1.Yanet{
-				ObjectMeta: metav1.ObjectMeta{Name: "v1-immutable", Namespace: whTestNS},
-				Spec:       yanetv1alpha1.YanetSpec{NodeName: "node-a", Type: "release"},
-			}
-			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
-			defer func() { _ = k8sClient.Delete(ctx, cr) }()
-
-			// The v1 reconciler may add a finalizer right after Create,
-			// bumping the resourceVersion. Retry the Update on conflict
-			// so the test exercises the admission webhook (which is the
-			// thing under test) rather than racing the reconciler.
-			Eventually(func() error {
-				fresh := &yanetv1alpha1.Yanet{}
-				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cr), fresh); err != nil {
-					return err
-				}
-				fresh.Spec.NodeName = "node-b"
-				return k8sClient.Update(ctx, fresh)
-			}, 5*time.Second, 100*time.Millisecond).Should(MatchError(
-				ContainSubstring("admission webhook"),
-			))
-		})
-	})
-
-	// -----------------------------------------------------------
-	// v1alpha1 — YanetConfigV2
-	// -----------------------------------------------------------
-	Context("v1alpha1 YanetConfigV2", func() {
-		It("accepts UpdateWindow >= 0", func() {
-			cfg := &yanetv1alpha1.YanetConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-v1-valid", Namespace: whTestNS},
-				Spec:       yanetv1alpha1.YanetConfigSpec{UpdateWindow: 60},
-			}
-			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
-		})
-
-		It("rejects negative UpdateWindow", func() {
-			cfg := &yanetv1alpha1.YanetConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: "cfg-v1-bad", Namespace: whTestNS},
-				Spec:       yanetv1alpha1.YanetConfigSpec{UpdateWindow: -1},
-			}
-			expectWebhookRejection(k8sClient.Create(ctx, cfg), "updatewindow")
-		})
-	})
-
-	// -----------------------------------------------------------
-	// v2alpha1 — YanetConfigV2
-	// -----------------------------------------------------------
-	Context("v2alpha1 YanetConfigV2", func() {
+	Context("v1alpha1 YanetConfig", func() {
 		It("rejects a non-canonical singleton name", func() {
-			cfg := &yanetv2alpha1.YanetConfigV2{
+			cfg := &yanetv1alpha1.YanetConfig{
 				ObjectMeta: metav1.ObjectMeta{Name: "other"},
-				Spec:       minimalV2ConfigSpec(),
+				Spec:       minimalConfigSpec(),
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "metadata.name")
 		})
 
 		It("accepts a well-formed config", func() {
-			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
-				Spec:       minimalV2ConfigSpec(),
+			cfg := &yanetv1alpha1.YanetConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName},
+				Spec:       minimalConfigSpec(),
 			}
 			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, cfg)).To(Succeed())
 		})
 
 		It("rejects duplicate ordered sidecar names", func() {
-			s := minimalV2ConfigSpec()
-			s.Components.Dataplane.Sidecars = []yanetv2alpha1.SidecarSpec{
-				{Name: "duplicate", Image: yanetv2alpha1.ImageRef{Name: "test"}},
-				{Name: "duplicate", Image: yanetv2alpha1.ImageRef{Name: "test"}},
+			s := minimalConfigSpec()
+			s.Components.Dataplane.Sidecars = []yanetv1alpha1.SidecarSpec{
+				{Name: "duplicate", Image: yanetv1alpha1.ImageRef{Name: "test"}},
+				{Name: "duplicate", Image: yanetv1alpha1.ImageRef{Name: "test"}},
 			}
-			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
+			cfg := &yanetv1alpha1.YanetConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName},
 				Spec:       s,
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "duplicates a role")
 		})
 
 		It("rejects a boxType referencing an undeclared patch", func() {
-			s := minimalV2ConfigSpec()
-			s.BoxTypes[0].Components.Controlplane = &yanetv2alpha1.BoxComponent{
+			s := minimalConfigSpec()
+			s.BoxTypes[0].Components.Controlplane = &yanetv1alpha1.BoxComponent{
 				Patches: []string{"does-not-exist"},
 			}
-			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
+			cfg := &yanetv1alpha1.YanetConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName},
 				Spec:       s,
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "patch")
 		})
 
 		It("rejects a boxType with duplicate name", func() {
-			s := minimalV2ConfigSpec()
+			s := minimalConfigSpec()
 			s.BoxTypes = append(s.BoxTypes, s.BoxTypes[0])
-			cfg := &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
+			cfg := &yanetv1alpha1.YanetConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName},
 				Spec:       s,
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cfg), "duplicated")
@@ -222,17 +144,17 @@ var _ = Describe("Validating webhooks", func() {
 	})
 
 	// -----------------------------------------------------------
-	// v2alpha1 — YanetV2
+	// v1alpha1 — Yanet
 	// -----------------------------------------------------------
-	Context("v2alpha1 YanetV2", func() {
-		// One YanetConfigV2 with a "release" boxType is required for
-		// the cross-reference check in the YanetV2 webhook.
-		var cfg *yanetv2alpha1.YanetConfigV2
+	Context("v1alpha1 Yanet", func() {
+		// One YanetConfig with a "release" boxType is required for
+		// the cross-reference check in the Yanet webhook.
+		var cfg *yanetv1alpha1.YanetConfig
 
 		BeforeEach(func() {
-			cfg = &yanetv2alpha1.YanetConfigV2{
-				ObjectMeta: metav1.ObjectMeta{Name: yanetv2alpha1.YanetConfigName},
-				Spec:       minimalV2ConfigSpec(),
+			cfg = &yanetv1alpha1.YanetConfig{
+				ObjectMeta: metav1.ObjectMeta{Name: yanetv1alpha1.YanetConfigName},
+				Spec:       minimalConfigSpec(),
 			}
 			_ = k8sClient.Delete(ctx, cfg) // tolerate leftover
 			Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
@@ -242,37 +164,37 @@ var _ = Describe("Validating webhooks", func() {
 			_ = k8sClient.Delete(ctx, cfg)
 		})
 
-		It("accepts a YanetV2 referencing an existing boxType", func() {
-			cr := &yanetv2alpha1.YanetV2{
+		It("accepts a Yanet referencing an existing boxType", func() {
+			cr := &yanetv1alpha1.Yanet{
 				ObjectMeta: metav1.ObjectMeta{Name: "v2-valid", Namespace: whTestNS},
-				Spec:       yanetv2alpha1.YanetSpec{BoxType: "release"},
+				Spec:       yanetv1alpha1.YanetSpec{BoxType: "release"},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
 		})
 
 		It("rejects an unknown boxType", func() {
-			cr := &yanetv2alpha1.YanetV2{
+			cr := &yanetv1alpha1.Yanet{
 				ObjectMeta: metav1.ObjectMeta{Name: "v2-unknown-box", Namespace: whTestNS},
-				Spec:       yanetv2alpha1.YanetSpec{BoxType: "does-not-exist"},
+				Spec:       yanetv1alpha1.YanetSpec{BoxType: "does-not-exist"},
 			}
 			expectWebhookRejection(k8sClient.Create(ctx, cr), "boxType")
 		})
 
 		It("forbids changing boxType on update", func() {
-			cr := &yanetv2alpha1.YanetV2{
+			cr := &yanetv1alpha1.Yanet{
 				ObjectMeta: metav1.ObjectMeta{Name: "v2-immutable", Namespace: whTestNS},
-				Spec:       yanetv2alpha1.YanetSpec{BoxType: "release"},
+				Spec:       yanetv1alpha1.YanetSpec{BoxType: "release"},
 			}
 			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, cr) }()
 
 			// Retry on optimistic-concurrency conflicts caused by the
-			// YanetV2 reconciler updating status concurrently — we want
+			// Yanet reconciler updating status concurrently — we want
 			// the webhook verdict, not a 409 from the API server.
 			key := client.ObjectKeyFromObject(cr)
 			Eventually(func() error {
-				fresh := &yanetv2alpha1.YanetV2{}
+				fresh := &yanetv1alpha1.Yanet{}
 				if err := k8sClient.Get(ctx, key, fresh); err != nil {
 					return err
 				}

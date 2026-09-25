@@ -17,100 +17,193 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"fmt"
-
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sort"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/manifests"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	// ConditionTypeReady indicates whether all deployments are ready
-	ConditionTypeReady = "Ready"
-	// ConditionTypeSynced indicates whether deployments are in sync with spec
-	ConditionTypeSynced = "Synced"
-	// ConditionTypeProgressing indicates whether deployments are being updated
-	ConditionTypeProgressing = "Progressing"
-)
-
-// computeConditions calculates status conditions based on sync state and pods
-func (r *YanetReconciler) computeConditions(
-	yanet *yanetv1alpha1.Yanet,
-	sync yanetv1alpha1.Sync,
-	pods map[v1.PodPhase][]string,
-) []metav1.Condition {
+// computeConditions produces the standard kubebuilder conditions
+// for a Yanet resource based on the freshly aggregated SyncStatus
+// and a set of operator names that were declared in the boxType but
+// missing from the components.operators[] palette.
+//
+// Conditions:
+//   - Available: True when there is no Error and no OutOfSync.
+//   - Progressing: True when SyncWaiting is non-empty (the
+//     UpdateWindow throttle is delaying a node).
+//   - Degraded: True when Error is non-empty or operators are
+//     declared but missing.
+//   - Ready: aggregate (Available && !Degraded && !Progressing).
+//
+// Existing conditions that are already at the desired Status with the
+// same Reason/Message are kept verbatim so LastTransitionTime stays
+// stable.
+func computeConditions(yanet *yanetv1alpha1.Yanet, missingOperators map[string]struct{}) []metav1.Condition {
 	now := metav1.Now()
-	conditions := []metav1.Condition{}
+	gen := yanet.Generation
+	sync := yanet.Status.Sync
 
-	// Condition: Synced
-	syncedCondition := metav1.Condition{
-		Type:               ConditionTypeSynced,
+	// Available --------------------------------------------------
+	avail := metav1.Condition{
+		Type:               "Available",
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: gen,
+		LastTransitionTime: now,
+		Reason:             "AllSynced",
+		Message:            "All deployments are in sync",
+	}
+	if len(sync.Error) > 0 {
+		avail.Status = metav1.ConditionFalse
+		avail.Reason = "SyncError"
+		avail.Message = fmt.Sprintf("Errors syncing deployments: %v", sync.Error)
+	} else if len(sync.OutOfSync) > 0 {
+		avail.Status = metav1.ConditionFalse
+		avail.Reason = "OutOfSync"
+		avail.Message = fmt.Sprintf("Deployments out of sync (autoSync=false): %v", sync.OutOfSync)
+	}
+
+	// Progressing ------------------------------------------------
+	prog := metav1.Condition{
+		Type:               "Progressing",
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: gen,
+		LastTransitionTime: now,
+		Reason:             "Idle",
+		Message:            "No updates in progress",
+	}
+	if len(sync.SyncWaiting) > 0 {
+		prog.Status = metav1.ConditionTrue
+		prog.Reason = "WaitingForUpdateWindow"
+		prog.Message = fmt.Sprintf("Waiting for UpdateWindow: %v", sync.SyncWaiting)
+	}
+
+	// Degraded ---------------------------------------------------
+	deg := metav1.Condition{
+		Type:               "Degraded",
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: gen,
+		LastTransitionTime: now,
+		Reason:             "Healthy",
+		Message:            "No errors detected",
+	}
+	switch {
+	case len(missingOperators) > 0:
+		names := make([]string, 0, len(missingOperators))
+		for n := range missingOperators {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		deg.Status = metav1.ConditionTrue
+		deg.Reason = "OperatorMissing"
+		deg.Message = fmt.Sprintf("BoxType references operators missing from palette: %v", names)
+	case len(sync.Error) > 0:
+		deg.Status = metav1.ConditionTrue
+		deg.Reason = "SyncError"
+		deg.Message = fmt.Sprintf("Errors syncing deployments: %v", sync.Error)
+	}
+
+	// Ready: True iff Available=True && Progressing=False && Degraded=False
+	ready := metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		ObservedGeneration: gen,
+		LastTransitionTime: now,
+		Reason:             "AllChecksPassed",
+		Message:            "Yanet is ready",
+	}
+	if avail.Status != metav1.ConditionTrue || prog.Status == metav1.ConditionTrue || deg.Status == metav1.ConditionTrue {
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "NotReady"
+		ready.Message = "See Available/Progressing/Degraded conditions"
+	}
+
+	out := []metav1.Condition{avail, prog, deg, ready}
+	return mergeConditions(yanet.Status.Conditions, out, now)
+}
+
+// setConditionsDegraded is a fast-path used by error-out branches that bail
+// before the full reconcile completes. It marks the resource Degraded and
+// explicitly clears Ready so an earlier healthy status cannot remain stale.
+func setConditionsDegraded(yanet *yanetv1alpha1.Yanet, reason, message string) {
+	now := metav1.Now()
+	deg := metav1.Condition{
+		Type:               "Degraded",
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: yanet.Generation,
 		LastTransitionTime: now,
-		Reason:             "AllDeploymentsSynced",
-		Message:            "All deployments are in sync with spec",
+		Reason:             reason,
+		Message:            message,
 	}
-
-	if len(sync.OutOfSync) > 0 {
-		syncedCondition.Status = metav1.ConditionFalse
-		syncedCondition.Reason = "DeploymentsOutOfSync"
-		syncedCondition.Message = fmt.Sprintf("Deployments out of sync: %v (AutoSync disabled)", sync.OutOfSync)
-	} else if len(sync.Error) > 0 {
-		syncedCondition.Status = metav1.ConditionFalse
-		syncedCondition.Reason = "SyncError"
-		syncedCondition.Message = fmt.Sprintf("Errors syncing deployments: %v", sync.Error)
-	}
-
-	conditions = append(conditions, syncedCondition)
-
-	// Condition: Progressing
-	progressingCondition := metav1.Condition{
-		Type:               ConditionTypeProgressing,
+	ready := metav1.Condition{
+		Type:               "Ready",
 		Status:             metav1.ConditionFalse,
 		ObservedGeneration: yanet.Generation,
 		LastTransitionTime: now,
-		Reason:             "NoUpdatesInProgress",
-		Message:            "No updates in progress",
+		Reason:             "NotReady",
+		Message:            "See Degraded condition",
 	}
+	yanet.Status.Conditions = mergeConditions(yanet.Status.Conditions, []metav1.Condition{deg, ready}, now)
+}
 
-	if len(sync.SyncWaiting) > 0 {
-		progressingCondition.Status = metav1.ConditionTrue
-		progressingCondition.Reason = "WaitingForUpdateWindow"
-		progressingCondition.Message = fmt.Sprintf("Waiting for UpdateWindow: %v", sync.SyncWaiting)
+// mergeConditions overlays new conditions onto existing ones, keeping
+// LastTransitionTime stable when (Status, Reason) did not change for
+// a given Type.
+func mergeConditions(existing, fresh []metav1.Condition, now metav1.Time) []metav1.Condition {
+	byType := make(map[string]metav1.Condition, len(existing))
+	for _, c := range existing {
+		byType[c.Type] = c
 	}
-
-	conditions = append(conditions, progressingCondition)
-
-	// Condition: Ready
-	readyCondition := metav1.Condition{
-		Type:               ConditionTypeReady,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: yanet.Generation,
-		LastTransitionTime: now,
-		Reason:             "AllPodsRunning",
-		Message:            "All pods are running",
+	out := make([]metav1.Condition, 0, len(fresh)+len(existing))
+	seen := map[string]struct{}{}
+	for _, nc := range fresh {
+		if old, ok := byType[nc.Type]; ok {
+			if old.Status == nc.Status && old.Reason == nc.Reason {
+				nc.LastTransitionTime = old.LastTransitionTime
+			}
+		}
+		out = append(out, nc)
+		seen[nc.Type] = struct{}{}
 	}
-
-	runningPods := len(pods[v1.PodRunning])
-	totalEnabled := len(sync.Synced) + len(sync.Disabled)
-
-	if runningPods == 0 && totalEnabled > 0 {
-		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "NoPodsRunning"
-		readyCondition.Message = "No pods are running"
-	} else if len(pods[v1.PodPending]) > 0 {
-		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "PodsNotReady"
-		readyCondition.Message = fmt.Sprintf("%d pods pending", len(pods[v1.PodPending]))
-	} else if len(pods[v1.PodFailed]) > 0 {
-		readyCondition.Status = metav1.ConditionFalse
-		readyCondition.Reason = "PodsFailed"
-		readyCondition.Message = fmt.Sprintf("%d pods failed", len(pods[v1.PodFailed]))
+	// Preserve any pre-existing condition Types that were not
+	// overwritten by the fresh slice (defensive: keeps custom
+	// conditions written elsewhere alive).
+	for _, oc := range existing {
+		if _, ok := seen[oc.Type]; !ok {
+			out = append(out, oc)
+		}
 	}
+	_ = now
+	return out
+}
 
-	conditions = append(conditions, readyCondition)
-
-	return conditions
+// collectPods lists Pods labelled as ours and groups their names
+// by phase. An empty result is fine and merely means no Pod has been
+// scheduled yet.
+func collectPods(
+	ctx context.Context,
+	cl client.Client,
+	yanet *yanetv1alpha1.Yanet,
+) (map[corev1.PodPhase][]string, error) {
+	pods := &corev1.PodList{}
+	if err := cl.List(ctx, pods,
+		client.InNamespace(yanet.Namespace),
+		client.MatchingLabels{manifests.LabelYanet: yanet.Name},
+	); err != nil {
+		return nil, fmt.Errorf("list Pods for Yanet %s/%s: %w", yanet.Namespace, yanet.Name, err)
+	}
+	out := map[corev1.PodPhase][]string{}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		out[p.Status.Phase] = append(out[p.Status.Phase], p.Name)
+	}
+	for k := range out {
+		sort.Strings(out[k])
+	}
+	return out, nil
 }

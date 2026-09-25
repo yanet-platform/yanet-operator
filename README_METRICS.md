@@ -50,54 +50,18 @@ yanet_deployments_out_of_sync > 0
 sum(yanet_deployments_out_of_sync)
 ```
 
-### YanetConfig Controller Metrics
+### Workload lifecycle counters
 
-#### `yanetconfig_reconcile_total`
-**Type:** Counter  
-**Labels:** `name`, `namespace`, `result`  
-**Description:** Total number of reconciliations per YanetConfig resource
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `yanet_orphans_pruned_total` | `name`, `namespace` | Owned orphan resources deleted |
+| `yanet_deployments_created_total` | `deployment`, `namespace` | Deployments created |
+| `yanet_deployments_updated_total` | `deployment`, `namespace` | Deployment updates applied |
+| `yanet_update_throttled_total` | `deployment`, `namespace` | Updates deferred by `updateWindow` |
 
-**Example:**
-```promql
-# Total config reconciliations
-yanetconfig_reconcile_total{name="global-config",namespace="default"}
-```
-
-#### `yanetconfig_reconcile_duration_seconds`
-**Type:** Histogram  
-**Labels:** `name`, `namespace`  
-**Description:** Duration of YanetConfig reconciliations in seconds
-
-**Example:**
-```promql
-# Config reconciliation latency
-histogram_quantile(0.99, rate(yanetconfig_reconcile_duration_seconds_bucket[5m]))
-```
-
-### Resource Metrics
-
-#### `yanet_resources_total`
-**Type:** Gauge  
-**Labels:** `type`  
-**Description:** Total number of Yanet resources
-
-**Example:**
-```promql
-# Total Yanet resources by type
-yanet_resources_total{type="release"}
-yanet_resources_total{type="balancer"}
-```
-
-#### `yanet_resources_ready`
-**Type:** Gauge  
-**Labels:** `type`  
-**Description:** Number of ready Yanet resources
-
-**Example:**
-```promql
-# Ready vs total resources
-yanet_resources_ready / yanet_resources_total
-```
+Operator 3.0.0 removes the `v2` qualifier from the deployment/update counters.
+The chart's dashboard uses these names. Legacy-only `yanetconfig_reconcile_*`
+and `yanet_resources_*` collectors are removed with the old controller.
 
 ## Installation
 

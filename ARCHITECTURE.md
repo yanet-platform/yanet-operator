@@ -1,781 +1,188 @@
-# yanet-operator — Architecture
+# yanet-operator architecture
 
-This document describes the **operator's** internal architecture: how
-[`api/v1alpha1`](api/v1alpha1) and [`api/v2alpha1`](api/v2alpha1) coexist, how
-controllers dispatch between them, how manifests are generated, and how the
-operator interacts with Kubernetes.
+The operator manages YANET2 runtime workloads through a single Kubernetes API.
+For the runtime process topology, see [YANET2_ARCH.md](YANET2_ARCH.md).
 
-For the **target deployment topology** of yanet2 itself (modules, operators,
-agents, NUMA, BIRD), see [`YANET2_ARCH.md`](YANET2_ARCH.md). For day-to-day
-contributor rules (testing, linting, common pitfalls), see
-[`AGENTS.md`](AGENTS.md).
+## API identity
 
----
+Both CRDs serve/store only `yanet.yanet-platform.io/v1alpha1`:
 
-## 1. Two API Surfaces in Parallel (four separate CRDs)
-
-v1 and v2 are exposed as **four independent CRDs** sharing the API group
-`yanet.yanet-platform.io`. Each CRD has exactly one served+storage version,
-so the API server never converts between them and never prunes fields.
-
-| Surface    | CRD                                  | Kind            | Role                                                      |
-|------------|--------------------------------------|-----------------|-----------------------------------------------------------|
-| `v1alpha1` | `yanets.yanet-platform.io`           | `Yanet`         | Legacy single-node CR (backward-compatible, untouched).   |
-| `v1alpha1` | `yanetconfigs.yanet-platform.io`     | `YanetConfig`   | Legacy global config + AutoDiscovery.                     |
-| `v2alpha1` | `yanetsv2.yanet-platform.io`        | `YanetV2`       | Component-based CR (boxType + nodeSelector + overrides).  |
-| `v2alpha1` | `yanetconfigsv2.yanet-platform.io`   | `YanetConfigV2` | Cluster-scoped singleton named `config`: component palette + patches + `boxTypes`. |
-
-The operator does not migrate v1 CRs to v2; the two surfaces are handled by
-two independent controllers (see below) and reconcile fully independently.
-
-### Why not a single CRD with two versions
-
-An earlier iteration kept v1 and v2 as two **versions** of the same CRD
-(`yanets.yanet-platform.io`) with `v1alpha1` as the storage version. Two
-fatal problems followed:
-
-1. The API server silently pruned v2-only fields whenever it converted a v2
-   object down to the v1 storage schema. The v2 admission webhook then could
-   not see `boxTypes` in any stored `YanetConfig` and rejected valid CRs.
-2. The reconciler needed an in-process dispatcher gating the v2 branch on
-   `spec.boxType != ""` (because `client.Get(*v2alpha1.Yanet)` on a v1 CR
-   would succeed via conversion with all v2-only fields zero).
-
-The current four-CRD model (above) eliminates both failure modes. Two
-independent controllers handle the two surfaces:
-
-- [`YanetReconciler`](internal/controller/yanet_controller.go) — only watches
-  `v1alpha1.Yanet` plus Nodes for AutoDiscovery.
-- [`YanetV2Reconciler`](internal/controller/yanetv2_controller.go) — only
-  watches `v2alpha1.YanetV2` plus Nodes/Pods filtered by the v2 ownership
-  label.
-
-There is no shared Reconcile entry point, no `spec.boxType` probe, no
-storage-version conversion. Webhook paths (`/validate-...-v1alpha1-yanet`,
-`/validate-...-v2alpha1-yanetv2`, etc.) and names (`vyanet.kb.io`,
-`vyanetv2.kb.io`, etc.) are disjoint as well.
-
-> **Migration note.** If a cluster already has v2 CRs created under the
-> previous `yanets.yanet-platform.io/v2alpha1` versioned-CRD model, those
-> objects belong to the v1 CRD now and are invisible under the new
-> `yanetsv2` CRD. Either delete them before upgrading or re-create them as
-> `kind: YanetV2`. v1 CRs are completely unaffected.
-
----
-
-## 2. v1alpha1 — flat, per-installation
-
-### CR shape
-
-`Yanet` (v1alpha1) describes one installation pinned to a single node:
-
-```yaml
-spec:
-  nodeName: node-1
-  type: release
-  autoSync: true
-  controlplane: { enable: true, image: yanet-controlplane }
-  dataplane:    { enable: true, image: yanet-dataplane, ... }
-  bird:         { enable: true, image: yanet-bird, tag: 2.0.12 }
-  announcer:    { enable: true, image: yanet-announcer }
-```
-
-`YanetConfig` (v1alpha1) holds shared cluster-wide settings: image registry,
-named annotations, named post-start hooks, named init containers, resources,
-tolerations, etc. The Yanet CR references these by name through fields like
-`additionalOpts.annotations: [telegraf]`, `enabledOpts.{cp,dp}.resources`, etc.
-
-### Reconcile flow (v1)
-
-```
-Yanet CR change ─┐
-Node change   ───┼─►  YanetReconciler.Reconcile
-GlobalConfig ────┘        │
-                          ▼
-                 reconcilerYanet(yanet, config)
-                          │
-                          ├─ DeploymentForControlplane
-                          ├─ DeploymentForDataplane
-                          ├─ DeploymentForBird
-                          ├─ DeploymentForAnnouncer
-                          ▼
-                 CreateOrUpdate per component
-                          ▼
-                  Status.Sync buckets
-```
-
-Generators live in [`internal/manifests/`](internal/manifests/) (`dataplane.go`,
-`controlplane.go`, `bird.go`, `announcer.go`).
-
----
-
-## 3. v2alpha1 — three-tier composable model
-
-The v2alpha1 design separates three independent axes of configuration:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ YanetConfig (cluster-wide, in-memory snapshot)                  │
-│                                                                 │
-│  spec.components       — palette of available components        │
-│    ├─ controlplane     — per-NUMA workload                      │
-│    ├─ dataplane                                                 │
-│    │    └─ sidecars[]  — ordered, one container per entry        │
-│    ├─ birdAdapter                                               │
-│    └─ operators[]      — dynamic, by name                       │
-│                                                                 │
-│  spec.patches []NamedPatch                                      │
-│    └─ raw strategic-merge fragments of appsv1.Deployment        │
-│       (validated via dry-run StrategicMergePatch)               │
-│                                                                 │
-│  spec.boxTypes []BoxType                                        │
-│    └─ named presets wiring components → ordered patch lists     │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              │ referenced by
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ Yanet (per-installation, minimal)                               │
-│                                                                 │
-│  spec.boxType: <name>           # required, immutable           │
-│  spec.nodeSelector: {...}                                       │
-│  spec.enabled: true             # default                       │
-│  spec.autoSync: false           # default                       │
-│  spec.components:               # narrow typed overrides only   │
-│    controlplane:                                                │
-│      containers:                                                │
-│        controlplane: { tag: v2.1.5-hotfix }                     │
-│    operators:                                                   │
-│      antiddos: { enabled: false }                               │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-Per-installation customisation is intentionally narrow: per-container
-`image.{name,tag}` (under `containers.<name>`), workload `enabled`, dataplane
-sidecar image/`enabled` under `dataplane.sidecars.<name>`, and controlplane `disabledNuma` are accepted on the
-Yanet CR. The intrinsic security/mount baseline each component cannot run
-without is emitted by the builder itself (the dataplane's privileged + hostIPC
-+ minimal host devices,
-and the controlplane's hostIPC + `/dev/hugepages` shmem mount — see `applyDataplaneSecurity` /
-`applyControlplaneShmem` in `builder_v2.go`). Everything optional beyond that
-(annotations, postStart, extra hostIPC/privileged for operators, resources)
-belongs in a NamedPatch.
-
-The container key inside `containers` must match the rendered container name.
-Fixed workloads use their own names; sidecar overrides use the separate sidecar
-map. Operators use the mandatory
-`OperatorContainer.name` declared in YanetConfigV2.
-
-Each palette `image` may set `registry` and `prefix` independently. An omitted
-field inherits the corresponding `spec.images` value; an explicit empty string
-clears that part of the image path. These fields are not accepted in
-`YanetV2` container overrides, which remain limited to `name`, `tag`, and native
-sidecar `enabled`.
-
-### CR shape
-
-`YanetConfig` (v2alpha1) — see [`api/v2alpha1/yanetconfig_types.go`](api/v2alpha1/yanetconfig_types.go):
-
-```yaml
-spec:
-  stop: false
-  updateWindow: 0
-  images: { registry: ..., prefix: ..., pullPolicy: IfNotPresent }
-  components:
-    controlplane:
-      image: {...}
-      numa: 2
-    dataplane:
-      image: {...}
-      hugepages: { size: 1Gi, count: 8 }
-      sidecars:
-        - { name: bird, image: {...}, listeners: [] }
-        - { name: neighbour-sidecar, image: {...}, config: {hostPath: /etc/yanet2} }
-        - { name: netconfig, image: {...}, listeners: [] }
-    birdAdapter:  { image: {...} }
-    operators:
-      - name: announcer
-        containers:
-          - { name: announcer, image: {...} }
-      - name: antiddos
-        containers:
-          - { name: operator, image: {...} }
-          - { name: agent,    image: {...} }
-  patches:
-    - name: telegraf
-      patch:
-        spec: { template: { metadata: { annotations: { telegraf...: "8080" } } } }
-    - name: cp-resources-release
-      patch: ...
-    - name: agent-shmem
-      patch:
-        spec:
-          template:
-            spec:
-              hostIPC: true
-              volumes:
-                - name: agent-shmem
-                  hostPath: {path: /dev/hugepages}
-              containers:
-                - name: agent
-                  volumeMounts:
-                    - {name: agent-shmem, mountPath: /dev/hugepages}
-  boxTypes:
-    - name: release
-      components:
-        controlplane: { patches: [telegraf, cp-resources-release] }
-        dataplane:
-          sidecars:
-            bird: {}
-            neighbour-sidecar: {}
-            netconfig: {}
-          patches: [telegraf, dp-resources]
-      operators:
-        announcer:    { patches: [telegraf] }
-        antiddos:     { patches: [telegraf, agent-shmem] }
-```
-
-`Yanet` (v2alpha1) — see [`api/v2alpha1/yanet_types.go`](api/v2alpha1/yanet_types.go):
-
-```yaml
-spec:
-  boxType: release
-  nodeSelector: { role: yanet-edge }
-  autoSync: true
-  components:
-    controlplane:
-      containers:
-        controlplane: { tag: v2.1.5-hotfix }
-```
-
-### Reconcile flow (v2)
-
-```
-Yanet CR change ────┐
-Node change      ───┼─►  YanetReconciler.Reconcile
-Pod change       ───┤        │
-YanetConfigV2    ───┘        │  (event refreshes the in-memory snapshot first)
-snapshot                     ▼
-                    reconcileYanetV2(yanet)
-                             │
-                             ├─ snapshot YanetConfigV2 (DeepCopy under lock)
-                             ├─ FindBoxType(spec.boxType)
-                             ├─ EnabledComponentsForBox  → []ComponentRef
-                             ├─ listNodes(nodeSelector)
-                             │
-                             │  for each node:
-                             │    BuildContextV2 (node identity and images)
-                             │    for each ComponentRef:
-                             │      ResolveBoxComponent → ResolvedComponent
-                             │      RenderDeployments  → build, compose, patch, validate
-                             │      ConfigureListeners → stable named target ports
-                             │      ConfigureRuntimeNetworkV2 → host-only runtime env
-                             │    preflight all plans and producer transitions before writes
-                             │    InlineConfigMaps + applyDeploymentV2 → apply or status only
-                             │
-                             ├─ preflight ServicePlans for Status.Services
-                             └─ Status.Sync buckets + per-node summaries
-
-YanetConfigV2 / YanetV2 / Node / owned Service change
-                             │
-                             ▼
-                 YanetConfigReconcilerV2
-                             ├─ aggregate namespace × boxType roles
-                             ├─ apply shared Services owned by config
-                             └─ prune obsolete shared Services
-```
-
-`YanetConfigV2.spec.stop=true` is checked before finalizer, status, apply, or
-deletion work, so it freezes all v2 resources exactly as they are. A node may be
-claimed by only one `YanetV2`: an existing workload owner wins, otherwise the
-oldest CR (with namespace/name as a stable tie-breaker) wins. A deleting CR keeps
-its claim until finalizer cleanup and object removal complete.
-
-Finalizer cleanup requests foreground deletion of owned Deployments and waits
-for their removal before releasing the finalizer. A successful delete request
-alone does not release the node claim; `spec.stop=true` also pauses this cleanup.
-Cleanup uses the exact controller owner/UID, even if the installation label has
-been removed or changed, and preserves resources belonging to another instance.
-
-An apparent Deployment diff is normalized with an API-server dry-run update
-before deciding sync status or consuming the update window. Client-go's scheme
-does not supply server-side defaults. This extra admission request also occurs
-with `autoSync=false`, but nothing is persisted; normalization failures remain
-retryable errors. Conflict retries re-read ownership and reuse the normalized
-candidate for the actual update. Removed patch fields return to API defaults,
-while unchanged resources generate no persisted update. Shared Services declare
-`sessionAffinity: None` and managed metadata on creation to converge immediately.
-Service read-before-write and conflict retries use the direct API reader: the
-informer cache can still miss a Service created by the preceding reconcile.
-
-Key files:
-- [`internal/helpers/resolve_v2.go`](internal/helpers/resolve_v2.go) — `ResolveBoxComponent`, `EnabledComponentsForBox`, `FindBoxType`, `FindOperator`, `ShortNodeKey`.
-- [`internal/manifests/builder_v2.go`](internal/manifests/builder_v2.go) — `BuildDeployments`, `InlineConfigMaps`, hugepages, ConfigSource branches.
-- [`internal/manifests/patcher.go`](internal/manifests/patcher.go) — `PatchRegistry`, `ApplyPatches` via `strategicpatch.StrategicMergePatch`.
-- [`internal/manifests/service_v2.go`](internal/manifests/service_v2.go) — `ServicePlan`, `BuildServices`, `ToService`.
-- [`internal/manifests/listeners_v2.go`](internal/manifests/listeners_v2.go) — listener exposure and ordered port slots.
-- [`internal/manifests/runtime_network_v2.go`](internal/manifests/runtime_network_v2.go) — host-config runtime environment.
-- [`internal/controller/yanet_reconciler_v2.go`](internal/controller/yanet_reconciler_v2.go) — orchestration.
-- [`internal/controller/host_network_ports_v2.go`](internal/controller/host_network_ports_v2.go) — deterministic post-patch host port allocation.
-- [`internal/controller/yanetconfig_controller_v2.go`](internal/controller/yanetconfig_controller_v2.go) — snapshot and shared Service owner.
-
----
-
-## 4. Controlplane NUMA fan-out
-
-`YanetConfigV2.spec.components.controlplane.numa` controls how many controlplane
-Deployments are generated **per node**, defaulting to 1 when omitted:
-
-```
-controlplane.numa: 2  ⇒  2 Deployments:
-  <yanet>-<nodehash>-controlplane-numa0
-  <yanet>-<nodehash>-controlplane-numa1
-```
-
-One shared Service exists per box-type NUMA role, independently of replicas and
-per-installation enablement:
-
-| Service | Selector | Ports | InternalTrafficPolicy |
-|---|---|---|---|
-| `yanet-<boxType>-controlplane-numa{N}` | `box-type=<boxType>, component=controlplane, numa=N` | `grpc:8080`, `http:8081` | `Local` |
-
-The selector deliberately omits Yanet and node identity. `internalTrafficPolicy: Local`
-keeps callers on their node, while the NUMA label selects the requested gateway.
-
-### Per-NUMA config files
-
-Each controlplane fan-out instance is pointed at its **own** config file.
-In `config.args`, `{numa}` is replaced by the physical NUMA index, for example
-`/etc/yanet2/controlplane.d/numa{numa}.yaml` becomes
-`/etc/yanet2/controlplane.d/numa0.yaml`. No extra suffix is added to an argument
-containing the placeholder. Disabled NUMA domains do not renumber the survivors.
-Arguments without the placeholder remain literal, including unrelated YAML
-paths such as a permissions file. The per-NUMA configuration is required: the
-controlplane reads `gateway.instance_id`, the gateway endpoint and every module
-endpoint **from the file**, and the binary accepts only `-c <path>`. A shared
-file would make every instance serve dataplane instance `0` and contend for the
-same endpoints. The host (or its config generator) must therefore provide one
-file per NUMA domain, each with a matching `instance_id` and port.
-
-### Disabling individual NUMA domains
-
-A NUMA domain without a NIC runs no dataplane instance, so a controlplane there
-would have no peer to attach to. Such domains are listed in
-`controlplane.disabledNuma` and get no Deployment. The shared Service remains so
-its DNS name is stable while an installation is disabled or scaled to zero:
-
-```yaml
-components:
-  controlplane:
-    numa: 2
-    disabledNuma: [1]        # only NUMA 0 gets an instance
-```
-
-Disabling does **not** renumber the survivors: with `disabledNuma: [0]` the
-remaining instance stays `numa1`, keeps the shared gRPC/HTTP ports and reads
-`controlplane-1.yaml`. Out-of-range and duplicate indices are ignored.
-
-A single installation can override the cluster-wide list via
-`YanetV2.spec.components.controlplane.disabledNuma`, which **replaces** (never
-merges with) the default; an empty list explicitly re-enables every domain. The
-override applies to every node matched by `spec.nodeSelector`, so a host with a
-unique NUMA layout wants its own `YanetV2` CR selecting just that node.
-
-### Operator services
-
-Every service-backed role wired into a box type gets one shared ClusterIP Service
-named `yanet-<boxType>-<role>`. Disabled roles retain Services and reserved target
-names, including in installation `status.services`. Another container cannot
-capture the reserved target. BIRD and netconfig normally declare `listeners: []`.
-There are no name-based BIRD dependency checks; socket mounts and application
-dependencies belong to the palette and runtime configuration.
-
-### Dynamic operator placement
-
-Standalone roles use `components.operators[].containers[]`; dataplane roles use
-`components.dataplane.sidecars[]`. A `SidecarSpec` has one container described by
-`name`, `image`, `config` and `listeners`, without numeric ports. Box types select
-sidecars through a map of names to `enabled`/`patches`; installation overrides use
-`components.dataplane.sidecars.<name>` (`enabled`, image `name`/`tag`). Role names
-must be unique across sidecars and standalone workloads. All v2 final Pods must
-have private networking: `hostNetwork: true` and nonzero `hostPort` are rejected.
-
-Both specs default omitted listeners to `[grpc]`; HTTP-only roles explicitly use
-`[http]`, regardless of their name. `[]` suppresses Service exposure. Standalone
-listeners belong to the first declared container. The complete ordered sidecar
-list reserves `grpc=8080+2*i`, `http=8081+2*i`, starting at index zero and ending
-before port 65536. Selection, enablement, listeners and config source do not change
-indices. Appending preserves prior slots; removal/insertion/reordering changes
-them and the Pod template. The list is atomic for server-side apply: different
-managers cannot independently own entries and silently change startup/slot order.
-
-Shared Service names and external gRPC/HTTP ports remain unchanged at 8080/8081.
-Colocated Services select an operator-owned membership label on dataplane Pods
-and target role-specific named ports. Disabled roles lose their membership label
-and containers, but retain their declared Services and reserved target names.
-For managed host configs, runtime env is applied after patches as described below.
-Advertise uses the Service FQDN and external port, never the sidecar bind offset.
-
-Sidecar patches may set only `spec.template.spec.containers`,
-`initContainers`, and `volumes` (including their strategic list-order directives).
-Other Deployment/Pod settings are rejected even if they match the dataplane.
-Patches address original logical container/volume names; composition scopes them
-as `op-<operator-name-hash>-<logical-name>` (long names get a hash suffix).
-ConfigSources, args, image overrides, volume devices and resource
-field references are preserved. Patched config-download init containers precede
-their operator's restartable containers; remote config fetching needs explicit
-init-container, emptyDir and consumer mount/args patches.
-Explicit probe/lifecycle port references are validated without rewriting numeric
-ports. Unknown TCP names (including names owned only by a sibling) and out-of-range
-ports are rejected. Profiles do not synthesize Kubernetes probes.
-**Do not make a native sidecar's startup probe or blocking lifecycle hook wait
-for dataplane startup:** kubelet starts the dataplane application containers only
-after the preceding native sidecars have started. Readiness checks should report
-the sidecar's own health rather than introduce a circular readiness dependency.
-Adding/removing/reordering long-lived sidecars through patches is rejected; the
-typed list is their complete declaration. Dataplane patches run last,
-but cannot resurrect disabled managed containers or remove enabled ownership,
-membership, restart policy or relative order. `op-` init-container names and
-`yanet.yanet-platform.io/operator-` labels are reserved for this composition.
-
-Placement changes are fail-closed before any ConfigMap/Deployment writes. An old
-Deployment, ReplicaSet (including an unobserved scale-down), or nonterminal Pod
-in the other placement blocks startup. Drain explicitly with installation
-`spec.enabled: false` and `autoSync: true`, wait for zero observed workload
-replicas and terminated Pods, then re-enable with the new placement. Setting
-`stop: true` is **not** drain; it pauses reconciliation. Automatic producer
-migration is intentionally not implemented.
-Shared Service routing is gated over the entire namespace/box-type scope, across
-all installations (including `autoSync: false` and residual workloads on old
-nodes). While any incompatible old producer remains, that scope's existing
-Service specs are preserved and its Services are protected from pruning; other
-scopes continue reconciling. Failed live-workload reads also block cutover.
-The new config snapshot is still published so explicit scale-to-zero can drain
-the old placement; the Service gate does not wait for another controller's status.
-
-See `deploy/examples/v2alpha1-yanetconfig-placement.yaml` for the API shape.
-
-### Split network runtime example
-
-`deploy/examples/v2alpha1-yanetconfig-full.yaml` selects `netconfig` and
-`neighbour-sidecar` as generic single-container sidecars with `listeners: []`.
-There is no automatic Service in this example. BIRD starts first, followed by
-neighbour-sidecar and netconfig in declaration order; all are
-restartable init containers. Netconfig waits/retries missing KNI within its
-process, allowing dataplane to start. Do not add a blocking init/PostStart hook.
-
-Netconfig's own patch grants `privileged: true`, mounts read-only `/etc/netplan`,
-and remaps its config mount to `/etc/netconfig`. Neighbour-sidecar retains a
-separate read-only `/etc/yanet2` mount and receives no interface-configuration
-privileges. Prepare `config.yaml`, `00-interfaces.yaml`, and
-`yanet-neighbour-sidecar.yaml` on the host and pin both images to tested releases.
-The host-config overlay sets neighbour's bind to `[::]:8082` and selects physical
-NUMA gateway identities while retaining TLS from the host configuration. Set
-`listeners: [grpc]` to expose it through a shared Service on port 8080.
-
-This profile has no runtime Kubernetes startup, readiness, or liveness probes.
-Announcer decides application readiness through YANET gRPC APIs. Direct
-neighbour `Ready/Watch` reports publication status, not forwarding readiness;
-it does not imply that announcer already polls that endpoint. Reading these
-APIs from yanet-operator is deferred.
-
-### Listener endpoint configuration
-
-Services expose fixed `grpc:8080` and `http:8081` via named target ports. Separate
-Pods use these bind ports too; native sidecars use their reserved pairs. There is
-no node-wide allocator or host-port inventory scan.
-
-Automatic env requires the container's managed config mount to resolve to a
-HostPath volume **after patches**. Hugepages, devices and unrelated host mounts
-do not enable the overlay. Inline/ConfigMap content remains opaque; absent
-config also receive no automatic network env. Managed keys override patches;
-unrelated environment variables are preserved.
-
-| Runtime | Bind env | Outbound/advertise |
+| Kind | CRD | Scope |
 | --- | --- | --- |
-| Controlplane | `YANET_GATEWAY_SERVER_ENDPOINT=[::]:8080`, `YANET_GATEWAY_SERVER_HTTP_ENDPOINT=[::]:8081` | One Service per physical NUMA |
-| Generic gRPC role | `YANET_SERVER_ENDPOINT=[::]:<grpc-slot>` | `YANET_SERVER_ADVERTISE_ENDPOINT=<service>.<namespace>.svc.cluster.local:8080` when grpc is exposed |
-| HTTP-only role | `YANET_SERVER_ENDPOINT=[::]:<http-slot>` | HTTP Service port 8081; no gRPC advertise |
-| Bird-adapter | `YANET_LISTEN_ADDR=[::]:8080` | `YANET_ROUTE_OPERATOR_ENDPOINT=<route-service>.<namespace>.svc.cluster.local:8080` |
-| Sidecar with `listeners: []` | `YANET_SERVER_ENDPOINT=[::]:<grpc-slot>` | Gateway list; no advertise of a nonexistent Service |
+| `Yanet` | `yanets.yanet.yanet-platform.io` | Namespaced |
+| `YanetConfig` | `yanetconfigs.yanet.yanet-platform.io` | Cluster; name `config` |
 
-Generic roles also receive `YANET_KUBERNETES_GATEWAYS`, a complete JSON array such
-as `[{"name":"numa1","endpoint":"yanet-firewall-controlplane-numa1.test.svc.cluster.local:8080"}]`.
-Compatible runtimes select exactly these named entries from the host configuration,
-replace endpoints and preserve TLS. This excludes inactive NUMA without leaving a
-tail of old gateways. Unused env does not create an API in BIRD or netconfig.
-The common gRPC runtime has no generic HTTP server field; reserving HTTP is not
-proof of HTTP runtime support. Announcer readiness clients (`operators[]`) and
-metrics clients (`collection.modules[]`) remain application configuration.
+Types and validators live in `api/v1alpha1`. There is no legacy implementation,
+version dispatcher or conversion webhook. Release 3.0.0 reuses the short API
+names for the component-based model; see [replacement notes](release-notes/v3.0.0.md).
+The YANET2 runtime name, image paths and `/etc/yanet2` configuration are independent
+of the operator API version.
 
-Chart 0.1.12 changes the v2 schema. Coordinate CRD/controller/spec changes and
-drain existing workloads before changing network or role placement; no automatic
-conversion is provided. v1 resources and code paths remain independent.
+## Three-tier composable model
 
----
+`YanetConfig.spec` separates:
 
-## 5. ConfigSource — three variants
+1. `components`: palette of controlplane, dataplane, optional birdAdapter,
+   ordered atomic dataplane `sidecars[]` and standalone `operators[].containers[]`.
+2. `patches`: named strategic-merge `appsv1.Deployment` fragments.
+3. `boxTypes`: named wiring presets with ordered patch references.
 
-Every fixed workload, dataplane native sidecar, and operator container can supply a
-`ConfigSource` ([`api/v2alpha1/config_source.go`](api/v2alpha1/config_source.go)):
+Every sidecar entry describes exactly one native container (`name`, `image`,
+`config`, `listeners`). Box types select sidecars by name. BIRD, neighbour-sidecar,
+netconfig and announcer are ordinary declared roles, not implicit name-based
+dependencies. Shared mounts and permissions are explicit palette patches.
 
-| Variant   | What the builder does                                            |
-|-----------|------------------------------------------------------------------|
-| `inline`  | Generates a hash-named `ConfigMap`, mounts it read-only at `/etc/yanet2`; a patch may customize the path. |
-| `hostPath`| Mounts the HOST directory read-only at the per-component default path. The component binary reads its config file from inside that directory using its own default name. |
-| `url`     | Creates an `emptyDir`; an init-container is expected to populate it (today via a patch; see deferred items). |
+`Yanet.spec` selects an immutable `boxType` and `nodeSelector`. Its overrides are
+limited to image name/tag per rendered container, enablement, controlplane
+`disabledNuma` and the complete dataplane `networks` list. Sidecar overrides live
+under `components.dataplane.sidecars.<name>`; standalone container overrides use
+`components.operators.<name>.containers.<container>`.
 
-The webhook enforces that exactly one variant is set.
+Palette images independently inherit `registry`/`prefix` from `spec.images`.
+Explicit empty strings clear a segment; installation overrides do not expose
+these fields. The default image pull policy is `IfNotPresent`.
 
-### Literal process arguments
+## Controllers and snapshot
 
-`ConfigSource.args` is copied to the container verbatim except for controlplane
-NUMA substitution described above. The builder does not
-impose a generic config flag because YANET binaries use different conventions:
-dataplane accepts a positional path, controlplane uses `-c`, and bird-adapter
-uses `server -c`. For `hostPath`, args can reference any file in the mounted
-directory. Inline content is mounted under the stable `config` key.
+`cmd/main.go` registers one scheme and two reconcilers:
 
-Example:
+- `YanetReconciler` manages installation Deployments, inline ConfigMaps and status.
+- `YanetConfigReconciler` publishes the palette snapshot and owns shared Services.
 
-```yaml
-controlplane:
-  config:
-    hostPath: /etc/yanet2
-    args: [-c, /etc/yanet2/controlplane.yaml]
+They share one mutex-protected `MutexYanetConfigSpec`. Readers use deep copies;
+config refresh serializes the API read with snapshot publication. The config
+watch mapper refreshes before enqueueing installations, so they do not render
+from an old palette after a change. A failed refresh clears the snapshot under
+the publication lock.
+
+| Watch | Mapping |
+| --- | --- |
+| `Yanet` | Installation reconcile; also enqueue the config singleton |
+| `YanetConfig` | Refresh snapshot, then enqueue all installations |
+| `Node` | Installations whose `nodeSelector` matches |
+| `Pod` | Owning installation from the managed label, including label-removal updates |
+| Owned Deployments/ConfigMaps | Installation owner |
+| Owned Services | Config singleton owner |
+
+## Reconcile and ownership
+
+```text
+snapshot/config stop check → finalizer lifecycle → box/override resolution
+→ matching nodes and ownership claims → render every workload
+→ patch/compose/validate all plans and producer transitions
+→ apply inline ConfigMaps and Deployments (or report drift)
+→ preflight shared Service names → prune orphans → aggregate status
+
+YanetConfig reconcile → aggregate namespace × boxType roles
+→ create/update shared Services → prune obsolete shared Services
 ```
 
-### Default `pullPolicy`
+One installation may own a node. The incumbent workload owner wins; before any
+workload exists, the oldest CR wins, with namespace/name as a stable tie-breaker.
+A deleting installation retains its claim until cleanup finishes.
 
-When `spec.images.pullPolicy` is empty in `YanetConfigV2`, the reconciler
-defaults to `IfNotPresent`. An explicit value (`Always`, `Never`) overrides
-the default for all generated containers.
+Owner references include the API kind/group, controller bit and UID. Matching
+labels or a reused name do not authorize adoption/deletion. Finalizer cleanup
+requests foreground Deployment deletion and waits for its completion before
+releasing the node claim. Label drift does not hide owned resources from cleanup.
 
----
+`YanetConfig.spec.stop: true` freezes writes, including status, finalizers and
+deletion. It does not stop running Pods. Startup reads the persisted singleton
+before writes when the snapshot has not yet loaded, preserving this stop contract.
 
-## 6. Patches — strategic merge, ordered
+### Enablement and drift
 
-`spec.patches []NamedPatch` is a registry of strategic-merge fragments of
-`appsv1.Deployment`. Each `BoxComponent.patches []string` references them by
-name; patches are applied **in the listed order** by `ApplyPatches`.
+| `enabled` | `autoSync` | Workload behavior |
+| --- | --- | --- |
+| true | true | Apply desired workload state |
+| true | false | Report drift; preserve existing workload edits |
+| false | true | Apply rendered workloads with replicas forced to zero |
+| false | false | Report drift; existing replicas remain unchanged |
 
-Why strategic merge:
-- Container/volume merge by name (`patchMergeKey`).
-- Annotation/label maps merge by key (additive).
-- Same algorithm Kubernetes uses for `kubectl apply`.
+Defaults are `enabled=true`, `autoSync=false`. Component enablement affects that
+component; installation disablement overrides every Deployment's replicas after
+patching. Shared Services have a separate palette-owned lifecycle and remain
+available for declared box-type roles.
 
-Validation:
-- Webhook enforces uniqueness of names and existence of all references.
-- Sidecar/operator role names cannot duplicate one another or reuse reserved
-  workload identities (`controlplane`, `dataplane`, `birdAdapter`/`bird-adapter`).
-- Webhook **dry-runs** every patch via `strategicpatch.StrategicMergePatch(empty Deployment, patch, appsv1.Deployment{})` so a typo (e.g. `templete:` instead of `template:`) is caught at admit time.
+Apparent Deployment drift is normalized through a real API-server dry-run update
+before deciding whether to persist an update or consume the global `updateWindow`.
+This also occurs in report-only mode, without a persisted write. Conflict retries
+re-read ownership. Removed patch fields return to server defaults. Shared Service
+read-before-write uses the direct API reader because the informer cache can miss
+a Service created earlier in the same reconcile.
 
-After patching, the builder restores the Deployment name, namespace, controller
-owner, immutable selector, node placement, reserved labels, and `Recreate`
-strategy. Other metadata and Pod fields remain patchable subject to private-network
-and composition validation. `Recreate` prevents overlapping dataplane instances
-and sidecars that share node devices, arenas and sockets.
+## NUMA and configuration sources
 
-Sidecar-scoped patches target logical `spec.template.spec.containers` before
-composition. Attach them to `boxTypes[].components.dataplane.sidecars.<name>`;
-the renderer namespaces their containers/volumes and creates native init containers
-with `restartPolicy: Always`. Dataplane patches cannot change this declared lifecycle.
+`components.controlplane.numa` explicitly sets the number of physical NUMA
+domains (default 1). Each selected node gets one controlplane Deployment per
+enabled domain. `disabledNuma` excludes domains without renumbering the survivors.
+An installation's non-nil exclusion list replaces the palette; an empty list
+re-enables all domains.
 
-JSON6902 (`jsonPatch`) is intentionally not supported. Service / ConfigMap
-patching is not supported either — those are generated entirely from the
-component definition (`Hugepages`, `ConfigSource`) and declared listeners.
+`config.args` replaces only `{numa}`, for example
+`/etc/yanet2/controlplane.d/numa{numa}.yaml`. The host must supply corresponding
+configs with matching physical instance identities. No filename suffix is inferred.
 
----
+`ConfigSource` has exactly two alternatives:
 
-## 7. In-memory config snapshot
+- `hostPath`: existing host directory mounted read-only.
+- `inline`: opaque data delivered through a generated ConfigMap.
 
-The reconciler does **not** call `client.List(YanetConfig)` on every cycle.
-A separate `YanetConfigReconciler` (one per API version) maintains an
-in-memory snapshot under a mutex:
+`mountPath` optionally selects the absolute container directory; the default is
+`/etc/yanet2`. Inline data appears in `<mountPath>/config`. Arguments are literal
+except for the controlplane NUMA placeholder. Extra files, sockets and download
+init containers use explicit patches; there is no URL placeholder API.
 
-```go
-type MutexYanetConfigSpec struct {
-    Config YanetConfigSpec
-    Lock   sync.Mutex
-}
-```
+## Listener endpoint configuration
 
-`YanetReconciler` reads from it under the same lock with a DeepCopy. This
-mirrors the v1 design and avoids every reconcile cycle paying the API-server
-round-trip cost.
+Every final Pod uses private networking. `hostNetwork: true` and nonzero
+`hostPort` are rejected after patches, including init containers.
 
-[`cmd/main.go`](cmd/main.go) constructs both snapshots and wires them into the
-respective reconcilers and config watchers.
+- Standalone workloads listen on 8080/8081.
+- Dataplane sidecar index `i` reserves `8080+2*i` / `8081+2*i` in the full ordered
+  palette before enablement/selection. Disabling a sidecar does not compact slots.
+- Omitted listeners default to `[grpc]`; HTTP-only roles explicitly select `[http]`.
+  `[]` suppresses the Service, not the slot or managed host-config environment.
+- Shared Services `yanet-<boxType>-<role>[-numa<N>]` expose 8080/8081 using named
+  target ports and `internalTrafficPolicy: Local`. Selectors contain the box/role
+  and physical NUMA identity, not the installation or node name.
 
----
+Only a managed HostPath config remaining after patches enables automatic runtime
+bind/Service-FQDN advertise and the complete named NUMA gateway environment.
+Inline or externally patched ConfigMaps are opaque and get no automatic network
+environment. Managed environment values override conflicting patches. Runtime
+images must support `YANET_KUBERNETES_GATEWAYS`; the operator does not inspect
+application configuration addresses, ports or TLS content.
 
-## 8. Watches and event mapping
+Before moving a role between standalone and dataplane, drain its current
+producers. Deployment/ReplicaSet/Pod guards prevent overlapping producers, and
+shared-Service cutover waits for the scope to drain. `stop` is not a substitute
+for `enabled:false` with `autoSync:true` and observed Pod termination.
 
-[`internal/controller/yanet_controller.go`](internal/controller/yanet_controller.go) sets up:
+## Device-backed network attachments
 
-| Watch source                | Mapper                       | Purpose                                                     |
-|-----------------------------|------------------------------|-------------------------------------------------------------|
-| `v1alpha1.Yanet`            | direct                       | Legacy CRs.                                                 |
-| `v2alpha1.Yanet`            | direct                       | New CRs.                                                    |
-| `corev1.Node`               | `mapNodeToV2Yanets` + v1     | Trigger reconcile when a node is added/removed/labelled.    |
-| `corev1.Pod`                | `mapPodToYanet`              | Update Yanet status when managed pods change phase.         |
+`components.dataplane.networks` declares an ordered list of existing NADs and
+matching extended resources. Each entry adds one Multus attachment and one
+request/limit to the primary dataplane container. Repeated NAD/resource entries
+sum their quantities; interface names must be unique.
 
-Node/Pod events are fanned out to all Yanet CRs whose `nodeSelector` matches.
+Per-installation omission/null inherits the palette; a list replaces it; `[]`
+clears it. Patches must not also set the managed Multus annotation or reservation
+quantities, including stale quantities from the replaced default network list.
+The operator does not discover/provision NICs, manage device-plugin JSON or create
+NADs. Device allocation and hardware behavior require target-cluster checks.
 
----
+## Patches and generated artifacts
 
-## 9. Webhooks
+`ApplyPatches` applies named strategic-merge Deployment fragments in order.
+Validators check references and dry-run fragments; the renderer validates the
+complete effective Pod, identities, ports, sidecars and networks before writes.
+The dataplane/controlplane intrinsic security and shared-memory baseline is built
+by `internal/manifests/builder.go`; optional settings remain explicit patches.
 
-Two validating webhooks, both using the controller-runtime ≥ 0.23 generic
-typed validator:
+API definitions drive `controller-gen` DeepCopy, CRDs, RBAC and admission
+configuration. `make helm-crds` bundles CRDs with kustomize. Helm's handwritten
+RBAC and webhook templates must match those generated contracts.
 
-```go
-type MyValidator struct{ Client client.Client }
-var _ admission.Validator[*MyKind] = &MyValidator{}
-```
-
-| Webhook                | Endpoint                                                  | Validates                                                                                               |
-|------------------------|-----------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| `vyanet-v2.kb.io`      | `/validate-yanet-yanet-platform-io-v2alpha1-yanet`        | `boxType` required, `boxType` immutable on update, `boxType` exists in some YanetConfig, operator overrides reference declared operators, per-container override keys match rendered container names. Degrades to a warning when no YanetConfig is reachable (bootstrap case). |
-| `vyanetconfig-v2.kb.io`| `/validate-yanet-yanet-platform-io-v2alpha1-yanetconfig`  | Uniqueness of patch / operator / boxType names; cross-references; required `controlplane` + `dataplane` per box; **dry-run** of every NamedPatch. |
-
-Validators take dependencies via struct fields (no module-level globals).
-
----
-
-## 10. `enabled` and `autoSync` (v2)
-
-v2 separates two orthogonal axes that v1 used to conflate. Both are
-`*bool` on [`YanetSpec`](api/v2alpha1/yanet_types.go:37); v1 has only the
-per-component `Enable` flag and a non-pointer `AutoSync bool`.
-
-### 10.1. `spec.autoSync` — "may the operator touch managed objects?"
-
-Defaults to `false`. Controls whether the reconciler **applies** drift or
-only **reports** it. Symmetric for every managed object kind:
-
-| `autoSync` | Deployment exists | Deployment missing | Service exists | Service missing | Inline ConfigMap exists | Inline ConfigMap missing | Orphans       |
-|------------|-------------------|--------------------|----------------|-----------------|-------------------------|--------------------------|---------------|
-| `true`     | `Update`          | `Create`           | `Update`       | `Create`        | `Update`                | `Create`                 | deleted       |
-| `false`    | no apply          | no apply           | no apply       | no apply        | no apply                | no apply                 | only counted  |
-
-In `false` mode the user can hand-edit any managed object (replicas,
-foreign labels, `externalTrafficPolicy`, ConfigMap contents, …) and the
-operator will not fight back; drift is surfaced under
-`status.sync.outofsync` / `status.sync.syncwaiting` instead. Covered by
-[`TestReconcileV2_AutoSyncOff_PreservesHandEditsOnExistingResources`](internal/controller/yanet_reconciler_v2_test.go:399)
-and [`TestPruneOrphans_AutoSyncFalse_DoesNotDelete`](internal/controller/yanet_reconciler_v2_hardening_test.go:273).
-
-### 10.2. `spec.enabled` — "should pods actually run?"
-
-Defaults to `true`. This is a **scale-to-zero switch**, not a reconcile
-pause. The reconciler still renders every Deployment / Service /
-ConfigMap (so the user can inspect generated specs and patches still
-take effect), but forces `spec.replicas=0` on every Deployment after
-patches have been applied — overriding any per-component
-`components.<name>.enabled` and any patch-set `replicas` value.
-
-To "freeze" the operator's view of a CR (keep existing objects exactly
-as they are, hand edits and all) use `spec.autoSync=false` from §10.1
-instead.
-
-Compatibility matrix:
-
-| `enabled` | `autoSync` | Effect                                                                                                                          |
-|-----------|------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `true`    | `true`     | Steady-state: full reconcile, replicas governed by per-component overrides and patches.                                         |
-| `true`    | `false`    | Report-only: the operator never touches managed objects; hand edits preserved; drift in `status.sync`.                          |
-| `false`   | `true`     | Active scale-to-zero: reconciler keeps applying desired specs but with `replicas=0` on every Deployment.                        |
-| `false`   | `false`    | Passive scale-to-zero: reconciler reports drift only; existing Deployments retain whatever replicas they had before.            |
-
-Covered by
-[`TestReconcileV2_Disabled_ScalesToZero`](internal/controller/yanet_reconciler_v2_test.go:103).
-
-### 10.3. Per-component `components.<name>.enabled`
-
-Independent from §10.2. Lives inside the boxType components mapping
-(via `YanetConfigV2.spec.boxTypes[].components.<name>.enabled` or as a
-per-installation override on `Yanet.spec.components.<name>.enabled`)
-and is consumed by
-[`replicasFor`](internal/manifests/builder_v2.go:321): `Enabled=false`
-on a single component yields `replicas=0` for just that Deployment.
-
-If `spec.enabled=false` is also set on the CR, the CR-level switch
-wins — every Deployment is scaled to zero regardless of per-component
-state.
-
----
-
-## 11. Build / test surface
-
-| Make target              | What it does                                                                 |
-|--------------------------|------------------------------------------------------------------------------|
-| `make generate`          | DeepCopy generation via `controller-gen object`.                             |
-| `make manifests`         | CRDs + webhook configs via `controller-gen rbac/crd/webhook`.                |
-| `make helm-crds`         | Build `deploy/charts/yanet-operator/crds/yanet.yaml` via kustomize.          |
-| `make fmt` / `make vet`  | gofmt / go vet (in Docker).                                                  |
-| `make lint`              | golangci-lint (in Docker).                                                   |
-| `make test-unit`         | Unit tests in `internal/helpers`, `internal/manifests`.                      |
-| `make test`              | Full suite: API webhooks, helpers, manifests, controller envtest (Ginkgo).   |
-| `make test-race`         | Same with `-race`.                                                           |
-
-envtest registers **both** API versions in
-[`internal/controller/suite_test.go`](internal/controller/suite_test.go); a
-common pitfall is missing one of them — the cache sync then times out for
-`*v2alpha1.Yanet` after 60 seconds.
-
----
-
-## 12. Hardening (DONE) and remaining out-of-scope
-
-### Done in the H1–H6 hardening pass (sprint 2026-05-07)
-
-See [`YANET2_HARDENING_PLAN/00-STATUS.md`](YANET2_HARDENING_PLAN/00-STATUS.md)
-for the full list.
-
-- **Finalizer** `yanet.yanet-platform.io/finalizer` is now installed and
-  removed by the v2 reconciler (mirrors the v1 path). Cleanup on
-  `DeletionTimestamp` runs `pruneOrphans` with an empty desired set
-  ([`yanet_reconciler_v2.go:64`](internal/controller/yanet_reconciler_v2.go:64)).
-- **Orphan cleanup**: every reconcile cycle lists Deployment / Service /
-  ConfigMap labelled `yanet.yanet-platform.io/yanet=<name>` and deletes
-  anything that is no longer in the desired set
-  ([`prune_v2.go:1`](internal/controller/prune_v2.go:1)). When `autoSync=false`
-  the helper only reports the count instead of deleting.
-- **Global `updateWindow` throttling** is now exercised on the v2 path:
-  `applyDeploymentV2` calls the existing `checkUpdateRequeue` before any
-  drift `Update`, sharing `lastUpdateTS / lastUpdateHost` with v1
-  ([`yanet_reconciler_v2.go:419`](internal/controller/yanet_reconciler_v2.go:419)).
-- **`metav1.Condition`** for Available / Progressing / Degraded / Ready,
-  plus `Status.Pods` aggregation grouped by phase
-  ([`yanet_conditions_v2.go:1`](internal/controller/yanet_conditions_v2.go:1)).
-- **v2 webhook** rejects negative `spec.updateWindow`
-  ([`yanetconfig_webhook.go:78`](api/v2alpha1/yanetconfig_webhook.go:78)).
-- **Metrics**: `yanet_orphans_pruned_total`,
-  `yanet_v2_deployments_created_total`,
-  `yanet_v2_deployments_updated_total`,
-  `yanet_v2_update_throttled_total`
-  ([`metrics.go:1`](internal/controller/metrics.go:1)) plus a v2 Grafana
-  dashboard
-  ([`yanet-operator-v2.json`](deploy/charts/yanet-operator/dashboards/yanet-operator-v2.json:1)).
-
-### Still deferred / out of scope
-
-- Remote configuration downloads require explicit init-container, emptyDir and
-  mount patches. There is no `ConfigSource.URL` placeholder API.
-- **AutoDiscovery** is v1-only and has no v2 field.
-- **JSON6902** patches — only strategic merge is supported.
-- **Patches on Service / ConfigMap** — generation is hardcoded from the
-  component definition.
-
----
-
-## 13. Where to read next
-
-- [`YANET2_ARCH.md`](YANET2_ARCH.md) — what yanet2 looks like on a node (modules, agents, BIRD, NUMA).
-- [`AGENTS.md`](AGENTS.md) — contributor guide (testing, linting, common pitfalls).
-- [`README_WEBHOOKS.md`](README_WEBHOOKS.md) — webhook setup and certificates.
-- [`README_TESTS.md`](README_TESTS.md) — testing details.
-- [`README_METRICS.md`](README_METRICS.md) — Prometheus metrics surface.
-- [`README_RELEASES.md`](README_RELEASES.md) — release process.
-- [`deploy/examples/v2alpha1-*.yaml`](deploy/examples/) — full v2alpha1 sample manifests.
+See [webhook documentation](README_WEBHOOKS.md), [testing](README_TESTS.md),
+[metrics](README_METRICS.md) and [release process](README_RELEASES.md).

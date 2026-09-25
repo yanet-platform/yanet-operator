@@ -66,12 +66,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+  - update
+- apiGroups:
   - yanet.yanet-platform.io
   resources:
   - yanetconfigs
-  - yanetconfigsv2
   - yanets
-  - yanetsv2
   verbs:
   - create
   - delete
@@ -84,18 +90,14 @@ rules:
   - yanet.yanet-platform.io
   resources:
   - yanetconfigs/finalizers
-  - yanetconfigsv2/finalizers
   - yanets/finalizers
-  - yanetsv2/finalizers
   verbs:
   - update
 - apiGroups:
   - yanet.yanet-platform.io
   resources:
   - yanetconfigs/status
-  - yanetconfigsv2/status
   - yanets/status
-  - yanetsv2/status
   verbs:
   - get
   - patch

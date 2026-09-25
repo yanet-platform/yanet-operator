@@ -1,242 +1,91 @@
-# Validation Webhooks for yanet-operator
+# Validation webhooks
 
-## Overview
+The operator registers two validators for `yanet.yanet-platform.io/v1alpha1`:
 
-yanet-operator uses Kubernetes Admission Webhooks to validate all four
-CRDs before creation or update:
+| Kind | Webhook | Service path |
+| --- | --- | --- |
+| `Yanet` | `vyanet.kb.io` | `/validate-yanet-yanet-platform-io-v1alpha1-yanet` |
+| `YanetConfig` | `vyanetconfig.kb.io` | `/validate-yanet-yanet-platform-io-v1alpha1-yanetconfig` |
 
-- v1alpha1: `Yanet`, `YanetConfig`
-- v2alpha1: `YanetV2`, `YanetConfigV2`
+Both handle CREATE and UPDATE. Delete admission does not prevent cleanup.
 
-This document describes the v1alpha1 rules in detail. For the v2alpha1
-validators (`vyanetv2.kb.io`, `vyanetconfigv2.kb.io`) — boxType
-immutability, cross-references between components/patches/boxTypes,
-strategic-merge dry-run of every NamedPatch — see the dedicated webhook
-section in [ARCHITECTURE.md](ARCHITECTURE.md) and the test cases under
-[`deploy/tests/webhooks/cases/`](deploy/tests/webhooks/cases/).
+## Yanet
 
-## Yanet Validation (v1alpha1)
+- Requires a valid `boxType`; it cannot change after creation.
+- Validates installation/component names and typed overrides.
+- When the cluster-wide palette is available, checks box-type references,
+  component wiring, container names and effective NUMA/network overrides.
+- When the palette is absent, returns a bootstrap warning; the reconciler waits
+  for configuration before applying workloads.
 
-### Validation Rules
-
-1. **spec.nodename** — required field, cannot be empty
-2. **spec.nodename** — immutable (cannot be changed after creation)
-3. **spec.type** — must be either `release` or `balancer`
-
-### Examples
-
-**Valid Yanet:**
 ```yaml
 apiVersion: yanet.yanet-platform.io/v1alpha1
 kind: Yanet
 metadata:
-  name: yanet-node1
+  name: worker-1
+  namespace: yanet
 spec:
-  nodename: node1.example.com
-  type: release
+  boxType: release
+  nodeSelector:
+    kubernetes.io/hostname: worker-1
+  autoSync: true
 ```
 
-**Invalid Yanet (empty nodename):**
-```yaml
-apiVersion: yanet.yanet-platform.io/v1alpha1
-kind: Yanet
-metadata:
-  name: yanet-node1
-spec:
-  nodename: ""  # ❌ Error: spec.nodename cannot be empty
-  type: release
-```
+## YanetConfig
 
-**Invalid Yanet (wrong type):**
-```yaml
-apiVersion: yanet.yanet-platform.io/v1alpha1
-kind: Yanet
-metadata:
-  name: yanet-node1
-spec:
-  nodename: node1.example.com
-  type: custom  # ❌ Error: spec.type must be either 'release' or 'balancer'
-```
+The resource is cluster-scoped and must be named `config`. Validation covers:
 
-**Attempt to change nodename:**
-```bash
-# Create
-kubectl apply -f yanet.yaml  # ✅ OK
+- Nonnegative, bounded `updateWindow`.
+- Unique patch, box-type, role and container names.
+- Required controlplane/dataplane wiring and valid component/patch references.
+- Image and configuration-source shape, hugepage quantities and NUMA settings.
+- Ordered atomic sidecars, typed network attachments and private networking.
+- Strategic-merge patch dry-runs and effective configuration constraints.
 
-# Try to change nodename
-# ❌ Error: spec.nodename is immutable
-```
+See the [full palette example](deploy/examples/v1alpha1-yanetconfig-full.yaml)
+and [architecture](ARCHITECTURE.md).
 
-## YanetConfig Validation
+## Helm installation
 
-### Validation Rules
-
-1. **spec.updatewindow** — must be >= 0
-
-### Warnings
-
-Webhook may issue warnings (non-blocking):
-
-1. If `spec.stop = true` — "Stop is enabled - operator will not reconcile resources"
-2. If `spec.autodiscovery.enable = true` but `typeuri` is not set
-3. If `spec.autodiscovery.enable = true` but `namespace` is not set
-
-### Examples
-
-**Valid YanetConfig:**
-```yaml
-apiVersion: yanet.yanet-platform.io/v1alpha1
-kind: YanetConfig
-metadata:
-  name: global-config
-spec:
-  updatewindow: 60
-  stop: false
-```
-
-**Invalid YanetConfig:**
-```yaml
-apiVersion: yanet.yanet-platform.io/v1alpha1
-kind: YanetConfig
-metadata:
-  name: global-config
-spec:
-  updatewindow: -10  # ❌ Error: spec.updatewindow must be >= 0
-```
-
-## Installation via Helm
-
-Webhook is enabled by default in Helm chart:
-
-```yaml
-# values.yaml
-webhook:
-  enabled: true
-  port: 9443
-  certManager:
-    enabled: false  # Use cert-manager for certificate generation
-  certGen:
-    image:
-      repository: registry.k8s.io/ingress-nginx/kube-webhook-certgen
-      tag: v1.5.2
-```
-
-### Certificate Generation
-
-By default, `kube-webhook-certgen` is used for automatic certificate generation:
-
-1. **Pre-install/Pre-upgrade hook** — creates TLS certificates in Secret
-2. **Post-install/Post-upgrade hook** — updates CA bundle in ValidatingWebhookConfiguration
-
-### Using cert-manager
-
-If you have cert-manager installed:
+Webhooks are enabled by default. The certificate generation hook creates a TLS
+Secret; the post-install/post-upgrade hook patches the CA bundle into the
+ValidatingWebhookConfiguration.
 
 ```yaml
 webhook:
   enabled: true
-  certManager:
-    enabled: true
+  port: 9443
+  failurePolicy: Ignore
 ```
 
-## Disabling Webhook
+Chart-managed `yanetconfig` requires `failurePolicy: Ignore` because Helm applies
+normal resources before the post-install CA job. To use `Fail`, manage
+`YanetConfig/config` separately after the webhook is ready. Rejected requests
+still fail under `Ignore`; that policy only permits requests when the webhook
+cannot be reached.
 
-To disable webhook, set `webhook.enabled: false` in values.yaml:
-
-```yaml
-webhook:
-  enabled: false
-```
-
-When disabled:
-- Webhook server is not started (flag `--webhook-enabled=false`)
-- TLS certificates are not mounted into the pod
-- ValidatingWebhookConfiguration is not created
-- No certificate generation jobs run
-
-This is useful for development or testing environments where webhook validation is not required.
+Setting `webhook.enabled: false` disables the server flag, webhook configuration,
+certificate mounts and certificate jobs. Structural CRD validation still applies.
 
 ## Troubleshooting
 
-### Webhook not working
+Inspect the webhook Service, operator logs, TLS Secret and CA configuration in
+the namespace where the chart is installed:
 
-1. Check that webhook service is available:
 ```bash
-kubectl get svc -n yanet-operator yanet-operator-webhook-service
-```
-
-2. Check that certificates are created:
-```bash
-kubectl get secret -n yanet-operator yanet-operator-webhook-certs
-```
-
-3. Check ValidatingWebhookConfiguration:
-```bash
+kubectl get svc,secret -n yanet-system
+kubectl logs -n yanet-system deployment/yanet-operator
 kubectl get validatingwebhookconfiguration yanet-operator-validating-webhook-configuration -o yaml
 ```
 
-4. Check operator logs:
-```bash
-kubectl logs -n yanet-operator deployment/yanet-operator
-```
+A connection error is not evidence of a validation rejection. Check endpoints,
+certificates and `caBundle` before investigating admission rules.
 
-### Error "connection refused"
+## Tests and sources
 
-Ensure that:
-- Deployment is running and Ready
-- Service is configured correctly
-- Certificates are valid
-
-### Error "x509: certificate signed by unknown authority"
-
-CA bundle in ValidatingWebhookConfiguration is not updated. Run post-upgrade hook manually:
-
-```bash
-kubectl delete job -n yanet-operator yanet-operator-webhook-update-ca
-helm upgrade yanet-operator ./deploy/charts/yanet-operator
-```
-
-## Architecture
-
-```
-┌─────────────────┐
-│  kubectl apply  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────┐
-│  Kubernetes API Server  │
-└────────┬────────────────┘
-         │
-         │ Admission Request
-         ▼
-┌─────────────────────────────────┐
-│  ValidatingWebhookConfiguration │
-└────────┬────────────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  yanet-operator webhook  │
-│  (port 9443)             │
-└────────┬─────────────────┘
-         │
-         │ Validate
-         ▼
-┌──────────────────┐
-│  Yanet/          │
-│  YanetConfig     │
-│  Validator       │
-└──────────────────┘
-```
-
-## Files
-
-- [`api/v1alpha1/yanet_webhook.go`](api/v1alpha1/yanet_webhook.go) — v1 Yanet validation
-- [`api/v1alpha1/yanetconfig_webhook.go`](api/v1alpha1/yanetconfig_webhook.go) — v1 YanetConfig validation
-- [`api/v2alpha1/yanet_webhook.go`](api/v2alpha1/yanet_webhook.go) — v2 YanetV2 validation (boxType refs, immutability)
-- [`api/v2alpha1/yanetconfig_webhook.go`](api/v2alpha1/yanetconfig_webhook.go) — v2 YanetConfigV2 validation (fixed singleton identity, cross-refs, strategic-merge dry-run)
-- [`deploy/charts/yanet-operator/templates/webhook-service.yaml`](deploy/charts/yanet-operator/templates/webhook-service.yaml) — Service for webhook
-- [`deploy/charts/yanet-operator/templates/webhook-cert-jobs.yaml`](deploy/charts/yanet-operator/templates/webhook-cert-jobs.yaml) — Jobs for certificate generation
-- [`deploy/charts/yanet-operator/templates/webhook-configuration.yaml`](deploy/charts/yanet-operator/templates/webhook-configuration.yaml) — ValidatingWebhookConfiguration (all four CRDs)
-- [`config/webhook/manifests.yaml`](config/webhook/manifests.yaml) — Generated webhook manifest
-- [`deploy/tests/webhooks/`](deploy/tests/webhooks/) — End-to-end webhook test harness (used by the helm CI job)
+- `api/v1alpha1/yanet_webhook.go` and `yanetconfig_webhook.go`: typed validators.
+- `internal/controller/webhook_test.go` and `yanet_webhook_e2e_test.go`: real
+  envtest admission requests through the configured Service paths.
+- `deploy/tests/webhooks/run.sh`: existing Helm CI admission and reconcile smoke.
+- `config/webhook/manifests.yaml`: generated from API markers.
+- `deploy/charts/yanet-operator/templates/webhook-configuration.yaml`: Helm routes.

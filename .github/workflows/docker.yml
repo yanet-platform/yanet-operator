@@ -1,12 +1,10 @@
 # Build and push yanet-operator Docker images to GHCR
-# Triggered on: push to main/master, version tags (v*), PRs, and manual dispatch
+# Tagged multi-platform releases are published only by release.yml.
 name: Build and Push Docker Image
 
 on:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'  # Trigger on version tags like v0.1.0
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:

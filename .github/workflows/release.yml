@@ -204,6 +204,12 @@ jobs:
             echo "## Initial Release" > release_notes.md
           fi
 
+          # Include release-specific compatibility and upgrade notes.
+          if [ -f "release-notes/${VERSION}.md" ]; then
+            printf '\n\n' >> release_notes.md
+            cat "release-notes/${VERSION}.md" >> release_notes.md
+          fi
+
           # Add installation instructions
           cat >> release_notes.md << 'EOF'
 
@@ -212,7 +218,7 @@ jobs:
           ### Quick Install (kubectl)
 
           ```bash
-          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
           ```
 
           ### Helm Install (GitHub Container Registry)
@@ -243,11 +249,11 @@ jobs:
 
           ## 📚 Documentation
 
-          - [README](https://github.com/${{ github.repository }}/blob/${VERSION}/README.md)
-          - [Testing Guide](https://github.com/${{ github.repository }}/blob/${VERSION}/README_TESTS.md)
-          - [Validation Webhooks](https://github.com/${{ github.repository }}/blob/${VERSION}/README_WEBHOOKS.md)
-          - [Prometheus Metrics](https://github.com/${{ github.repository }}/blob/${VERSION}/README_METRICS.md)
-          - [Release Guide](https://github.com/${{ github.repository }}/blob/${VERSION}/README_RELEASES.md)
+          - [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md)
+          - [Testing Guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_TESTS.md)
+          - [Validation Webhooks](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_WEBHOOKS.md)
+          - [Prometheus Metrics](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_METRICS.md)
+          - [Release Guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_RELEASES.md)
 
           ## ✅ Verification
 

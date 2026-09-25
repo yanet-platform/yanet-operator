@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +33,7 @@ func TestOperatorListenersContracts(t *testing.T) {
 					op.Kind = helpers.KindSidecar
 					op.PortIndex = 1
 				}
-				context := BuildContextV2{YanetName: "test", Namespace: "test", BoxType: "test"}
+				context := BuildContext{YanetName: "test", Namespace: "test", BoxType: "test"}
 				deployments, err := BuildDeployments(context, op)
 				if err != nil {
 					t.Fatal(err)
@@ -85,7 +85,7 @@ func manifestPlacementConfig(t *testing.T) (*api.YanetConfigSpec, *helpers.Resol
 
 func TestOperatorPlacementConfigComposition(t *testing.T) {
 	config, component := manifestPlacementConfig(t)
-	context := BuildContextV2{YanetName: "test", Namespace: "test", BoxType: "test"}
+	context := BuildContext{YanetName: "test", Namespace: "test", BoxType: "test"}
 	deployments, err := RenderDeployments(context, component, NewPatchRegistry(config.Patches))
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestOperatorPlacementRejectsFinalReferences(t *testing.T) {
 		t.Run(fragment, func(t *testing.T) {
 			config, component := manifestPlacementConfig(t)
 			config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":` + fragment + `}}}`)
-			if _, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
+			if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
 				t.Fatal("invalid composition must fail")
 			}
 		})
@@ -155,7 +155,7 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 		port := corev1.ContainerPort{ContainerPort: 8080}
 		if useName {
 			port.ContainerPort = 9000
-			port.Name = BuildServices(BuildContextV2{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
+			port.Name = BuildServices(BuildContext{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
 		}
 		raw, err := json.Marshal(map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 			"containers": []corev1.Container{{Name: "dataplane", Ports: []corev1.ContainerPort{port}}},
@@ -166,7 +166,7 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 		registry := NewPatchRegistry(config.Patches)
 		registry["capture"] = api.NamedPatch{Patch: runtime.RawExtension{Raw: raw}}
 		component.Patches = []string{"capture"}
-		if _, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, registry); err == nil {
+		if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, registry); err == nil {
 			t.Fatal("disabled role must retain both named and numeric port reservations")
 		}
 	}
@@ -175,8 +175,8 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 func TestOperatorPlacementServicesDisambiguateRoleHashes(t *testing.T) {
 	first := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "role-47893"}
 	second := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "role-89356"}
-	firstPlan := BuildServices(BuildContextV2{BoxType: "test"}, first)[0]
-	secondPlan := BuildServices(BuildContextV2{BoxType: "test"}, second)[0]
+	firstPlan := BuildServices(BuildContext{BoxType: "test"}, first)[0]
+	secondPlan := BuildServices(BuildContext{BoxType: "test"}, second)[0]
 	if reflect.DeepEqual(firstPlan.Selector, secondPlan.Selector) {
 		t.Fatal("Services must distinguish different roles even when their name hashes collide across revisions")
 	}

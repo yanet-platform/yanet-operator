@@ -1,0 +1,372 @@
+/*
+Copyright 2023-2026 YANDEX LLC.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+
+	"github.com/go-logr/logr"
+	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
+	"github.com/yanet-platform/yanet-operator/internal/manifests"
+	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+type sharedServiceKey struct {
+	namespace string
+	name      string
+}
+
+type sharedServiceScope struct {
+	namespace string
+	boxType   string
+}
+
+// reconcileSharedServices owns the namespace/box-type Services from the
+// cluster-scoped singleton config. Individual Yanet objects only label their
+// Pods for selection and report the shared Service names in status.
+func (r *YanetConfigReconciler) reconcileSharedServices(
+	ctx context.Context,
+	config *yanetv1alpha1.YanetConfig,
+	logger logr.Logger,
+) error {
+	installations := &yanetv1alpha1.YanetList{}
+	if err := r.Client.List(ctx, installations); err != nil {
+		return fmt.Errorf("list Yanet objects for shared Services: %w", err)
+	}
+	owner := *metav1.NewControllerRef(config, yanetv1alpha1.GroupVersion.WithKind("YanetConfig"))
+	desired := make(map[sharedServiceKey]*corev1.Service)
+	blocked := make(map[sharedServiceKey]struct{})
+	protectedScopes := make(map[sharedServiceScope]struct{})
+	scopes := make(map[sharedServiceScope]struct{})
+	var planErrs []error
+	for index := range installations.Items {
+		yanet := &installations.Items[index]
+		if !yanet.DeletionTimestamp.IsZero() {
+			continue
+		}
+		scope := sharedServiceScope{namespace: yanet.Namespace, boxType: yanet.Spec.BoxType}
+		scopes[scope] = struct{}{}
+		installationFailed := false
+		refs, err := helpers.EnabledComponentsForBox(&config.Spec, yanet.Spec.BoxType)
+		if err != nil {
+			planErrs = append(planErrs, fmt.Errorf("Yanet %s/%s: %w", yanet.Namespace, yanet.Name, err))
+			protectedScopes[scope] = struct{}{}
+			continue
+		}
+		buildCtx := manifests.BuildContext{
+			Namespace: yanet.Namespace,
+			BoxType:   yanet.Spec.BoxType,
+		}
+		for _, ref := range refs {
+			component, resolveErr := helpers.ResolveBoxServiceComponent(
+				&config.Spec,
+				yanet.Spec.BoxType,
+				ref.Kind,
+				ref.OperatorName,
+			)
+			if resolveErr != nil {
+				installationFailed = true
+				planErrs = append(planErrs, fmt.Errorf(
+					"resolve %s for Yanet %s/%s: %w",
+					ref.Kind,
+					yanet.Namespace,
+					yanet.Name,
+					resolveErr,
+				))
+				continue
+			}
+			if component == nil {
+				continue
+			}
+			for _, plan := range manifests.BuildServices(buildCtx, component) {
+				if validateErr := plan.Validate(); validateErr != nil {
+					installationFailed = true
+					planErrs = append(planErrs, fmt.Errorf(
+						"validate shared Service %s/%s: %w",
+						yanet.Namespace,
+						plan.Name,
+						validateErr,
+					))
+					continue
+				}
+				service := plan.ToService(yanet.Namespace, owner)
+				key := sharedServiceKey{namespace: service.Namespace, name: service.Name}
+				if _, ambiguous := blocked[key]; ambiguous {
+					installationFailed = true
+					continue
+				}
+				if previous, duplicate := desired[key]; duplicate &&
+					!apiequality.Semantic.DeepEqual(previous.Spec, service.Spec) {
+					installationFailed = true
+					delete(desired, key)
+					blocked[key] = struct{}{}
+					planErrs = append(planErrs, fmt.Errorf(
+						"Yanet objects generate conflicting shared Service plans named %s/%s",
+						service.Namespace,
+						service.Name,
+					))
+					continue
+				}
+				desired[key] = service
+			}
+		}
+		if installationFailed {
+			protectedScopes[scope] = struct{}{}
+		}
+	}
+	// A shared selector cutover affects every installation in a namespace/box,
+	// even an autoSync=false installation or a no-longer-selected old node.
+	// Preserve routing and protect pruning while that scope has old producers.
+	migrationBlocked, migrationErrs := blockedSharedServicePlacementScopes(ctx, r.Client, &config.Spec, scopes)
+	planErrs = append(planErrs, migrationErrs...)
+	for scope := range migrationBlocked {
+		protectedScopes[scope] = struct{}{}
+	}
+	keys := make([]sharedServiceKey, 0, len(desired))
+	for key := range desired {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].namespace == keys[j].namespace {
+			return keys[i].name < keys[j].name
+		}
+		return keys[i].namespace < keys[j].namespace
+	})
+	for _, key := range keys {
+		scope := sharedServiceScope{namespace: key.namespace, boxType: desired[key].Labels[manifests.LabelBoxType]}
+		if _, blocked := migrationBlocked[scope]; blocked {
+			continue
+		}
+		if r.sharedServicesStopped() {
+			return nil
+		}
+		if err := r.applySharedService(ctx, desired[key]); err != nil {
+			planErrs = append(planErrs, fmt.Errorf("apply shared Service %s/%s: %w", key.namespace, key.name, err))
+			protectedScopes[sharedServiceScope{
+				namespace: key.namespace,
+				boxType:   desired[key].Labels[manifests.LabelBoxType],
+			}] = struct{}{}
+		}
+	}
+	services := &corev1.ServiceList{}
+	if err := r.Client.List(ctx, services, client.MatchingLabels{
+		manifests.LabelSharedService: "true",
+	}); err != nil {
+		planErrs = append(planErrs, fmt.Errorf("list shared Services for pruning: %w", err))
+		return errors.Join(planErrs...)
+	}
+	for index := range services.Items {
+		service := &services.Items[index]
+		key := sharedServiceKey{namespace: service.Namespace, name: service.Name}
+		scope := sharedServiceScope{
+			namespace: service.Namespace,
+			boxType:   service.Labels[manifests.LabelBoxType],
+		}
+		_, protected := protectedScopes[scope]
+		_, ambiguous := blocked[key]
+		if _, keep := desired[key]; keep || protected || ambiguous || !controlledBy(service, &owner) {
+			continue
+		}
+		if r.sharedServicesStopped() {
+			return nil
+		}
+		logger.Info("deleting orphan shared Service", "namespace", service.Namespace, "service", service.Name)
+		if err := r.Client.Delete(ctx, service, client.Preconditions{
+			UID: &service.UID, ResourceVersion: &service.ResourceVersion,
+		}); err != nil && !apierrors.IsNotFound(err) {
+			planErrs = append(planErrs, fmt.Errorf("delete shared Service %s/%s: %w", service.Namespace, service.Name, err))
+		}
+	}
+	return errors.Join(planErrs...)
+}
+
+// blockedSharedServicePlacementScopes is independent of workload reconciliation:
+// publishing a new snapshot must still allow explicit scale-to-zero to drain it.
+func blockedSharedServicePlacementScopes(
+	ctx context.Context, reader client.Reader, config *yanetv1alpha1.YanetConfigSpec, scopes map[sharedServiceScope]struct{},
+) (map[sharedServiceScope]struct{}, []error) {
+	blocked := make(map[sharedServiceScope]struct{})
+	var errs []error
+	ordered := make([]sharedServiceScope, 0, len(scopes))
+	for scope := range scopes {
+		ordered = append(ordered, scope)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].namespace+"/"+ordered[i].boxType < ordered[j].namespace+"/"+ordered[j].boxType
+	})
+	type inventory struct {
+		producers []placementProducer
+		err       error
+	}
+	byNamespace := make(map[string]inventory)
+	for _, scope := range ordered {
+		box, err := helpers.FindBoxType(config, scope.boxType)
+		if err != nil {
+			// Resolution errors are already protected/reported by Service planning.
+			continue
+		}
+		if len(box.Operators) == 0 && (box.Components.Dataplane == nil || len(box.Components.Dataplane.Sidecars) == 0) {
+			continue
+		}
+		live, loaded := byNamespace[scope.namespace]
+		if !loaded {
+			live.producers, live.err = listPlacementProducers(ctx, reader, scope.namespace)
+			byNamespace[scope.namespace] = live
+		}
+		if live.err != nil {
+			blocked[scope] = struct{}{}
+			errs = append(errs, live.err)
+			continue
+		}
+		var names []string
+		for name := range box.Operators {
+			names = append(names, name)
+		}
+		sidecars := map[string]bool{}
+		if box.Components.Dataplane != nil {
+			for name := range box.Components.Dataplane.Sidecars {
+				names = append(names, name)
+				sidecars[name] = true
+			}
+		}
+		sort.Strings(names)
+		for _, producer := range live.producers {
+			if producer.template.Labels[manifests.LabelBoxType] != scope.boxType {
+				continue
+			}
+			for _, name := range names {
+				if incompatibleOperatorPlacement(producer.template.Labels, name, sidecars[name]) {
+					blocked[scope] = struct{}{}
+					errs = append(errs, fmt.Errorf("shared Service placement migration in %s/%s for %q requires drain of old %s %s; preserving existing Services until all installations in this scope have drained incompatible producers",
+						scope.namespace, scope.boxType, name, producer.kind, producer.name))
+					break
+				}
+			}
+			if _, failed := blocked[scope]; failed {
+				break
+			}
+		}
+	}
+	return blocked, errs
+}
+
+// A newer snapshot can publish stop while an API read or retry is in flight.
+// Recheck before writes without holding the snapshot mutex across API calls.
+func (r *YanetConfigReconciler) sharedServicesStopped() bool {
+	if r.GlobalConfig == nil {
+		return false
+	}
+	r.GlobalConfig.Lock.Lock()
+	defer r.GlobalConfig.Lock.Unlock()
+	return r.GlobalConfig.Config.Stop
+}
+
+func (r *YanetConfigReconciler) applySharedService(
+	ctx context.Context,
+	desired *corev1.Service,
+) error {
+	if len(desired.Spec.Ports) == 0 || len(desired.Spec.Selector) == 0 {
+		return fmt.Errorf("refusing to apply invalid shared Service %s/%s", desired.Namespace, desired.Name)
+	}
+	key := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
+	// A reconcile triggered by another watch can run before the Service informer
+	// observes our previous create/update. Use the API reader for read-before-write
+	// and conflict retries, rather than recreating a cache-missing Service.
+	reader := client.Reader(r.Client)
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	existing := &corev1.Service{}
+	err := reader.Get(ctx, key, existing)
+	if apierrors.IsNotFound(err) {
+		if r.sharedServicesStopped() {
+			return nil
+		}
+		candidate := desired.DeepCopy()
+		candidate.Spec.SessionAffinity = corev1.ServiceAffinityNone
+		mergeManagedMeta(&candidate.ObjectMeta, &desired.ObjectMeta)
+		return r.Client.Create(ctx, candidate)
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateServiceOwnership(existing, desired); err != nil {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &corev1.Service{}
+		if getErr := reader.Get(ctx, key, fresh); getErr != nil {
+			return getErr
+		}
+		if ownershipErr := validateServiceOwnership(fresh, desired); ownershipErr != nil {
+			return ownershipErr
+		}
+		candidate, changed := desiredSharedServiceUpdate(fresh, desired)
+		if !changed || r.sharedServicesStopped() {
+			return nil
+		}
+		return r.Client.Update(ctx, candidate)
+	})
+}
+
+func desiredSharedServiceUpdate(existing, desired *corev1.Service) (*corev1.Service, bool) {
+	existingNormalized := existing.DeepCopy()
+	desiredNormalized := desired.DeepCopy()
+	// Shared ClusterIP Services have a fixed non-sticky endpoint contract.
+	// Set it explicitly: client-go's scheme does not apply server defaults.
+	desiredNormalized.Spec.SessionAffinity = corev1.ServiceAffinityNone
+	desiredNormalized.Spec.ClusterIP = existingNormalized.Spec.ClusterIP
+	desiredNormalized.Spec.ClusterIPs = append([]string(nil), existingNormalized.Spec.ClusterIPs...)
+	desiredNormalized.Spec.IPFamilies = append([]corev1.IPFamily(nil), existingNormalized.Spec.IPFamilies...)
+	if existingNormalized.Spec.IPFamilyPolicy != nil {
+		policy := *existingNormalized.Spec.IPFamilyPolicy
+		desiredNormalized.Spec.IPFamilyPolicy = &policy
+	}
+	candidate := existing.DeepCopy()
+	candidate.Spec = desiredNormalized.Spec
+	candidate.OwnerReferences = append([]metav1.OwnerReference(nil), desiredNormalized.OwnerReferences...)
+	mergeManagedMeta(&candidate.ObjectMeta, &desiredNormalized.ObjectMeta)
+	delete(candidate.Labels, manifests.LabelYanet)
+	changed := !apiequality.Semantic.DeepEqual(existingNormalized.Spec, candidate.Spec) ||
+		!apiequality.Semantic.DeepEqual(existing.Labels, candidate.Labels) ||
+		!apiequality.Semantic.DeepEqual(existing.Annotations, candidate.Annotations) ||
+		!apiequality.Semantic.DeepEqual(existing.OwnerReferences, candidate.OwnerReferences)
+	return candidate, changed
+}
+
+func controlledBy(object metav1.Object, owner *metav1.OwnerReference) bool {
+	existing := metav1.GetControllerOf(object)
+	if existing == nil {
+		return false
+	}
+	if owner.UID != "" && existing.UID != owner.UID {
+		return false
+	}
+	return existing.APIVersion == owner.APIVersion &&
+		existing.Kind == owner.Kind &&
+		existing.Name == owner.Name
+}

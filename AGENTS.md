@@ -1,478 +1,158 @@
 # AGENTS.md — yanet-operator Development Guide
 
-This document provides context and guidelines for AI assistants working on this project.
-It is the canonical entry point for any AI agent (Claude / Cursor / Aider / Roo / etc.):
-the conventional filename `AGENTS.md` is recognized automatically. Read it BEFORE
-running any build/test command.
+Read this file before changing code or running builds/tests.
 
-## 🚨 ALWAYS use `make` + Docker. Never run `go build` / `go test` directly.
+## Build and test through Make + Docker
 
-This rule is non-negotiable and applies to humans and AI agents alike:
+Use the Go version pinned in `go.mod`, `Dockerfile` and `Makefile` (1.26.2).
+Do not run `go build`, `go test` or `go vet` directly on the host.
 
-- ✅ **Build:** `make docker-build` (produces `controller:latest`)
-- ✅ **Unit tests:** `make test-docker-unit`
-- ✅ **Race detector:** `make test-docker-race`
-- ❌ **Do NOT run** `go build ./...`, `go test ./...`, `go vet`, etc. on the host —
-  the host toolchain may not match `go.mod` / `Dockerfile`, and dependencies
-  like envtest are not installed locally.
-
-If you are an AI agent and your build/test request is denied with feedback like
-`make docker-build`, that is the human pointing you back to this rule —
-re-read this section, then use the Make target.
-
-## 🎯 Project Overview
-
-**yanet-operator** is a Kubernetes operator that manages YANET (Yet Another Network) deployments on worker nodes.
-
-- **Language:** Go 1.26.2
-- **Framework:** controller-runtime (Kubernetes operator framework)
-- **Repository:** https://github.com/yanet-platform/yanet-operator
-- **CRDs:**
-  - `Yanet` (per-installation), `YanetConfig` (global)
-  - Two **independent** CRD families in the same API group:
-    - `yanets.yanet.yanet-platform.io` / `yanetconfigs.yanet.yanet-platform.io`
-      — legacy v1alpha1 (kinds `Yanet` / `YanetConfig`).
-    - `yanetsv2.yanet.yanet-platform.io` / `yanetconfigsv2.yanet.yanet-platform.io`
-      — v2alpha1 (kinds `YanetV2` / `YanetConfigV2`).
-    Each CRD is single-version; there is **no** API conversion, **no** storage
-    version dispatch, and **no** Reconcile-time router. Two separate
-    controllers (`YanetReconciler` and `YanetV2Reconciler`) handle the two
-    kinds wholly independently (see "v1/v2 split" below).
-- **Status:** Production-ready, v2alpha1 in active rollout with backward compatibility.
-
-## 📋 Critical Rules
-
-### 1. Code Comments
-- ✅ **ALL comments MUST be in English only**
-- ✅ Use generic examples in tests: `test-node`, `docker.io/test`, etc.
-- ❌ NO references to internal hostnames or registries in tests
-- ✅ **Use structured logging** — key-value pairs, not fmt.Sprintf
-
-### 2. Testing Requirements
-- ✅ **ALL new code MUST have tests**
-- ✅ **Target coverage: 70%+** (current: 87.6%)
-- ✅ **Run tests through Docker** (no local dependencies)
-- ✅ **Use race detector** for concurrency testing
-
-### 3. Test Workflow
-When adding new functionality:
-1. Write tests FIRST (TDD approach)
-2. Add test to appropriate `*_test.go` file
-3. Update `Makefile` if needed (new test targets)
-4. Ensure GitHub Actions workflow covers it
-5. Run `make test-docker-unit` to verify
-6. Check coverage: `go tool cover -func=cover.out`
-
-### 4. Concurrency Rules
-- ✅ **Use `DeepCopy()` for shared state**
-- ✅ **Always hold mutex when accessing shared data**
-- ❌ **NEVER save references to data protected by mutex**
-- ✅ **Run `make test-docker-race` to detect data races**
-
-## 🏗️ Project Structure
-
-```
-yanet-operator/
-├── api/
-│   ├── v1alpha1/                  # Legacy API (storage version)
-│   │   ├── yanet_types.go
-│   │   ├── yanetconfig_types.go
-│   │   └── zz_generated.deepcopy.go  # Generated (DO NOT EDIT)
-│   └── v2alpha1/                  # New API: components/patches/boxTypes model
-│       ├── yanet_types.go         # Minimal Yanet CR (boxType + nodeSelector + overrides)
-│       ├── yanetconfig_types.go   # Components palette, NamedPatch[], BoxType[]
-│       ├── yanet_webhook.go       # admission.Validator[*Yanet] (immutable boxType, refs)
-│       ├── yanetconfig_webhook.go # Validator (uniqueness, refs, strategic-merge dry-run)
-│       ├── config_source.go       # Inline | HostPath
-│       └── zz_generated.deepcopy.go
-├── cmd/main.go
-├── internal/
-│   ├── controller/                # Reconcilers
-│   │   ├── yanet_controller.go    # Independent v1 controller
-│   │   ├── yanetv2_controller.go  # Independent v2 controller
-│   │   ├── yanet_reconciler.go    # v1 path
-│   │   ├── yanet_reconciler_v2.go # v2 path: resolve → build → patch → apply
-│   │   ├── yanetconfig_controller.go    # v1 in-memory snapshot
-│   │   ├── yanetconfig_controller_v2.go # v2 in-memory snapshot (mirrors v1)
-│   │   ├── node_reconciler.go
-│   │   ├── suite_test.go          # envtest + Ginkgo
-│   │   └── *_test.go
-│   ├── helpers/
-│   │   ├── helpers.go, ptr.go, http_getters.go
-│   │   ├── resolve_v2.go          # ResolveBoxComponent, EnabledComponentsForBox
-│   │   └── *_test.go
-│   ├── manifests/
-│   │   ├── dataplane.go, controlplane.go, announcer.go, bird.go (v1)
-│   │   ├── builder_v2.go          # v2 skeleton: NUMA fan-out, hugepages, ConfigSource
-│   │   ├── patcher.go             # ApplyPatches via strategic merge
-│   │   ├── service_v2.go          # explicit per-NUMA/component Local Services
-│   │   └── *_test.go
-│   ├── events/recorder.go         # SA1019 wrapper for EventRecorder
-│   └── names/const.go
-├── deploy/charts/yanet-operator/  # Helm chart (yanetconfig-v2 template)
-├── deploy/examples/v2alpha1-*.yaml
-├── .github/workflows/test.yml
-├── Makefile
-└── .golangci.yml
-```
-
-## 🧪 Testing Guidelines
-
-### Test File Naming
-- Unit tests: `<package>_test.go` in same directory
-- Integration tests: `<controller>_integration_test.go`
-- Test package: `package <name>` (same as source) or `package <name>_test` (black-box)
-
-### Test Structure
-
-**Unit test (table-driven):**
-```go
-func TestMyFunction(t *testing.T) {
-    tests := []struct {
-        name     string
-        input    string
-        expected string
-    }{
-        {
-            name:     "description",
-            input:    "input",
-            expected: "expected",
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            result := MyFunction(tt.input)
-            if result != tt.expected {
-                t.Errorf("got %v, want %v", result, tt.expected)
-            }
-        })
-    }
-}
-```
-
-**Integration test (Ginkgo/Gomega):**
-```go
-var _ = Describe("MyController", func() {
-    Context("When doing something", func() {
-        It("Should work correctly", func() {
-            obj := &MyObject{}
-            Expect(k8sClient.Create(ctx, obj)).Should(Succeed())
-        })
-    })
-})
-```
-
-### Running Tests
-
-**Docker-based (recommended):**
 ```bash
-make test-docker-unit      # Unit tests only
-make test-docker-race      # With race detector
+make generate                 # DeepCopy generation
+make manifests                # CRDs, admission configuration and RBAC
+make helm-crds                # CRD bundle distributed by Helm
+make fmt
+make test-docker-unit          # API, helpers and manifests
+make test-docker               # Full suite, including envtest
+make test-docker-race          # Full suite with race detection
+make lint
+make vet
+make helm-lint
+make docker-build
 ```
 
-**Local (requires Go 1.26.2 and envtest):**
-```bash
-make test-unit             # Unit tests
-make test-integration      # Integration tests
-make test                  # All tests
-make test-race             # With race detector
-```
+Generated tool installation may require the pinned Go toolchain too. Keep tool
+installation and build execution in Docker when the host toolchain differs.
+Integration tests require envtest assets; the Docker targets install them.
 
-### Adding New Tests
+## API and project structure
 
-1. Create `*_test.go` file in same directory as source
-2. Write table-driven tests
-3. Run locally: `make test-docker-unit`
-4. Check coverage: `go tool cover -func=cover.out`
-5. Ensure coverage doesn't decrease
+The operator manages **YANET2 runtime workloads** through one Kubernetes API,
+`yanet.yanet-platform.io/v1alpha1`:
 
-## 🔧 Makefile Targets
+- `Yanet` / `yanets`: namespaced installation, `boxType`, `nodeSelector`, overrides.
+- `YanetConfig` / `yanetconfigs`: cluster-scoped singleton named `config`, with
+  the component palette, named patches and box types.
 
-### Testing
-- `make test` — all tests with coverage
-- `make test-race` — with race detector
-- `make test-unit` — unit tests only
-- `make test-integration` — integration tests only
-- `make test-docker-unit` — unit tests in Docker
-- `make test-docker-race` — race detector in Docker
+The legacy single-node API and implementation have been removed. There is no
+compatibility dispatcher, alias package or conversion webhook. API version and
+runtime generation are different concepts: `/etc/yanet2` and YANET2 image names
+must not be renamed when changing the operator API.
 
-### Development
-- `make fmt` — format code
-- `make vet` — run go vet
-- `make lint` — run golangci-lint
-- `make build` — build binary
-- `make generate` — generate DeepCopy methods
-- `make manifests` — generate CRDs
+| Path | Responsibility |
+| --- | --- |
+| `api/v1alpha1/` | Types, validation, typed configuration/network attachments |
+| `cmd/main.go` | Scheme, manager, two controllers and two validators |
+| `internal/controller/yanet_controller.go` | Installation watch/reconcile entry point |
+| `internal/controller/yanet_reconciler.go` | Preflight, apply, status and cleanup |
+| `internal/controller/yanetconfig_controller.go` | Shared palette snapshot |
+| `internal/controller/shared_services.go` | Shared Service lifecycle |
+| `internal/helpers/resolve.go` | Resolve palette, box wiring and overrides |
+| `internal/manifests/` | Build, compose, patch and validate Kubernetes resources |
+| `internal/events/recorder.go` | EventRecorder wrapper |
+| `deploy/charts/yanet-operator/` | Helm chart, `yanetconfig` values and dashboard |
+| `deploy/examples/v1alpha1-*.yaml` | Component-based examples |
+| `deploy/tests/webhooks/` | Existing Helm admission/reconcile smoke harness |
 
-## 🤖 GitHub Actions
+## Code and tests
 
-### Workflow: `.github/workflows/test.yml`
+- Read the implementation, callers and existing tests before changing behavior.
+- Make the smallest cohesive change; avoid speculative abstractions and unrelated cleanup.
+- Comments, commits and public documentation must be in English. Use generic
+  hosts/registries in tests, never internal infrastructure names.
+- Use structured key-value logging and propagate actionable errors.
+- Keep ownership, cancellation, side effects and concurrency invariants explicit.
+- Test observable public behavior and realistic failures; do not add tests of
+  private methods, source spelling, a temporary migration or implementation order.
+- For mechanical renames/removals, run the surviving behavior tests and relevant
+  generation/build checks instead of adding change-detector tests.
+- When adding a regression test, observe its expected failure before the fix and
+  success afterward. For already-correct behavior, verify sensitivity with a
+  relevant temporary mutation. Never weaken assertions just to obtain green tests.
+- Use small fixtures, table-driven tests where useful, faithful fakes and real
+  envtest when correctness depends on admission/defaulting/storage semantics.
+- Check returned errors in polling assertions. A failed List must not become an
+  apparently empty set. Avoid sleeps and uncontrolled network dependencies.
+- Follow existing `testing`, Ginkgo/Gomega and fake-client patterns; do not add
+  another assertion framework. Use `t.Helper`/`GinkgoHelper` for setup helpers.
+- Use coverage to find untested paths, not as proof of correctness. Run focused
+  tests first, then affected suites, race detection and required build/lint checks.
+- Report commands, failures and verification gaps. envtest has no Deployment
+  controller or garbage collector and does not establish hardware/runtime behavior.
 
-**Triggers:**
-- Push to: `main`, `master`, `develop`
-- Pull requests to these branches
+References: [Go Test Comments](https://go.dev/wiki/TestComments),
+[Kubernetes CRDs](https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definition-versioning/),
+[Helm CRD lifecycle](https://helm.sh/docs/v3/chart_best_practices/custom_resource_definitions/).
 
-**Jobs:**
-1. **test** — unit + integration tests with race detector
-2. **lint** — golangci-lint
-3. **build** — build operator binary
+## Architecture invariants
 
-**Important:**
-- Go version from `go.mod` (via `go-version-file`)
-- Synchronized with `Dockerfile`
-- Codecov integration for coverage tracking
+### Snapshot and ownership
 
-### Adding New Workflow Steps
+Both reconcilers share one `*MutexYanetConfigSpec`. Read and publish deep copies
+under its mutex; never keep references to mutable protected data. Config watch
+mapping refreshes the snapshot before enqueueing installations. Serialized reads
+and publication prevent an older read from replacing a newer stop flag.
 
-When adding new test targets to Makefile:
-1. Add corresponding step in `.github/workflows/test.yml`
-2. Ensure it uses Docker or has all dependencies
-3. Test locally first
+An installation owns its Deployments/ConfigMaps. `YanetConfig/config` owns shared
+Services. Ownership checks include the controller reference, kind, group and UID;
+labels alone do not establish ownership. Cleanup waits for foreground Deployment
+deletion before releasing the installation finalizer and node claim.
 
-## 🐛 Common Issues
+`stop: true` freezes writes, including deletion and finalizer changes.
+`autoSync: false` reports workload drift without applying it.
+`enabled: false` with `autoSync: true` scales the installation's Deployments to zero.
+Shared Services have a separate lifecycle and remain available for box-type roles.
 
-### Data Races
-**Problem:** Shared state accessed without mutex
-**Solution:**
-```go
-// ❌ BAD
-r.GlobalConfig.Config = config.Spec
+### Three-tier configuration
 
-// ✅ GOOD — DeepCopy under the lock
-r.GlobalConfig.Lock.Lock()
-r.GlobalConfig.Config = *config.Spec.DeepCopy()
-r.GlobalConfig.Lock.Unlock()
-```
+1. `YanetConfig.spec.components`: controlplane, dataplane, optional birdAdapter,
+   ordered atomic dataplane `sidecars[]`, and standalone `operators[].containers[]`.
+2. `spec.patches`: named strategic-merge Deployment fragments, validated by dry-run.
+3. `spec.boxTypes`: named presets connecting components and ordered patch lists.
 
-### v1/v2 split (no dispatcher, no conversion)
-Earlier versions kept v1 and v2 as two **versions** of the same CRD
-(`yanets.yanet-platform.io`) with `v1alpha1` as the storage version. That
-forced an in-process Reconcile dispatcher (gating the v2 branch on
-`spec.boxType != ""`) and silently pruned v2-only fields whenever the API
-server converted a v2 object down to the v1 storage schema — breaking the
-admission webhook (it could no longer find `boxTypes` in any
-`YanetConfig`).
+An installation selects an immutable `boxType`. Overrides are limited to
+container image name/tag, workload/sidecar enablement, controlplane `disabledNuma`
+and dataplane `networks`. Networks omitted/null inherit, a list replaces the
+palette and `[]` clears it. General annotations/resources belong in patches.
 
-The current model splits the two API surfaces into **separate CRDs**:
-- v1: `yanets` + `yanetconfigs` (kinds `Yanet`/`YanetConfig`,
-  `api/v1alpha1` Go package).
-- v2: `yanetsv2` + `yanetconfigsv2` (kinds `YanetV2`/`YanetConfigV2`,
-  `api/v2alpha1` Go package). `YanetConfigV2` is the cluster-scoped singleton
-  named `config`.
+### Rendering and networking
 
-Each CRD has exactly one served+storage version, so the API server never
-converts between them and never prunes fields. There is no Reconcile
-dispatcher:
-- `YanetReconciler` (`yanet_controller.go`) only watches `v1alpha1.Yanet`
-  and handles Node events for AutoDiscovery.
-- `YanetV2Reconciler` (`yanetv2_controller.go`) only watches
-  `v2alpha1.YanetV2` plus Nodes/Pods filtered by the v2 ownership label.
+- Render all node/component plans and validate producer transitions before writes.
+- Controlplane NUMA count is explicit (default 1); `{numa}` in arguments uses the
+  physical index. Disabled domains do not renumber surviving domains.
+- All workloads use private networking. Reject final `hostNetwork: true` and
+  nonzero `hostPort`, including values introduced by patches.
+- Sidecar index `i` reserves `8080+2*i` / `8081+2*i` before selection/enablement.
+  Standalone Pods use 8080/8081; shared Service ports stay 8080/8081.
+- Omitted listeners default to grpc; HTTP-only requires `[http]`; `[]` suppresses
+  the Service, not the reserved slot.
+- Only managed HostPath config enables runtime bind/advertise/named NUMA gateway
+  environment after patches. ConfigMap contents stay opaque. Do not validate
+  application configuration addresses/ports in the operator.
+- Typed networks couple externally managed NADs to matching resource quantities.
+  Reject patches conflicting with the managed Multus annotation/reservations.
+- Preserve role-migration drain and shared-Service cutover guards.
 
-Webhook paths and names are likewise disjoint:
-- `vyanet.kb.io` / `vyanetconfig.kb.io` → `/validate-...-v1alpha1-yanet[config]`
-- `vyanetv2.kb.io` / `vyanetconfigv2.kb.io` → `/validate-...-v2alpha1-yanet[config]v2`
+### Admission and generated files
 
-**Migration note.** If a cluster already has v2 CRs created under the old
-`yanets.yanet-platform.io/v2alpha1` versioned-CRD model, those objects do
-not show up under the new `yanetsv2` CRD automatically — they belong to
-the v1 CRD now. Either delete them before upgrading or re-create them
-against the new CRD. v1 CRs are completely unaffected.
+Use typed `admission.Validator[*Kind]` implementations with dependencies in struct
+fields and register them through `WithValidator`. Avoid module-level clients.
+Register the single API scheme before starting the manager in envtest.
 
-### envtest with multiple API versions
-**Problem:** Ginkgo suites time out on "failed to wait for cache to be synced
-for Kind *v2alpha1.Yanet" when only one API version is registered.
-**Solution:** in [`suite_test.go`](internal/controller/suite_test.go) register
-**both** versions before starting the manager:
-```go
-Expect(yanetv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
-Expect(yanetv2alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
-```
-Wire `GlobalConfig` into `YanetReconciler` and `GlobalConfigV2` into
-`YanetV2Reconciler` separately.
+Do not manually edit these generated artifacts:
 
-### Test failures in Docker
-**Problem:** Integration tests fail with "etcd not found"
-**Solution:** Integration tests require envtest, use `make test-integration` locally
+- `api/v1alpha1/zz_generated.deepcopy.go`
+- `config/crd/bases/*.yaml`
+- `config/rbac/role.yaml`
+- `config/webhook/manifests.yaml`
+- `deploy/charts/yanet-operator/crds/yanet.yaml`
 
-### Coverage decrease
-**Problem:** New code without tests
-**Solution:** Write tests before committing, run `make test-docker-unit`
+Regenerate with `make generate && make manifests && make helm-crds`. Keep the
+handwritten Helm RBAC/webhook templates aligned with generated resources.
 
-## 📝 Code Review Checklist
+## Release
 
-Before submitting PR:
-- [ ] All comments in English
-- [ ] Tests added for new code
-- [ ] `make test-docker-unit` passes
-- [ ] `make test-docker-race` passes (no data races)
-- [ ] `make lint` passes
-- [ ] `make fmt` applied
-- [ ] Coverage >= 70% (check with `go tool cover`)
-- [ ] No references to internal hostnames/registries in tests
-- [ ] GitHub Actions workflow updated if needed
-
-## 🎯 Architecture Patterns
-
-### Shared state (in-memory config snapshot)
-```go
-type MutexYanetConfigSpec struct {
-    Config YanetConfigSpec
-    Lock   sync.Mutex
-}
-
-// Always DeepCopy under the lock when reading or writing.
-r.GlobalConfig.Lock.Lock()
-config := *r.GlobalConfig.Config.DeepCopy()
-r.GlobalConfig.Lock.Unlock()
-```
-The reconciler does **not** API-list YanetConfig on every cycle. A separate
-`YanetConfigReconciler` (one per API version) owns the snapshot and the main
-reconciler reads from it. Same pattern for v1 and v2.
-
-### v1alpha1 — Deployment generation
-- Factory functions: `DeploymentForDataplane`, `DeploymentForControlplane`, etc.
-- Helpers in [`internal/manifests/helpers.go`](internal/manifests/helpers.go).
-
-### v2alpha1 — three-tier model
-1. **`YanetConfig.spec.components`** — palette of available components:
-   `controlplane`, `dataplane`, optional `birdAdapter`, ordered atomic
-   `dataplane.sidecars[]` (one `SidecarSpec` per container), and standalone
-   `operators[].containers[]`. Announcer is an ordinary operator.
-2. **`YanetConfig.spec.patches []NamedPatch`** — strategic-merge fragments of
-   `appsv1.Deployment` stored as `runtime.RawExtension` (validated via dry-run
-   `strategicpatch.StrategicMergePatch(skeleton, patch, appsv1.Deployment{})`
-   in the webhook).
-3. **`YanetConfig.spec.boxTypes []BoxType`** — named presets wiring components
-   to ordered patch lists.
-
-`Yanet` CRs reference a `boxType` by name; per-installation overrides are
-restricted to per-container `image.{name,tag}` (under `containers.<name>`)
-plus workload `enabled`, controlplane `disabledNuma`, and dataplane `networks`.
-Each typed network entry couples an existing NAD with one extended resource;
-the renderer derives matching requests/limits after patches. A per-installation
-network list replaces the palette list, `[]` clears it, and omitted/null inherits.
-Patches must not duplicate the managed Multus annotation or resource quantities.
-Sidecars use separate
-`dataplane.sidecars.<name>` image/enablement overrides. The container key for
-standalone workloads must match the rendered container name;
-operators use the declared `OperatorContainer.name`. No inline patches in
-`Yanet`.
-
-Reconcile flow:
-```
-snapshot YanetConfig → resolve box components → build skeleton Deployments
-→ ApplyPatches(deployment, patchNames, registry) → CreateOrUpdate
-→ report shared Service names in status
-
-YanetConfig reconciler → aggregate namespace × boxType component roles
-→ CreateOrUpdate shared Services owned by YanetConfigV2/config → prune orphans
-```
-
-### Controlplane NUMA fan-out
-Controlplane gets one Deployment per configured NUMA domain on the node.
-Set `spec.components.controlplane.numa` explicitly for multi-NUMA hosts;
-the default is 1. Each box-type NUMA role gets one shared
-`yanet-<boxType>-controlplane-numa{N}` Service with `internalTrafficPolicy=Local`
-and fixed `grpc:8080` / `http:8081` ports.
-
-### Operator Services
-Each operator wired by a box type gets one shared `ClusterIP` Service named
-`yanet-<boxType>-<operator>`, with `internalTrafficPolicy=Local` so in-node
-callers reach the local pod. All v2 workloads use private networking; final
-`hostNetwork: true` and nonzero `hostPort` are rejected. Sidecar index `i` in the
-complete palette reserves `8080+2*i` / `8081+2*i` before enablement/selection.
-Standalone Pods bind `8080/8081`; Service ports always stay `8080/8081`.
-Omitted listeners default to grpc; HTTP-only requires `[http]`. `[]` suppresses
-the Service, not the slot. After patches, only a managed HostPath config enables
-automatic runtime bind, Service advertise and named NUMA gateway env. ConfigMap
-content is opaque. Never add address/port validation of application config data.
-
-### Webhook pattern (controller-runtime ≥ 0.23)
-Use the generic typed validator:
-```go
-type MyValidator struct{ Client client.Client }
-
-var _ admission.Validator[*MyKind] = &MyValidator{}
-
-func SetupMyWebhook(mgr ctrl.Manager) error {
-    return ctrl.NewWebhookManagedBy(mgr, &MyKind{}).
-        WithValidator(&MyValidator{Client: mgr.GetClient()}).
-        Complete()
-}
-```
-Avoid module-level `webhookClient` globals — pass dependencies through the
-validator struct.
-
-### Controller pattern
-- `YanetReconciler` manages v1 `Yanet`; `YanetV2Reconciler` manages `YanetV2`.
-- `YanetConfigReconciler` (v1) and `YanetConfigReconcilerV2` — keep the
-  in-memory snapshots fresh.
-- All reconcilers share `*MutexYanetConfigSpec` via pointer.
-
-## 🔍 Known Limitations
-
-### Acceptable (by design)
-- ✅ `updateWindow` state in memory (not persistent across operator restarts)
-- ✅ AutoDiscovery without retry / without caching (not priority)
-
-### To be implemented (v2 deferred)
-- [ ] Observed/applied palette revision tracking
-- [ ] JSON6902 (`jsonPatch`) — out of scope, only strategic merge is supported
-
-### Done in v2 (was open in v1 era)
-- Global `updateWindow` throttling, conditions and observed generation.
-- Role migration drain guards and shared-Service selector cutover guards.
-- Finalizer cleanup waits for foreground Deployment deletion before releasing
-  the node claim; the global stop switch pauses cleanup too.
-- ✅ Validation webhooks (`vyanet-v2.kb.io`, `vyanetconfig-v2.kb.io`)
-- ✅ Watches: per-version `Yanet`, `Node` (with mapper), `Pod`
-- ✅ Explicit per-component `Service` generation with stable Local endpoints
-
-## 📚 Resources
-
-- [Controller Runtime](https://github.com/kubernetes-sigs/controller-runtime)
-- [Kubebuilder Book](https://book.kubebuilder.io/)
-- [Ginkgo Testing Framework](https://onsi.github.io/ginkgo/)
-- [Gomega Matchers](https://onsi.github.io/gomega/)
-- [golangci-lint](https://golangci-lint.run/)
-
-## 🚨 Critical Files (DO NOT EDIT)
-
-- `api/v1alpha1/zz_generated.deepcopy.go`, `api/v2alpha1/zz_generated.deepcopy.go` — auto-generated
-- `config/crd/bases/*.yaml` — generated by `controller-gen`
-- `config/webhook/manifests.yaml` — generated from kubebuilder markers
-- `deploy/charts/yanet-operator/crds/yanet.yaml` — built from `config/crd` via kustomize
-- Regenerate with `make generate && make manifests && make helm-crds`
-
-## 💡 Tips for AI Assistants
-
-1. **Always check existing tests** before writing new ones
-2. **Follow table-driven test pattern** for consistency
-3. **Use Docker for testing** to avoid environment issues
-4. **Check coverage** after adding tests
-5. **Update documentation** when adding new features
-6. **Keep comments in English** — this is non-negotiable
-7. **Test with race detector** — data races are critical bugs
-8. **Reference line numbers** when discussing code issues
-
-## 🎓 Learning from This Project
-
-### Good Practices Implemented
-- ✅ Comprehensive test suite (87.6% coverage)
-- ✅ Docker-based testing (reproducible)
-- ✅ GitHub Actions CI/CD
-- ✅ Table-driven tests
-- ✅ Race detector in CI
-- ✅ Clear separation of concerns
-
-### Lessons Learned
-- Data races are subtle — always use DeepCopy for shared state
-- Docker-based tests eliminate "works on my machine" issues
-- High test coverage (97.4% for manifests) catches bugs early
-- Integration tests need envtest setup
-- Comments in English improve collaboration
-
----
-
-**Status:** Production-ready, v2alpha1 GA-track with backward compatibility for v1alpha1.
+See `README_RELEASES.md` and `release-notes/v3.0.0.md`. Application and chart
+versions are independent. `release.yml` owns stable publication; PR chart builds
+only produce artifacts. A CRD reset requires a coordinated clean installation,
+not an implicit Helm upgrade or automatic adoption of old objects.

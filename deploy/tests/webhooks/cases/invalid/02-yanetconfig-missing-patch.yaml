@@ -1,0 +1,18 @@
+# v1alpha1 YanetConfig — must be REJECTED.
+# Reason: boxType references a patch name that is not declared in spec.patches.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+spec:
+  components:
+    controlplane:
+      image: {name: controlplane, tag: test}
+    dataplane:
+      image: {name: dataplane, tag: test}
+  boxTypes:
+    - name: release
+      components:
+        controlplane:
+          patches: [does-not-exist]
+        dataplane: {}

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +40,7 @@ func colocatedTargetPort(operator, listener string) string {
 // sidecars use the shared image/config renderer but never become their own
 // Deployment. Sidecar patches address logical names before namespacing;
 // dataplane patches run after composition, with ownership restored afterwards.
-func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent, registry PatchRegistry) ([]*appsv1.Deployment, error) {
+func RenderDeployments(ctx BuildContext, component *helpers.ResolvedComponent, registry PatchRegistry) ([]*appsv1.Deployment, error) {
 	if component.IsColocated() {
 		return nil, nil
 	}
@@ -73,7 +73,7 @@ func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent,
 		if err := ConfigureListeners(deployment, component); err != nil {
 			return nil, err
 		}
-		if err := ConfigureRuntimeNetworkV2(deployment, ctx, component); err != nil {
+		if err := ConfigureRuntimeNetwork(deployment, ctx, component); err != nil {
 			return nil, err
 		}
 		if err := ValidateComposedPod(deployment); err != nil {
@@ -88,7 +88,7 @@ func RenderDeployments(ctx BuildContextV2, component *helpers.ResolvedComponent,
 	return deployments, nil
 }
 
-func composeSidecar(ctx BuildContextV2, deployment *appsv1.Deployment, sidecar *helpers.ResolvedComponent, registry PatchRegistry) error {
+func composeSidecar(ctx BuildContext, deployment *appsv1.Deployment, sidecar *helpers.ResolvedComponent, registry PatchRegistry) error {
 	for _, name := range sidecar.Patches {
 		patch, ok := registry[name]
 		if !ok {
