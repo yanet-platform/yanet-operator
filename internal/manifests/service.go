@@ -54,37 +54,37 @@ func (p ServicePlan) Validate() error {
 		return fmt.Errorf("invalid Service name %q: %s", p.Name, strings.Join(errs, "; "))
 	}
 	if p.BoxType == "" {
-		return fmt.Errorf("Service %q has an empty box type", p.Name)
+		return fmt.Errorf("shared Service %q has an empty box type", p.Name)
 	}
 	if p.Component == "" {
-		return fmt.Errorf("Service %q has an empty component", p.Name)
+		return fmt.Errorf("shared Service %q has an empty component", p.Name)
 	}
 	if len(p.Selector) == 0 {
-		return fmt.Errorf("Service %q has an empty selector", p.Name)
+		return fmt.Errorf("shared Service %q has an empty selector", p.Name)
 	}
 	if len(p.Ports) == 0 {
-		return fmt.Errorf("Service %q has no ports", p.Name)
+		return fmt.Errorf("shared Service %q has no ports", p.Name)
 	}
 	portNames := make(map[string]struct{}, len(p.Ports))
 	portNumbers := make(map[int32]struct{}, len(p.Ports))
 	for i := range p.Ports {
 		port := &p.Ports[i]
 		if port.Name == "" {
-			return fmt.Errorf("Service %q port[%d] has an empty name", p.Name, i)
+			return fmt.Errorf("shared Service %q port[%d] has an empty name", p.Name, i)
 		}
 		if _, duplicate := portNames[port.Name]; duplicate {
-			return fmt.Errorf("Service %q port name %q is duplicated", p.Name, port.Name)
+			return fmt.Errorf("shared Service %q port name %q is duplicated", p.Name, port.Name)
 		}
 		portNames[port.Name] = struct{}{}
 		if port.Port <= 0 || port.Port > 65535 {
-			return fmt.Errorf("Service %q port %d must be in 1..65535", p.Name, port.Port)
+			return fmt.Errorf("shared Service %q port %d must be in 1..65535", p.Name, port.Port)
 		}
 		if _, duplicate := portNumbers[port.Port]; duplicate {
-			return fmt.Errorf("Service %q port %d is duplicated", p.Name, port.Port)
+			return fmt.Errorf("shared Service %q port %d is duplicated", p.Name, port.Port)
 		}
 		portNumbers[port.Port] = struct{}{}
 		if port.TargetPort < 0 || port.TargetPort > 65535 {
-			return fmt.Errorf("Service %q target port %d must be in 0..65535", p.Name, port.TargetPort)
+			return fmt.Errorf("shared Service %q target port %d must be in 0..65535", p.Name, port.TargetPort)
 		}
 	}
 	return nil

@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -61,18 +62,26 @@ func reconcileTwice(t *testing.T, r *YanetReconciler, yanet *yanetv1alpha1.Yanet
 // ---------------------------------------------------------------------------
 
 func TestReconcile_FirstReconcile_AddsFinalizer(t *testing.T) {
+	testContext := context.Background()
+	autoSync := true
 	yanet := &yanetv1alpha1.Yanet{
-		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
-		Spec:       yanetv1alpha1.YanetSpec{BoxType: "release"},
+		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet", UID: "owner"},
+		Spec:       yanetv1alpha1.YanetSpec{BoxType: "release", AutoSync: &autoSync},
 	}
-	r, snap := makeReconcilerEnv(t, yanet)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}}
+	r, snap := makeReconcilerEnv(t, yanet, node)
 	snap.Config = minimalConfig()
 
-	if _, err := r.reconcileYanet(context.Background(), yanet); err != nil {
-		t.Fatalf("err: %v", err)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(yanet)}
+	result, reconcileErr := r.Reconcile(testContext, request)
+	if reconcileErr != nil {
+		t.Fatalf("reconcile: %v", reconcileErr)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > time.Second {
+		t.Errorf("finalizer installation must explicitly schedule a prompt follow-up: %+v", result)
 	}
 	got := &yanetv1alpha1.Yanet{}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, got); err != nil {
+	if err := r.Client.Get(testContext, request.NamespacedName, got); err != nil {
 		t.Fatalf("re-get: %v", err)
 	}
 	found := false
@@ -84,6 +93,36 @@ func TestReconcile_FirstReconcile_AddsFinalizer(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("finalizer %q must be added on first reconcile, got %v", yanetFinalizer, got.ObjectMeta.Finalizers)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := r.List(testContext, deployments, client.InNamespace(yanet.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments.Items) != 0 {
+		t.Fatal("workloads must wait for the finalizer follow-up")
+	}
+	// Drive the scheduled pass without wall-clock sleeps or a fake manager.
+	result, reconcileErr = r.Reconcile(testContext, request)
+	if reconcileErr != nil || result.RequeueAfter != 0 {
+		t.Fatalf("follow-up must converge: result=%+v err=%v", result, reconcileErr)
+	}
+	if err := r.List(testContext, deployments, client.InNamespace(yanet.Namespace)); err != nil {
+		t.Fatal(err)
+	}
+	if len(deployments.Items) != 2 {
+		t.Fatalf("follow-up must create controlplane and dataplane, got %d workloads", len(deployments.Items))
+	}
+	for _, deployment := range deployments.Items {
+		owner := metav1.GetControllerOf(&deployment)
+		if owner == nil || owner.UID != yanet.UID {
+			t.Errorf("workload %s lacks installation ownership: %+v", deployment.Name, owner)
+		}
+	}
+	if err := r.Get(testContext, request.NamespacedName, got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.Sync.Synced) != 2 {
+		t.Fatalf("follow-up must report both workloads synced: %+v", got.Status.Sync)
 	}
 }
 

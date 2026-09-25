@@ -146,9 +146,10 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			logger.Error(err, "failed to add finalizer")
 			return ctrl.Result{}, err
 		}
-		// Continue with reconcile after adding the finalizer; the
-		// next requeue will see the finalizer in place.
-		return ctrl.Result{Requeue: true}, nil
+		// Explicitly schedule the follow-up rather than relying only on the
+		// finalizer update's watch event. A short delay gives the cache time to
+		// observe the write without treating successful initialization as an error.
+		return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
 	}
 
 	// spec.enabled is a "scale-to-zero" switch, not a reconcile
@@ -1040,14 +1041,14 @@ func validateDeploymentOwnership(existing, desired *appsv1.Deployment) error {
 	}
 	existingOwner := metav1.GetControllerOf(existing)
 	if existingOwner == nil {
-		return fmt.Errorf("Deployment %s/%s already exists without the desired controller owner", existing.Namespace, existing.Name)
+		return fmt.Errorf("existing Deployment %s/%s has no desired controller owner", existing.Namespace, existing.Name)
 	}
 	if desiredOwner.UID != "" && existingOwner.UID != desiredOwner.UID {
-		return fmt.Errorf("Deployment %s/%s is controlled by another resource instance", existing.Namespace, existing.Name)
+		return fmt.Errorf("existing Deployment %s/%s is controlled by another resource instance", existing.Namespace, existing.Name)
 	}
 	if existingOwner.APIVersion != desiredOwner.APIVersion ||
 		existingOwner.Kind != desiredOwner.Kind || existingOwner.Name != desiredOwner.Name {
-		return fmt.Errorf("Deployment %s/%s is controlled by another resource", existing.Namespace, existing.Name)
+		return fmt.Errorf("existing Deployment %s/%s is controlled by another resource", existing.Namespace, existing.Name)
 	}
 	return nil
 }
@@ -1059,14 +1060,14 @@ func validateServiceOwnership(existing, desired *corev1.Service) error {
 	}
 	existingOwner := metav1.GetControllerOf(existing)
 	if existingOwner == nil {
-		return fmt.Errorf("Service %s/%s already exists without the desired controller owner", existing.Namespace, existing.Name)
+		return fmt.Errorf("existing Service %s/%s has no desired controller owner", existing.Namespace, existing.Name)
 	}
 	if desiredOwner.UID != "" && existingOwner.UID != desiredOwner.UID {
-		return fmt.Errorf("Service %s/%s is controlled by another resource instance", existing.Namespace, existing.Name)
+		return fmt.Errorf("existing Service %s/%s is controlled by another resource instance", existing.Namespace, existing.Name)
 	}
 	if existingOwner.APIVersion != desiredOwner.APIVersion ||
 		existingOwner.Kind != desiredOwner.Kind || existingOwner.Name != desiredOwner.Name {
-		return fmt.Errorf("Service %s/%s is controlled by another resource", existing.Namespace, existing.Name)
+		return fmt.Errorf("existing Service %s/%s is controlled by another resource", existing.Namespace, existing.Name)
 	}
 	return nil
 }
