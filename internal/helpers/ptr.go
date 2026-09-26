@@ -35,7 +35,7 @@ func PtrFalse() *bool {
 
 // BoolValue dereferences a *bool, returning def when the pointer is nil.
 // Use this when reading optional Enabled / HostIPC / HostNetwork flags
-// from the v2alpha1 API.
+// from the v1alpha1 API.
 func BoolValue(p *bool, def bool) bool {
 	if p == nil {
 		return def

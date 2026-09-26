@@ -19,7 +19,7 @@ package manifests
 import (
 	"testing"
 
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,8 +51,8 @@ func makeBaseDeployment() *appsv1.Deployment {
 	}
 }
 
-func patch(name, raw string) yanetv2alpha1.NamedPatch {
-	return yanetv2alpha1.NamedPatch{
+func patch(name, raw string) yanetv1alpha1.NamedPatch {
+	return yanetv1alpha1.NamedPatch{
 		Name:  name,
 		Patch: runtime.RawExtension{Raw: []byte(raw)},
 	}
@@ -79,7 +79,7 @@ func TestApplyPatches_NilDeployment(t *testing.T) {
 
 func TestApplyPatches_SinglePatch_AddsAnnotation(t *testing.T) {
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("telegraf", `{"spec":{"template":{"metadata":{"annotations":{"telegraf.influxdata.com/ports":"8080"}}}}}`),
 	})
 	if err := ApplyPatches(d, []string{"telegraf"}, reg); err != nil {
@@ -96,7 +96,7 @@ func TestApplyPatches_SinglePatch_AddsAnnotation(t *testing.T) {
 
 func TestApplyPatches_ContainerMergeByName(t *testing.T) {
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("cp-resources", `{"spec":{"template":{"spec":{"containers":[{"name":"controlplane","resources":{"limits":{"cpu":"6","memory":"128Gi"}}}]}}}}`),
 	})
 	if err := ApplyPatches(d, []string{"cp-resources"}, reg); err != nil {
@@ -116,7 +116,7 @@ func TestApplyPatches_ContainerMergeByName(t *testing.T) {
 
 func TestApplyPatches_OrderMatters(t *testing.T) {
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("first", `{"spec":{"template":{"metadata":{"annotations":{"k":"first"}}}}}`),
 		patch("second", `{"spec":{"template":{"metadata":{"annotations":{"k":"second"}}}}}`),
 	})
@@ -141,7 +141,7 @@ func TestApplyPatches_OrderMatters(t *testing.T) {
 
 func TestApplyPatches_MultiplePatches_Compose(t *testing.T) {
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("telegraf", `{"spec":{"template":{"metadata":{"annotations":{"telegraf":"on"}}}}}`),
 		patch("checkpointer", `{"spec":{"template":{"metadata":{"annotations":{"checkpointer":"on"}}}}}`),
 		patch("hostipc", `{"spec":{"template":{"spec":{"hostIPC":true}}}}`),
@@ -169,7 +169,7 @@ func TestApplyPatches_MissingPatch(t *testing.T) {
 
 func TestApplyPatches_EmptyPatch(t *testing.T) {
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		{Name: "empty", Patch: runtime.RawExtension{}},
 	})
 	if err := ApplyPatches(d, []string{"empty"}, reg); err == nil {
@@ -179,7 +179,7 @@ func TestApplyPatches_EmptyPatch(t *testing.T) {
 
 func TestApplyPatches_InvalidJSON(t *testing.T) {
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("bad", `{not json`),
 	})
 	if err := ApplyPatches(d, []string{"bad"}, reg); err == nil {
@@ -193,7 +193,7 @@ func TestApplyPatches_NonDeploymentField_IsTolerated(t *testing.T) {
 	// json.Unmarshal back into appsv1.Deployment. The function
 	// should still succeed (no error from StrategicMergePatch).
 	d := makeBaseDeployment()
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("bogus-field", `{"spec":{"template":{"metadata":{"annotations":{"k":"v"}}}},"bogusTopLevel":"x"}`),
 	})
 	if err := ApplyPatches(d, []string{"bogus-field"}, reg); err != nil {
@@ -205,7 +205,7 @@ func TestApplyPatches_NonDeploymentField_IsTolerated(t *testing.T) {
 }
 
 func TestNewPatchRegistry_DuplicateLastWins(t *testing.T) {
-	reg := NewPatchRegistry([]yanetv2alpha1.NamedPatch{
+	reg := NewPatchRegistry([]yanetv1alpha1.NamedPatch{
 		patch("dup", `{"a":1}`),
 		patch("dup", `{"a":2}`),
 	})

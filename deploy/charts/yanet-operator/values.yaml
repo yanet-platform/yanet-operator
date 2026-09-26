@@ -10,6 +10,7 @@ nameOverride: ""
 fullnameOverride: "yanet-operator"
 
 serviceAccount:
+  create: true
   name: "controller-manager"
 
 podAnnotations: {}
@@ -76,20 +77,12 @@ grafana:
     # Annotations to add to the ConfigMap
     annotations: {}
 
-yanetconfig:
-  spec:
-    autodiscovery:
-      enable: false
-      namespace: yanet
-      registry: dockerhub.io
-    stop: false
-
 extraManifests: {}
 
 # ============================================================
-# v2alpha1 cluster-wide YanetConfig (optional).
+# v1alpha1 cluster-wide YanetConfig (optional).
 #
-# When provided, the chart renders templates/yanetconfig-v2.yaml
+# When provided, the chart renders templates/yanetconfig.yaml
 # with this body. The shape mirrors the final model:
 #   spec.components — palette of components
 #   spec.patches    — named registry of strategic-merge fragments
@@ -97,10 +90,10 @@ extraManifests: {}
 #
 # Comment out / unset to omit the YanetConfig (e.g. if you manage
 # it through GitOps or applies it manually).
-# Chart-managed YanetConfigV2 requires webhook.failurePolicy=Ignore because the
+# Chart-managed YanetConfig requires webhook.failurePolicy=Ignore because the
 # webhook certificate/CA job completes after Helm's main resource phase.
 # ============================================================
-yanetconfigV2: {}
+yanetconfig: {}
 #  spec:
 #    stop: false
 #    updateWindow: 60

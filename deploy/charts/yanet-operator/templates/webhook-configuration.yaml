@@ -3,14 +3,13 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: {{ include "yanet-operator.fullname" . }}-validating-webhook-configuration
+  {{- if .Values.webhook.certManager.enabled }}
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "yanet-operator.fullname" . }}-webhook-cert
+  {{- end }}
   labels:
     {{- include "yanet-operator.labels" . | nindent 4 }}
-# v1 and v2 now live in disjoint CRDs (yanets / yanetsv2,
-# yanetconfigs / yanetconfigsv2) so each webhook rule targets a
-# different resource and there is no overlap. matchPolicy: Exact is
-# kept defensively in case of future version additions.
 webhooks:
-# ---------- v1alpha1 ----------
 - admissionReviewVersions:
   - v1
   clientConfig:
@@ -20,7 +19,7 @@ webhooks:
       path: /validate-yanet-yanet-platform-io-v1alpha1-yanet
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   matchPolicy: Exact
-  name: validate.yanet.yanet-platform.io
+  name: vyanet.kb.io
   rules:
   - apiGroups:
     - yanet.yanet-platform.io
@@ -41,7 +40,7 @@ webhooks:
       path: /validate-yanet-yanet-platform-io-v1alpha1-yanetconfig
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   matchPolicy: Exact
-  name: validate.yanetconfig.yanet-platform.io
+  name: vyanetconfig.kb.io
   rules:
   - apiGroups:
     - yanet.yanet-platform.io
@@ -52,48 +51,5 @@ webhooks:
     - UPDATE
     resources:
     - yanetconfigs
-  sideEffects: None
-# ---------- v2alpha1 ----------
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: {{ include "yanet-operator.fullname" . }}-webhook-service
-      namespace: {{ .Release.Namespace }}
-      path: /validate-yanet-yanet-platform-io-v2alpha1-yanetv2
-  failurePolicy: {{ .Values.webhook.failurePolicy }}
-  matchPolicy: Exact
-  name: vyanetv2.kb.io
-  rules:
-  - apiGroups:
-    - yanet.yanet-platform.io
-    apiVersions:
-    - v2alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - yanetsv2
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  clientConfig:
-    service:
-      name: {{ include "yanet-operator.fullname" . }}-webhook-service
-      namespace: {{ .Release.Namespace }}
-      path: /validate-yanet-yanet-platform-io-v2alpha1-yanetconfigv2
-  failurePolicy: {{ .Values.webhook.failurePolicy }}
-  matchPolicy: Exact
-  name: vyanetconfigv2.kb.io
-  rules:
-  - apiGroups:
-    - yanet.yanet-platform.io
-    apiVersions:
-    - v2alpha1
-    operations:
-    - CREATE
-    - UPDATE
-    resources:
-    - yanetconfigsv2
   sideEffects: None
 {{- end }}

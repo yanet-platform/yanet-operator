@@ -1,0 +1,220 @@
+# Illustrative images: replace :example with independently tested releases.
+# Prepare host configs and a runtime supporting YANET_KUBERNETES_GATEWAYS first.
+# ConfigMap content is opaque. Only managed HostPath configs receive network env.
+# No runtime Kubernetes probes or blocking KNI waits: readiness is application-owned.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+spec:
+  stop: false
+  updateWindow: 60
+  images:
+    registry: ghcr.io
+    prefix: yanet-platform
+    pullPolicy: IfNotPresent
+  components:
+    controlplane:
+      image: {name: yanet2/controlplane, tag: example}
+      numa: 2
+      config:
+        hostPath: /etc/yanet2
+        args: [-c, '/etc/yanet2/controlplane.d/numa{numa}.yaml']
+    dataplane:
+      image: {name: yanet2/dataplane, tag: example}
+      hugepages: {size: 1Gi, count: 8}
+      # Requires an externally managed NAD and matching device-plugin resource.
+      networks:
+        - {name: yanet-pf, interface: eth2, resourceName: yanet-platform.io/pf}
+        - {name: yanet-pf, interface: eth4, resourceName: yanet-platform.io/pf}
+      config:
+        hostPath: /etc/yanet2
+        args: [/etc/yanet2/dataplane.yaml]
+      # This complete ordered list owns slots and startup order atomically.
+      # Disabled, unwired and listeners: [] entries retain their slots.
+      sidecars:
+        - name: bird # slot 0: grpc 8080, http 8081
+          image: {name: bird, tag: example}
+          listeners: []
+          config:
+            hostPath: /etc/bird
+            mountPath: /etc/bird
+        - name: neighbour-sidecar # slot 1: grpc 8082, http 8083
+          image: {name: yanet2/neighbour-sidecar, tag: example}
+          listeners: [] # Bind/gateway env still applies; no automatic Service.
+          config:
+            hostPath: /etc/yanet2
+            args: [-c, /etc/yanet2/yanet-neighbour-sidecar.yaml]
+        - name: netconfig # slot 2: grpc 8084, http 8085
+          image: {name: netconfig, tag: example}
+          listeners: []
+          config:
+            inline: |
+              source: netplan
+              netplan_path: /etc/netplan/00-interfaces.yaml
+            mountPath: /etc/netconfig
+            args: [-config, /etc/netconfig/config]
+    birdAdapter:
+      image: {name: yanet2/bird-adapter, tag: example}
+      config:
+        hostPath: /etc/yanet2
+        args: [server, -c, /etc/yanet2/bird-adapter.yaml]
+    operators:
+      - name: announcer
+        containers:
+          - name: announcer
+            image: {name: announcer, tag: example}
+            config:
+              # Configure direct readiness clients in operators[] in this file.
+              hostPath: /etc/yanet2
+              args: [-c, /etc/yanet2/yanet-announcer.yaml]
+      - name: route
+        containers:
+          - name: route
+            image: {name: yanet2/route-operator, tag: example}
+            config:
+              # Gateways must have physical names numa0/numa1; retain their TLS.
+              # Disable local neighbour monitoring when using neighbour-sidecar.
+              hostPath: /etc/yanet2
+              args: [-c, /etc/yanet2/route.yaml]
+      - name: metrics
+        listeners: [http] # Explicit; the name has no protocol-specific meaning.
+        containers:
+          - name: metrics
+            image: {name: metrics, tag: example}
+            config:
+              # collection.modules[] uses external Service ports, not Pod offsets.
+              hostPath: /etc/yanet2
+              args: [-c, /etc/yanet2/metrics.yaml]
+  patches:
+    - name: tolerations
+      patch:
+        spec:
+          template:
+            spec:
+              tolerations:
+                - {operator: Exists, effect: NoSchedule}
+                - {operator: Exists, effect: NoExecute}
+    - name: cp-resources
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controlplane
+                  resources:
+                    requests: {cpu: '1', memory: 16Gi}
+                    limits: {cpu: '6', memory: 128Gi}
+    - name: dp-resources
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: dataplane
+                  resources:
+                    limits: {memory: 32Gi}
+    - name: firewall-max-memory
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: dataplane
+                  resources:
+                    limits: {memory: 64Gi}
+    # Sidecar patches address logical containers before composition/namespacing.
+    - name: bird-runtime
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: bird
+                  securityContext:
+                    capabilities:
+                      add: [NET_ADMIN, NET_RAW, NET_BIND_SERVICE]
+                  ports:
+                    - {name: bgp, containerPort: 179, protocol: TCP}
+                  volumeMounts:
+                    - {name: bird-socket, mountPath: /run/bird}
+              volumes:
+                - name: bird-socket
+                  hostPath: {path: /run/bird, type: DirectoryOrCreate}
+    - name: adapter-socket
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: bird-adapter
+                  volumeMounts:
+                    - {name: bird-socket, mountPath: /run/bird}
+              volumes:
+                - name: bird-socket
+                  hostPath: {path: /run/bird, type: DirectoryOrCreate}
+    - name: announcer-socket
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: announcer
+                  volumeMounts:
+                    - {name: bird-socket, mountPath: /run/bird}
+              volumes:
+                - name: bird-socket
+                  hostPath: {path: /run/bird, type: DirectoryOrCreate}
+    - name: netconfig-runtime
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: netconfig
+                  securityContext:
+                    privileged: true # Netlink and per-interface IPv6 sysctls.
+                  volumeMounts:
+                    - {name: netplan, mountPath: /etc/netplan/00-interfaces.yaml, readOnly: true}
+              volumes:
+                - name: netplan
+                  hostPath: {path: /etc/netplan/00-interfaces.yaml, type: File}
+  boxTypes:
+    - name: release
+      components:
+        controlplane: {patches: [tolerations, cp-resources]}
+        dataplane:
+          patches: [tolerations, dp-resources]
+          sidecars:
+            bird: {patches: [bird-runtime]}
+            neighbour-sidecar: {}
+            netconfig: {patches: [netconfig-runtime]}
+      operators:
+        announcer: {patches: [tolerations, announcer-socket]}
+        metrics: {patches: [tolerations]}
+    - name: balancer
+      components:
+        controlplane: {patches: [tolerations, cp-resources]}
+        dataplane:
+          patches: [tolerations, dp-resources]
+          sidecars:
+            bird: {patches: [bird-runtime]}
+            neighbour-sidecar: {}
+            netconfig: {patches: [netconfig-runtime]}
+        birdAdapter: {patches: [tolerations, adapter-socket]}
+      operators:
+        route: {patches: [tolerations]}
+        metrics: {patches: [tolerations]}
+    - name: firewall
+      components:
+        controlplane: {patches: [tolerations, cp-resources]}
+        dataplane:
+          patches: [tolerations, dp-resources, firewall-max-memory]
+          sidecars:
+            bird: {patches: [bird-runtime]}
+            neighbour-sidecar: {}
+            netconfig: {patches: [netconfig-runtime]}
+      operators:
+        announcer: {patches: [tolerations, announcer-socket]}
+        route: {patches: [tolerations]}
+        metrics: {patches: [tolerations]}

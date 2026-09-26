@@ -36,7 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/controller"
 	"github.com/yanet-platform/yanet-operator/internal/events"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -52,7 +51,6 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(yanetv1alpha1.AddToScheme(scheme))
-	utilruntime.Must(yanetv2alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -63,9 +61,11 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var enableWebhook bool
+	var webhookPort int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableWebhook, "webhook-enabled", true, "Enable webhook server.")
+	flag.IntVar(&webhookPort, "webhook-port", 9443, "The port the webhook server listens on.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
 			"Enabling this ensures only one active controller manager when "+
@@ -103,6 +103,7 @@ func main() {
 	}
 
 	webhookServer := webhook.NewServer(webhook.Options{
+		Port:    webhookPort,
 		TLSOpts: tlsOpts,
 	})
 
@@ -135,8 +136,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// v1alpha1 wiring: legacy Yanet/YanetConfig CRDs
-	// (yanets.yanet-platform.io / yanetconfigs.yanet-platform.io).
+	// Both controllers share the cluster-wide component palette snapshot.
 	GlobalConfig := yanetv1alpha1.MutexYanetConfigSpec{}
 	if err = (&controller.YanetReconciler{
 		Client:       mgr.GetClient(),
@@ -156,44 +156,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// v2alpha1 wiring: independent YanetV2/YanetConfigV2 CRDs
-	// (yanetsv2.yanet-platform.io / yanetconfigsv2.yanet-platform.io).
-	// Wholly disjoint from the v1 path — no dispatcher, no shared
-	// state, separate Reconciler and snapshot.
-	GlobalConfigV2 := yanetv2alpha1.MutexYanetConfigSpec{}
-	if err = (&controller.YanetV2Reconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Recorder:       events.NewRecorderFor(mgr, "yanetv2-controller"),
-		GlobalConfigV2: &GlobalConfigV2,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "YanetV2")
-		os.Exit(1)
-	}
-	if err = (&controller.YanetConfigReconcilerV2{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		GlobalConfigV2: &GlobalConfigV2,
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "YanetConfigV2")
-		os.Exit(1)
-	}
-
 	if enableWebhook {
-		if err = (&yanetv1alpha1.Yanet{}).SetupWebhookWithManager(mgr); err != nil {
+		if err = yanetv1alpha1.SetupYanetWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Yanet")
 			os.Exit(1)
 		}
-		if err = (&yanetv1alpha1.YanetConfig{}).SetupWebhookWithManager(mgr); err != nil {
+		if err = yanetv1alpha1.SetupYanetConfigWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "YanetConfig")
-			os.Exit(1)
-		}
-		if err = yanetv2alpha1.SetupYanetWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "YanetV2")
-			os.Exit(1)
-		}
-		if err = yanetv2alpha1.SetupYanetConfigWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "YanetConfigV2")
 			os.Exit(1)
 		}
 	}

@@ -38,7 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -48,11 +47,9 @@ import (
 var cfg *rest.Config
 var k8sClient client.Client
 var testEnv *envtest.Environment
-var reconciler *YanetReconciler
 var ctx context.Context
 var cancel context.CancelFunc
 var globalConfig *yanetv1alpha1.MutexYanetConfigSpec
-var globalConfigV2 *yanetv2alpha1.MutexYanetConfigSpec
 var managerDone chan error
 
 func TestControllers(t *testing.T) {
@@ -87,17 +84,11 @@ var _ = BeforeSuite(func() {
 	err = yanetv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = yanetv2alpha1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
 	//+kubebuilder:scaffold:scheme
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
-
-	// Create shared GlobalConfig instance
-	globalConfig = &yanetv1alpha1.MutexYanetConfigSpec{}
 
 	// Start manager. Webhook server has to bind to the host:port that
 	// envtest configured for the ValidatingWebhookConfiguration, and use
@@ -114,13 +105,12 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).ToNot(HaveOccurred())
 
-	// Register validating webhooks (v1alpha1 + v2alpha1).
-	Expect((&yanetv1alpha1.Yanet{}).SetupWebhookWithManager(k8sManager)).To(Succeed())
-	Expect((&yanetv1alpha1.YanetConfig{}).SetupWebhookWithManager(k8sManager)).To(Succeed())
-	Expect(yanetv2alpha1.SetupYanetWebhookWithManager(k8sManager)).To(Succeed())
-	Expect(yanetv2alpha1.SetupYanetConfigWebhookWithManager(k8sManager)).To(Succeed())
+	// Register the validating webhooks used by the installed CRDs.
+	Expect(yanetv1alpha1.SetupYanetWebhookWithManager(k8sManager)).To(Succeed())
+	Expect(yanetv1alpha1.SetupYanetConfigWebhookWithManager(k8sManager)).To(Succeed())
 
-	// v1alpha1 reconcilers
+	// Wire the installation and palette controllers to the same snapshot.
+	globalConfig = &yanetv1alpha1.MutexYanetConfigSpec{}
 	err = (&YanetReconciler{
 		Client:       k8sManager.GetClient(),
 		Scheme:       k8sManager.GetScheme(),
@@ -133,23 +123,6 @@ var _ = BeforeSuite(func() {
 		Client:       k8sManager.GetClient(),
 		Scheme:       k8sManager.GetScheme(),
 		GlobalConfig: globalConfig,
-	}).SetupWithManager(k8sManager)
-	Expect(err).ToNot(HaveOccurred())
-
-	// v2alpha1 reconcilers — fully independent of v1.
-	globalConfigV2 = &yanetv2alpha1.MutexYanetConfigSpec{}
-	err = (&YanetV2Reconciler{
-		Client:         k8sManager.GetClient(),
-		Scheme:         k8sManager.GetScheme(),
-		Recorder:       k8sManager.GetEventRecorder("yanetv2-controller"),
-		GlobalConfigV2: globalConfigV2,
-	}).SetupWithManager(k8sManager)
-	Expect(err).ToNot(HaveOccurred())
-
-	err = (&YanetConfigReconcilerV2{
-		Client:         k8sManager.GetClient(),
-		Scheme:         k8sManager.GetScheme(),
-		GlobalConfigV2: globalConfigV2,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -173,13 +146,6 @@ var _ = BeforeSuite(func() {
 		return nil
 	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 
-	// Initialize v1 reconciler for direct method calls in tests
-	reconciler = &YanetReconciler{
-		Client:       k8sManager.GetClient(),
-		Scheme:       k8sManager.GetScheme(),
-		GlobalConfig: globalConfig,
-	}
-	_ = globalConfigV2 // reserved for upcoming v2-direct-call tests
 })
 
 var _ = AfterSuite(func() {

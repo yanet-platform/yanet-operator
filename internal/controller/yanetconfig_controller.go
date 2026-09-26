@@ -18,20 +18,26 @@ package controller
 
 import (
 	"context"
-	"time"
+	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 )
 
-// YanetConfigReconciler reconciles a YanetConfigV2 object
+// YanetConfigReconciler watches v1alpha1.YanetConfig and keeps an
+// in-memory deep-copy of the latest seen Spec in GlobalConfig.
 type YanetConfigReconciler struct {
 	client.Client
+	APIReader    client.Reader
 	Scheme       *runtime.Scheme
 	GlobalConfig *yanetv1alpha1.MutexYanetConfigSpec
 }
@@ -39,54 +45,80 @@ type YanetConfigReconciler struct {
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigs,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigs/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigs/finalizers,verbs=update
+//+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the YanetConfigV2 object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.15.0/pkg/reconcile
+// Reconcile updates the singleton in-memory snapshot whenever the
+// cluster-scoped YanetConfig changes.
 func (r *YanetConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	startTime := time.Now()
-	logger := log.FromContext(ctx)
-	logger.Info("Reconcile config loop called", "namespacedName", req.NamespacedName)
+	logger := log.FromContext(ctx).WithValues("yanetconfig", req.NamespacedName)
 
-	config := &yanetv1alpha1.YanetConfig{}
-	err := r.Client.Get(ctx, req.NamespacedName, config)
+	cfg, err := refreshYanetConfigSnapshot(ctx, r.Client, r.GlobalConfig)
 	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("YanetConfigV2 resource not found, ignoring since object must be deleted",
-				"namespacedName", req.NamespacedName)
-			yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "not_found").Inc()
-		} else {
-			logger.Error(err, "Failed to get YanetConfigV2 object")
-			yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "error").Inc()
-			return ctrl.Result{}, err
-		}
-	} else {
-		logger.Info("Successfully found YanetConfigV2 object", "namespacedName", req.NamespacedName)
-		logger.V(1).Info("Updating GlobalConfig with new config", "config", config.Spec)
-		// TODO: add config validator
-		r.GlobalConfig.Lock.Lock()
-		r.GlobalConfig.Config = *config.Spec.DeepCopy()
-		r.GlobalConfig.Lock.Unlock()
-
-		yanetConfigReconcileTotal.WithLabelValues(req.Name, req.Namespace, "success").Inc()
+		logger.Error(err, "failed to refresh YanetConfig snapshot")
+		return ctrl.Result{}, err
+	}
+	if cfg == nil {
+		logger.Info("YanetConfig snapshot cleared; singleton does not exist")
+		return ctrl.Result{}, nil
 	}
 
-	// Record reconciliation duration
-	duration := time.Since(startTime).Seconds()
-	yanetConfigReconcileDuration.WithLabelValues(req.Name, req.Namespace).Observe(duration)
-
+	logger.V(1).Info("YanetConfig snapshot updated",
+		"boxTypes", len(cfg.Spec.BoxTypes),
+		"patches", len(cfg.Spec.Patches),
+		"operators", len(cfg.Spec.Components.Operators),
+	)
+	if cfg.Spec.Stop {
+		logger.Info("YanetConfig.spec.stop is true, skipping shared Service reconcile")
+		return ctrl.Result{}, nil
+	}
+	if err := r.reconcileSharedServices(ctx, cfg, logger); err != nil {
+		logger.Error(err, "failed to reconcile shared Services")
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+func refreshYanetConfigSnapshot(
+	ctx context.Context,
+	c client.Client,
+	snapshot *yanetv1alpha1.MutexYanetConfigSpec,
+) (*yanetv1alpha1.YanetConfig, error) {
+	if snapshot == nil {
+		return nil, fmt.Errorf("GlobalConfig is nil")
+	}
+	// Both the config reconciler and the Yanet watch mapper refresh this
+	// snapshot. Serialize the read as well as publication so an older in-flight
+	// read cannot overwrite a newer config (including the global stop flag).
+	snapshot.Lock.Lock()
+	defer snapshot.Lock.Unlock()
+	cfg := &yanetv1alpha1.YanetConfig{}
+	err := c.Get(ctx, client.ObjectKey{Name: yanetv1alpha1.YanetConfigName}, cfg)
+	if err != nil && !apierrors.IsNotFound(err) {
+		snapshot.Config = yanetv1alpha1.YanetConfigSpec{}
+		return nil, err
+	}
+
+	if apierrors.IsNotFound(err) {
+		snapshot.Config = yanetv1alpha1.YanetConfigSpec{}
+		return nil, nil
+	}
+	snapshot.Config = *cfg.Spec.DeepCopy()
+	return cfg, nil
+}
+
+// SetupWithManager wires the controller to watch v1alpha1.YanetConfig.
 func (r *YanetConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&yanetv1alpha1.YanetConfig{}).
+		Watches(&yanetv1alpha1.Yanet{}, handler.EnqueueRequestsFromMapFunc(enqueueYanetConfigSingleton)).
+		Owns(&corev1.Service{}).
 		Complete(r)
+}
+
+func enqueueYanetConfigSingleton(context.Context, client.Object) []reconcile.Request {
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: yanetv1alpha1.YanetConfigName},
+	}}
 }

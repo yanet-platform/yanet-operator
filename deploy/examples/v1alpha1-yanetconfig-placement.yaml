@@ -1,0 +1,49 @@
+# Each sidecar is one container. Standalone operators may contain several.
+# The complete sidecars list is ordered and atomic for server-side apply.
+# Images are illustrative; host configs require compatible runtime releases.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+spec:
+  components:
+    controlplane:
+      image: {name: controlplane, tag: example}
+    dataplane:
+      image: {name: dataplane, tag: example}
+      sidecars:
+        - name: client
+          image: {name: client, tag: example}
+          listeners: [] # Reserves 8080/8081 without exposing a Service.
+        - name: monitor
+          image: {name: monitor, tag: example}
+          # Default grpc: bind 8082; Service/advertise always use 8080.
+          config: {hostPath: /etc/monitor}
+        - name: metrics-agent
+          image: {name: metrics-agent, tag: example}
+          listeners: [http] # Bind 8085; external Service port 8081.
+          config: {hostPath: /etc/metrics-agent}
+    operators:
+      - name: route
+        containers:
+          - name: worker
+            image: {name: route, tag: example}
+  boxTypes:
+    - name: private
+      components:
+        controlplane: {}
+        dataplane:
+          sidecars:
+            client: {}
+            monitor: {}
+            metrics-agent: {}
+      operators:
+        route: {}
+    - name: reduced
+      components:
+        controlplane: {}
+        dataplane:
+          sidecars:
+            monitor: {} # Still slot 1, even though client is not selected.
+      operators:
+        route: {}

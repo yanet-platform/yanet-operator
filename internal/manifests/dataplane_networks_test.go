@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -94,7 +94,7 @@ func TestDataplaneNetworksRejectPatchConflicts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			deployments, err := RenderDeployments(ctxV2(), component, NewPatchRegistry(config.Patches))
+			deployments, err := RenderDeployments(ctx(), component, NewPatchRegistry(config.Patches))
 			if err == nil || !strings.Contains(err.Error(), "conflict") || len(deployments) != 0 {
 				t.Fatalf("conflicting network patch rendered: %v / %v", deployments, err)
 			}
@@ -126,7 +126,7 @@ func TestDataplaneNetworksRejectNamespaceAliasConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RenderDeployments(ctxV2(), component, nil); err == nil {
+	if _, err := RenderDeployments(ctx(), component, nil); err == nil {
 		t.Fatal("same effective NAD advertised with two resource identities")
 	}
 }

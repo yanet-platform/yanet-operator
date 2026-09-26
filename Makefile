@@ -84,6 +84,10 @@ helm-lint: ## Lint and template Helm chart.
 	helm lint deploy/charts/yanet-operator
 	helm template test deploy/charts/yanet-operator --debug >/dev/null
 
+.PHONY: test-packaging
+test-packaging: kustomize ## Test rendered Helm/Kustomize wiring (Python 3 + PyYAML required).
+	KUSTOMIZE=$(KUSTOMIZE) python3 deploy/tests/test_packaging.py -v $(PACKAGING_TEST_ARGS)
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	$(call docker-go,go fmt ./...)
@@ -119,7 +123,7 @@ test-docker-race: ## Run tests with race detector in Docker container.
 .PHONY: test-docker-unit
 test-docker-unit: ## Run unit tests in Docker container.
 	$(call docker-go,go mod download && \
-		go test -v ./internal/helpers/... ./internal/manifests/... -coverprofile cover-unit.out)
+		go test -v ./api/... ./internal/helpers/... ./internal/manifests/... -coverprofile cover-unit.out)
 
 .PHONY: test-docker-integration
 test-docker-integration: ## Run integration tests in Docker container.

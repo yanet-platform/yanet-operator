@@ -3,7 +3,7 @@
 #
 # Assumes the chart is already installed in namespace $NS with webhook.enabled=true.
 # Verifies:
-#   1. All four webhook paths are registered on the operator (v1+v2, Yanet+YanetConfig).
+#   1. Both webhook paths are registered on the operator (Yanet and YanetConfig).
 #   2. Every "valid" CR is accepted by the webhook AND, once reconciled, the
 #      operator generates the expected Deployments (all with replicas=0 because
 #      every component has enabled=false).
@@ -34,8 +34,7 @@ green() { printf '\033[32m%s\033[0m\n' "$*"; }
 blue()  { printf '\033[34m%s\033[0m\n' "$*"; }
 fail()  { red "FAIL: $*"; exit 1; }
 
-V1_NAME="$NODE_NAME"
-V2_NAME="yanet-v2-${NODE_NAME}"
+YANET_NAME="yanet-${NODE_NAME}"
 
 # --------------------------------------------------------------------
 # 1) Webhook registration check (operator side).
@@ -47,9 +46,7 @@ POD="$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=yanet-operator -o json
 LOGS="$(kubectl -n "$NS" logs "$POD" --tail=-1)"
 for path in \
     /validate-yanet-yanet-platform-io-v1alpha1-yanet \
-    /validate-yanet-yanet-platform-io-v1alpha1-yanetconfig \
-    /validate-yanet-yanet-platform-io-v2alpha1-yanetv2 \
-    /validate-yanet-yanet-platform-io-v2alpha1-yanetconfigv2; do
+    /validate-yanet-yanet-platform-io-v1alpha1-yanetconfig; do
     if ! grep -q "Registering webhook.*${path}" <<<"$LOGS"; then
         echo "$LOGS" | tail -100
         fail "webhook path ${path} was not registered by the operator"
@@ -63,13 +60,9 @@ done
 blue "[2/5] Preparing valid CRs (node=$NODE_NAME)..."
 cp -r "$VALID_DIR"/*.yaml "$WORK"/
 
-# v1 Yanet — set spec.nodename to NODE_NAME, rename CR to NODE_NAME
-sed -i "s|name: test-node-v1.example.com|name: ${V1_NAME}|; s|nodename: test-node-v1.example.com|nodename: ${NODE_NAME}|" \
-    "$WORK"/02-yanet-v1-valid.yaml
-
-# v2 Yanet — drop the unreachable nodeSelector so it matches every node,
+# Yanet — drop the unreachable nodeSelector so it matches every node,
 # and rename the CR to a deterministic value for assertions.
-python3 - "$WORK"/04-yanet-v2-valid.yaml "$V2_NAME" <<'PY'
+python3 - "$WORK"/02-yanet-valid.yaml "$YANET_NAME" <<'PY'
 import sys, re, pathlib
 path = pathlib.Path(sys.argv[1])
 new_name = sys.argv[2]
@@ -125,33 +118,18 @@ done
 # --------------------------------------------------------------------
 blue "[5/5] Waiting for reconciler to render Deployments..."
 
-# Expected v1 Deployments — one per enabled component (all four enabled=false
-# → replicas=0 but the Deployment object still exists).
-V1_EXPECTED=(
-    "controlplane-${V1_NAME}"
-    "dataplane-${V1_NAME}"
-    "bird-${V1_NAME}"
-    "announcer-${V1_NAME}"
-)
-
-# v2 Deployments use a short hash of the node name in the suffix; we don't
+# Deployments use a short hash of the node name in the suffix; we don't
 # replicate that math in bash, so we assert the count + labels instead.
-# Expected v2 Deployment label set on the node we just targeted.
-V2_LABEL_SELECTOR="yanet.yanet-platform.io/yanet=${V2_NAME}"
+LABEL_SELECTOR="yanet.yanet-platform.io/yanet=${YANET_NAME}"
 
 deadline=$(( $(date +%s) + 120 ))
 while :; do
-    missing=()
-    for d in "${V1_EXPECTED[@]}"; do
-        kubectl -n "$NS" get deployment "$d" >/dev/null 2>&1 || missing+=("$d")
-    done
-    v2_count="$(kubectl -n "$NS" get deployments -l "$V2_LABEL_SELECTOR" -o name 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${#missing[@]}" -eq 0 ] && [ "${v2_count:-0}" -gt 0 ]; then
+    deployment_count="$(kubectl -n "$NS" get deployments -l "$LABEL_SELECTOR" -o name | wc -l | tr -d ' ')"
+    if [ "${deployment_count:-0}" -gt 0 ]; then
         break
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-        echo "missing v1 Deployments: ${missing[*]:-none}"
-        echo "v2 Deployment count (label $V2_LABEL_SELECTOR): ${v2_count:-0}"
+        echo "Deployment count (label $LABEL_SELECTOR): ${deployment_count:-0}"
         kubectl -n "$NS" get deployments -o wide || true
         fail "reconciler did not render the expected Deployments in time"
     fi
@@ -171,16 +149,9 @@ if [ -n "$NONZERO" ]; then
 fi
 green "  all operator-managed Deployments have replicas=0"
 
-# Assert all expected v1 Deployments are present.
-for d in "${V1_EXPECTED[@]}"; do
-    kubectl -n "$NS" get deployment "$d" >/dev/null 2>&1 \
-        || fail "missing v1 Deployment: $d"
-done
-green "  v1 Deployments OK: ${V1_EXPECTED[*]}"
-
-# Assert v2 produced at least one Deployment for our Yanet CR.
-[ "${v2_count:-0}" -gt 0 ] || fail "v2 reconciler produced no Deployments for $V2_NAME"
-green "  v2 Deployments OK: $v2_count Deployment(s) labelled $V2_LABEL_SELECTOR"
+# Assert the reconciler produced at least one Deployment for our Yanet CR.
+[ "${deployment_count:-0}" -gt 0 ] || fail "reconciler produced no Deployments for $YANET_NAME"
+green "  Deployments OK: $deployment_count Deployment(s) labelled $LABEL_SELECTOR"
 
 # --------------------------------------------------------------------
 # Scan operator log for ERROR lines.

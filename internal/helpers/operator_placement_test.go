@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 )
 
 func TestOperatorPlacementDeclaredOrder(t *testing.T) {

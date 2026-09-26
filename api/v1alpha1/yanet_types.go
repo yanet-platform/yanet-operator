@@ -17,103 +17,242 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// YanetSpec defines the desired state of Yanet
+// YanetSpec is the per-installation CR. Everything a "box" looks like
+// (which components are deployed and how they are patched) is defined
+// in YanetConfig.spec.boxTypes[<boxType>]. This CR is intentionally
+// tiny: it only selects the target nodes and references a boxType.
+//
+// No patches and no inline component specs are accepted here. The only
+// per-installation customisation knobs are typed point-overrides for images,
+// enablement, controlplane NUMA selection and dataplane network attachments.
+// Native sidecars can also be disabled through components.dataplane.sidecars.
 type YanetSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// BoxType selects a boxType definition from
+	// YanetConfig.spec.boxTypes[]. Required.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	BoxType string `json:"boxType"`
 
-	// (Optional) Global docker registry.
-	Registry string `json:"registry,omitempty"`
-	// (Optional) Tag for dataplane/controlplane/anouncer/bird images.
-	// Default: latest
-	// +kubebuilder:default=latest
-	Tag string `json:"tag,omitempty"`
-	// Worker node name for deploy.
-	// Only one Yanet on node!
-	// Do not use regex!
-	NodeName string `json:"nodename,omitempty"`
-	// (Optional) Type of dataplane(release or balancer).
-	// Default: release
-	// +kubebuilder:default=release
-	Type string `json:"type,omitempty"`
-	// (Optional) Operator enable autosync for this node.
-	// Default: false
-	// +kubebuilder:default=false
-	AutoSync bool `json:"autosync,omitempty"`
-	// (Optional) base configs for announcer deployment.
-	Announcer Dep `json:"announcer,omitempty"`
-	// (Optional) base configs for contorlplane deployment.
-	Controlplane Dep `json:"controlplane,omitempty"`
-	// (Optional) base configs for dataplane deployment.
-	Dataplane Dep `json:"dataplane,omitempty"`
-	// (Optional) base configs for bird deployment.
-	Bird Dep `json:"bird,omitempty"`
-	// (Optional) oneshot host prepare job.
-	PrepareJob Dep `json:"preparejob,omitempty"`
-	// (Optional) Allow reboot on prepare stage.
-	// Default: false
-	// +kubebuilder:default=false
-	AllowReboot bool `json:"allowreboot,omitempty"`
-	// (Optional) Mount Intel ice DDP firmware directory from host into dataplane.
-	// When true, /lib/firmware/intel/ice/ddp is mounted from the host node (type: Directory).
-	// Required on nodes with Intel E810 NICs that need custom DDP profiles.
-	// Default: false
-	// +kubebuilder:default=false
-	Intel bool `json:"intel,omitempty"`
-}
-
-// Deployment base configs.
-type Dep struct {
-	// (Optional) replicas for this deployment. One with true options and zero with false.
-	// You can make deployment with zero replicas with this option.
-	// Default: true
-	// +kubebuilder:default=true
+	// NodeSelector restricts the installation to a subset of nodes.
+	// Empty selector matches all nodes (use with care).
 	// +optional
-	Enable bool `json:"enable"`
-	// image name.
-	Image string `json:"image,omitempty"`
-	// (Optional) image tag.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Enabled is the "scale-to-zero" switch for the whole
+	// installation. When false, the operator still renders every
+	// Deployments and ConfigMaps (so generated specs can be inspected and
+	// patches still apply), but forces replicas=0
+	// on every Deployment regardless of per-component overrides. Shared Services
+	// remain available for the box-type roles. Use this to verify the rendered
+	// spec without actually running pods. Defaults to true.
+	//
+	// To freeze the operator's view of the CR (keep existing
+	// Deployments untouched, including hand edits) use
+	// AutoSync=false instead.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// AutoSync enables automatic synchronization. When false, the
+	// reconciler reports drift via Status without touching the
+	// generated Deployments — including not creating missing
+	// Deployments and not pruning orphans. Hand edits to managed
+	// Deployments are preserved. Defaults to false.
+	// +optional
+	AutoSync *bool `json:"autoSync,omitempty"`
+
+	// Components offers narrow, per-installation overrides for
+	// individual components: images, enabled flags, controlplane NUMA selection
+	// and the dataplane's complete network attachment list. General annotations
+	// and resources live in YanetConfig patches.
+	// +optional
+	Components *YanetComponentsOverride `json:"components,omitempty"`
+}
+
+// YanetComponentsOverride holds typed per-installation overrides for the fixed
+// workload components and dynamic operators (by name).
+type YanetComponentsOverride struct {
+	// +optional
+	Controlplane *YanetControlplaneOverride `json:"controlplane,omitempty"`
+	// +optional
+	Dataplane *YanetDataplaneOverride `json:"dataplane,omitempty"`
+	// +optional
+	BirdAdapter *YanetComponentOverride `json:"birdAdapter,omitempty"`
+	// Operators keyed by OperatorSpec.Name.
+	// +optional
+	Operators map[string]YanetComponentOverride `json:"operators,omitempty"`
+}
+
+// YanetComponentOverride is the only per-installation customisation
+// surface for a component. Anything broader belongs to a patch.
+type YanetComponentOverride struct {
+	// Enabled toggles this component for this installation only.
+	// true → replicas=1, false → replicas=0 (component still
+	// rendered, but with zero pods).
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Containers overrides image.name and image.tag per container, keyed by
+	// container name. Single-container fixed components use their rendered
+	// container name. The dataplane accepts only "dataplane". Operators use
+	// YanetConfig.spec.components.operators[].containers[].name.
+	// Registry/prefix come from the palette image, falling back to
+	// YanetConfig.spec.images.
+	// +optional
+	Containers map[string]YanetContainerOverride `json:"containers,omitempty"`
+}
+
+// YanetDataplaneOverride separates the primary container from named sidecars.
+type YanetDataplaneOverride struct {
+	YanetComponentOverride `json:",inline"`
+
+	// Networks replaces the palette's complete list of Multus attachments.
+	// Omitted/null inherits; [] explicitly removes the declared attachments.
+	// Do not omit an empty list during serialization: it is an explicit override.
+	// +optional
+	// +listType=atomic
+	Networks []NetworkAttachment `json:"networks"`
+
+	// Sidecars overrides enabled and image name/tag for each selected sidecar.
+	// +optional
+	Sidecars map[string]YanetContainerOverride `json:"sidecars,omitempty"`
+}
+
+// YanetContainerOverride is the per-installation image override for one
+// rendered container.
+type YanetContainerOverride struct {
+	// Enabled may only be set under the dataplane sidecars map.
+	// The dataplane field itself uses the component-level Enabled
+	// switch because a Pod cannot run without its primary container.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// +optional
+	Name string `json:"name,omitempty"`
+
+	// +optional
 	Tag string `json:"tag,omitempty"`
 }
 
-// YanetStatus defines the observed state of Yanet.
+// YanetControlplaneOverride is the controlplane flavour of
+// YanetComponentOverride. On top of the common enabled/image knobs it
+// carries the per-installation NUMA opt-out.
+type YanetControlplaneOverride struct {
+	YanetComponentOverride `json:",inline"`
+
+	// DisabledNuma replaces (does NOT merge with)
+	// YanetConfig.spec.components.controlplane.disabledNuma for
+	// this installation. Use it for hosts whose NUMA layout differs
+	// from the cluster-wide default — typically a NUMA domain with
+	// no NIC, where the dataplane runs no instance and a
+	// controlplane would have no peer to attach to.
+	//
+	// The scope is the whole Yanet CR, so it applies to every node
+	// matched by spec.nodeSelector. For a host with a unique layout
+	// create a dedicated Yanet CR selecting just that node.
+	//
+	// An empty (but non-nil) list explicitly clears the cluster-wide
+	// default, re-enabling every NUMA index. Leave the field unset
+	// or null to inherit the default. Do not omit empty lists on encoding:
+	// controller updates must preserve the explicit clear.
+	// +optional
+	DisabledNuma []int32 `json:"disabledNuma"`
+}
+
+// ImageRef identifies a palette image. Registry and prefix default to
+// YanetConfig.spec.images but can be overridden independently for each image.
+type ImageRef struct {
+	// Registry overrides the global registry. Nil inherits the global value;
+	// an explicit empty string omits the registry segment.
+	// +optional
+	Registry *string `json:"registry,omitempty"`
+
+	// Prefix overrides the global prefix. Nil inherits the global value;
+	// an explicit empty string omits the prefix segment.
+	// +optional
+	Prefix *string `json:"prefix,omitempty"`
+
+	// Name is the image name without registry/prefix/tag.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name,omitempty"`
+
+	// Tag is the image tag.
+	// +optional
+	Tag string `json:"tag,omitempty"`
+}
+
+// YanetStatus describes the observed state of a Yanet installation.
 type YanetStatus struct {
-	// Resulting pods by status.
-	Pods map[v1.PodPhase][]string `json:"pods,omitempty"`
-	Sync Sync                     `json:"sync,omitempty"`
-	// Conditions represent the latest available observations of the Yanet's state.
+	// Pods groups managed Pod names by phase.
+	// +optional
+	Pods map[corev1.PodPhase][]string `json:"pods,omitempty"`
+
+	// Sync summarises Deployments by sync state.
+	// +optional
+	Sync SyncStatus `json:"sync,omitempty"`
+
+	// Conditions hold latest observations.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// NodesStatus tracks status per node.
+	// +optional
+	NodesStatus map[string]NodeStatus `json:"nodesStatus,omitempty"`
+
+	// Services lists managed Service names.
+	// +optional
+	Services []string `json:"services,omitempty"`
 }
 
-// Sync defines sync state of Yanet objects.
-type Sync struct {
-	Synced      []string `json:"synced,omitempty"`
-	OutOfSync   []string `json:"outofsync,omitempty"`
+// SyncStatus summarises generated Deployments by sync state.
+type SyncStatus struct {
+	// +optional
+	Synced []string `json:"synced,omitempty"`
+	// +optional
+	OutOfSync []string `json:"outofsync,omitempty"`
+	// +optional
 	SyncWaiting []string `json:"syncwaiting,omitempty"`
-	Error       []string `json:"error,omitempty"`
-	Disabled    []string `json:"disabled,omitempty"`
+	// +optional
+	Error []string `json:"error,omitempty"`
+	// +optional
+	Disabled []string `json:"disabled,omitempty"`
+}
+
+// NodeStatus carries per-node status.
+type NodeStatus struct {
+	// +optional
+	NodeName string `json:"nodeName,omitempty"`
+
+	// +optional
+	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
+
+	// Deployments maps Deployment name to a short status string.
+	// +optional
+	Deployments map[string]string `json:"deployments,omitempty"`
+
+	// NumaCount records the number of controlplane Deployments
+	// generated for this node.
+	// +optional
+	NumaCount int32 `json:"numaCount,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 //+kubebuilder:subresource:status
-//+kubebuilder:storageversion
-//+kubebuilder:resource:shortName=ynt,categories=yanet
-//+kubebuilder:printcolumn:name="Node",type=string,JSONPath=`.spec.nodename`
-//+kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
-//+kubebuilder:printcolumn:name="AutoSync",type=boolean,JSONPath=`.spec.autosync`
+//+kubebuilder:resource:path=yanets,shortName=ynt,categories=yanet
+//+kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="metadata.name must fit in a 63-character workload label"
+//+kubebuilder:printcolumn:name="BoxType",type=string,JSONPath=`.spec.boxType`
+//+kubebuilder:printcolumn:name="AutoSync",type=boolean,JSONPath=`.spec.autoSync`
 //+kubebuilder:printcolumn:name="Available",type=string,JSONPath=`.status.conditions[?(@.type=="Available")].status`
 //+kubebuilder:printcolumn:name="Progressing",type=string,JSONPath=`.status.conditions[?(@.type=="Progressing")].status`
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// Yanet is the Schema for the yanets API
+// Yanet is the Schema for the yanets API.
 type Yanet struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -124,7 +263,7 @@ type Yanet struct {
 
 //+kubebuilder:object:root=true
 
-// YanetList contains a list of Yanet
+// YanetList contains a list of Yanet.
 type YanetList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

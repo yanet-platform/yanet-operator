@@ -20,22 +20,22 @@ import (
 	"encoding/json"
 	"fmt"
 
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 )
 
 // PatchRegistry indexes the cluster-wide patch palette by name. The
 // reconciler builds it once per reconcile from
-// YanetConfigV2.spec.patches[] and reuses across components.
-type PatchRegistry map[string]yanetv2alpha1.NamedPatch
+// YanetConfig.spec.patches[] and reuses across components.
+type PatchRegistry map[string]yanetv1alpha1.NamedPatch
 
 // NewPatchRegistry builds an indexed view of the patch palette. The
 // caller is expected to have validated uniqueness of names through
 // the webhook; on duplicates the LAST entry wins to keep the function
 // deterministic in the presence of (forbidden but possible) duplicate
 // admission bypass.
-func NewPatchRegistry(patches []yanetv2alpha1.NamedPatch) PatchRegistry {
+func NewPatchRegistry(patches []yanetv1alpha1.NamedPatch) PatchRegistry {
 	r := make(PatchRegistry, len(patches))
 	for i := range patches {
 		r[patches[i].Name] = patches[i]
@@ -69,7 +69,7 @@ func ApplyPatches(d *appsv1.Deployment, patchNames []string, registry PatchRegis
 	for _, name := range patchNames {
 		patch, ok := registry[name]
 		if !ok {
-			return fmt.Errorf("applyPatches: patch %q is not defined in YanetConfigV2.spec.patches", name)
+			return fmt.Errorf("applyPatches: patch %q is not defined in YanetConfig.spec.patches", name)
 		}
 		raw := patch.Patch.Raw
 		if len(raw) == 0 {

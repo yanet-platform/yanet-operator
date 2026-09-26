@@ -2,9 +2,10 @@ package manifests
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,7 +29,7 @@ func TestOperatorPlacementProbeReferences(t *testing.T) {
 					entry = `"lifecycle":{` + entry + `}`
 				}
 				config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"worker","ports":[{"name":"health","containerPort":9000}],` + entry + `}]}}}}`)
-				deployments, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches))
+				deployments, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -79,22 +80,25 @@ func TestOperatorPlacementRejectsUnresolvedProbes(t *testing.T) {
 		t.Run(fragment, func(t *testing.T) {
 			config, component := manifestPlacementConfig(t)
 			config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"worker",` + fragment + `}]}}}}`)
-			if _, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
+			if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
 				t.Fatal("unresolved probe must fail before workload writes")
 			}
 		})
 	}
 	// A sibling's named listener does not resolve in the probed container.
 	config, component := manifestPlacementConfig(t)
-	config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"agent","startupProbe":{"tcpSocket":{"port":"grpc"}}}]}}}}`)
-	if _, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
-		t.Fatal("probe must not resolve a sibling's named listener")
+	component.Sidecars[0].Patches = nil
+	component.Sidecars[1].Patches = []string{"configure"}
+	target := BuildServices(BuildContext{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
+	config.Patches[0].Patch.Raw = []byte(fmt.Sprintf(`{"spec":{"template":{"spec":{"containers":[{"name":"agent","startupProbe":{"tcpSocket":{"port":%q}}}]}}}}`, target))
+	if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil || !strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), "does not name a TCP port in that container") {
+		t.Fatalf("probe must not resolve a sibling's named listener: %v", err)
 	}
 }
 
 func TestOperatorPlacementProbeValidationAfterDataplanePatch(t *testing.T) {
 	config, component := manifestPlacementConfig(t)
-	build := BuildContextV2{YanetName: "test"}
+	build := BuildContext{YanetName: "test"}
 	initial, err := RenderDeployments(build, component, NewPatchRegistry(config.Patches))
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +119,7 @@ func TestOperatorPlacementStandaloneProbeUnchanged(t *testing.T) {
 	operator := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "test", Enabled: true,
 		Containers: []helpers.ResolvedContainer{{Name: "worker", Image: helpers.ResolvedImage{Name: "test"}}}, Patches: []string{"probe"}}
 	registry := PatchRegistry{"probe": {Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"worker","startupProbe":{"tcpSocket":{"port":"grpc"}}}]}}}}`)}}}
-	deployments, err := RenderDeployments(BuildContextV2{YanetName: "test"}, operator, registry)
+	deployments, err := RenderDeployments(BuildContext{YanetName: "test"}, operator, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +134,7 @@ func TestOperatorPlacementCustomProbePorts(t *testing.T) {
 		{"name":"worker","ports":[{"name":"health","containerPort":9090}],
 		 "readinessProbe":{"httpGet":{"port":9090}},"livenessProbe":{"tcpSocket":{"port":"health"}},"startupProbe":{"grpc":{"port":9090}}}
 	]}}}}`)
-	deployments, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches))
+	deployments, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches))
 	if err != nil {
 		t.Fatal(err)
 	}

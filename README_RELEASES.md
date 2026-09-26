@@ -1,338 +1,123 @@
-# Release Guide
+# Release guide
 
-This document describes the release process for yanet-operator.
+Application releases follow [Semantic Versioning](https://semver.org/).
+Incompatible API changes require a major release. Helm chart versions are
+independent and must also be new for each release.
 
-## 🎯 Overview
+The next release is **operator 3.0.0 / chart 0.2.0**. Its API reset and replacement
+procedure are documented in [release notes](release-notes/v3.0.0.md). Release
+preparation in a pull request does not publish images or qualify a live cluster.
 
-Releases are fully automated via GitHub Actions. When you push a version tag, the CI/CD pipeline:
+## Prepare
 
-1. **Builds multi-platform Docker images** (amd64, arm64)
-2. **Publishes to GHCR**
-3. **Packages and publishes Helm chart** to GHCR OCI registry
-4. **Generates installation manifests** (`install.yaml`)
-5. **Creates GitHub Release** with artifacts and release notes
+1. Update `deploy/charts/yanet-operator/Chart.yaml`: `version` is the chart version,
+   `appVersion` is the operator image version without `v`.
+2. Write compatibility notes in `release-notes/v<application-version>.md`.
+3. Regenerate API artifacts and run the relevant checks through Make/Docker:
 
-## 📋 Release Checklist
+   ```bash
+   make generate
+   make manifests
+   make helm-crds
+   make fmt
+   make test-docker
+   make test-docker-race
+   make lint
+   make vet
+   make helm-lint
+   make docker-build
+   ```
 
-### 1. Prepare Release
+4. Inspect the final diff and generated schemas. Complete review and merge the
+   release preparation before tagging. Record separate target-cluster results.
 
-- [ ] Ensure all tests pass: `make test-docker`
-- [ ] Run linter: `make lint-docker`
-- [ ] Update [`Chart.yaml`](deploy/charts/yanet-operator/Chart.yaml) version
-- [ ] Update documentation if needed
-- [ ] Commit all changes
+## Publish
 
-### 2. Create Release Tag
-
-```bash
-# Set application version (without the 'v' prefix)
-APP_VERSION="2.0.4"
-
-# Create and push tag
-git tag -a "v${APP_VERSION}" -m "Release v${APP_VERSION}"
-git push origin "v${APP_VERSION}"
-```
-
-### 3. Monitor Release Pipeline
-
-GitHub Actions will automatically:
-
-1. **Build Docker images** — [`docker` job](.github/workflows/release.yml)
-   - Platforms: `linux/amd64`, `linux/arm64`
-   - Registries: GHCR
-   - Tags: `v2.0.4`, `2.0.4`, `2.0`, `2`, `latest`
-
-2. **Package Helm chart** — [`helm` job](.github/workflows/release.yml)
-   - Syncs `appVersion` with git tag
-   - Publishes to GHCR OCI
-
-3. **Generate manifests** — [`manifests` job](.github/workflows/release.yml)
-   - Creates `install.yaml` with all resources
-
-4. **Create GitHub Release** — [`release` job](.github/workflows/release.yml)
-   - Generates changelog from git commits
-   - Attaches artifacts (Helm chart, install.yaml)
-   - Publishes release notes
-
-### 4. Verify Release
+After the reviewed commit is merged and its checks pass:
 
 ```bash
-# Check Docker images
-docker pull ghcr.io/yanet-platform/yanet-operator:2.0.4
-
-# Verify multi-platform support
-docker manifest inspect ghcr.io/yanet-platform/yanet-operator:2.0.4
-
-# Check Helm chart
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.8
-
-# Test installation
-kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v2.0.4/install.yaml
+git fetch origin main --tags
+git tag -a v3.0.0 origin/main -m "Release v3.0.0"
+git push origin v3.0.0
 ```
 
-## 📦 Release Artifacts
+Verify that `origin/main` is the intended release revision before tagging.
+Never move/reuse an existing release tag or OCI chart version.
 
-Each release includes:
+`.github/workflows/release.yml` is the sole owner of stable tagged publication:
 
-### Docker Images
+1. Build/publish `linux/amd64` and `linux/arm64` images to GHCR.
+2. Package/publish the chart to GHCR OCI, with `appVersion` set from the tag.
+3. Generate `install.yaml` with the matching image.
+4. Create the GitHub Release with chart/manifests, commit changelog and the
+   version-specific compatibility notes.
 
-**GitHub Container Registry:**
-- `ghcr.io/yanet-platform/yanet-operator:2.0.4`
-- `ghcr.io/yanet-platform/yanet-operator:2.0`
-- `ghcr.io/yanet-platform/yanet-operator:2`
-- `ghcr.io/yanet-platform/yanet-operator:latest`
+The regular Helm workflow lints, packages and tests PR/main charts; it uploads a
+workflow artifact and does not publish the stable chart version. The regular
+Docker workflow builds development/PR images; version tags belong to the release
+workflow so a single-platform build cannot overwrite the multi-platform release.
 
-**Platforms:** `linux/amd64`, `linux/arm64`
+## Verify artifacts
 
-### Helm Charts
+```bash
+gh run list --workflow=release.yml
+gh release view v3.0.0
+docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.0
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.2.0
+```
 
-**GitHub Container Registry:**
+Check both image platforms, the source revision/digest, chart `appVersion` and
+the attached `install.yaml`. Do not infer publication from a successful local
+build or from a merged PR.
+
+For a new cluster:
+
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.1.8 \
+  --version 0.2.0 \
   --namespace yanet-system \
   --create-namespace
 ```
 
-### Kubernetes Manifests
+If Prometheus Operator is absent, set `metrics.serviceMonitor.enabled=false`.
+Configure the Grafana namespace or disable dashboard creation as appropriate.
+Existing installations must follow the [replacement notes](release-notes/v3.0.0.md)
+instead of applying this command over incompatible CRDs.
 
-**install.yaml** — Complete installation manifest:
-```bash
-kubectl apply -f https://github.com/yanet-platform/yanet-operator/releases/download/v2.0.4/install.yaml
-```
+### Standalone installer prerequisites
 
-Contains:
-- Custom Resource Definitions (CRDs)
-- Namespace
-- ServiceAccount, Role, RoleBinding
-- Deployment
-- Service (metrics, webhooks)
-- ValidatingWebhookConfiguration
+`install.yaml` (also `make deploy`) requires **cert-manager v1 with its webhook and
+CA injector running before applying the installer**. It creates a namespaced
+self-signed Issuer and serving Certificate, mounts the resulting TLS Secret and
+connects both validating webhooks to the operator Service. It does not install
+cert-manager. The Kubernetes API server must be able to reach the webhook Service.
 
-## 🔄 Versioning Strategy
-
-We follow [Semantic Versioning](https://semver.org/):
-
-- **MAJOR** (0.x.x) — Incompatible API changes
-- **MINOR** (x.1.x) — New features, backward compatible
-- **PATCH** (x.x.7) — Bug fixes, backward compatible
-
-### Version Synchronization
-
-- **Git tag:** `v2.0.4` (with `v` prefix)
-- **Chart version:** `0.1.8` (in [`Chart.yaml`](deploy/charts/yanet-operator/Chart.yaml))
-- **Chart appVersion:** `2.0.4` (auto-synced from git tag)
-- **Docker image tag:** `2.0.4` (extracted from git tag)
-
-The application and Helm chart use independent version sequences. Every release
-must use a new value for both the git tag and the chart version because OCI chart
-versions are immutable.
-
-## 🛠️ Manual Release (Emergency)
-
-If automated release fails, you can release manually:
-
-### 1. Build and Push Docker Images
+On a clean cluster with cert-manager already installed:
 
 ```bash
-APP_VERSION="2.0.4"
-
-# Build multi-platform image
-docker buildx create --use
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --tag ghcr.io/yanet-platform/yanet-operator:${APP_VERSION} \
-  --tag ghcr.io/yanet-platform/yanet-operator:latest \
-  --push \
-  .
+kubectl apply -f install.yaml
+kubectl wait -n yanet-operator-system --for=condition=Ready \
+  certificate/yanet-operator-serving-cert --timeout=120s
+kubectl rollout status -n yanet-operator-system \
+  deployment/yanet-operator-controller-manager --timeout=120s
+kubectl get validatingwebhookconfiguration \
+  yanet-operator-validating-webhook-configuration -o yaml
 ```
 
-### 2. Package and Push Helm Chart
+Verify both `clientConfig.caBundle` fields are populated before creating
+`YanetConfig` or `Yanet` objects: certificate readiness and Deployment rollout
+alone do not prove that asynchronous CA injection has completed. The installer
+uses fail-closed admission. Unlike the default Helm certgen hooks, cert-manager
+renews certificates and maintains the CA bundle. Do not enable the commented CRD
+conversion patches: this release has a single API version and no conversion server.
 
-```bash
-APP_VERSION="2.0.4"
-CHART_VERSION="0.1.8"
+## Failed publication
 
-# Update appVersion in Chart.yaml
-sed -i "s/^appVersion:.*/appVersion: \"${APP_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
+Inspect the failed Actions job with `gh run view <run-id> --log-failed`.
+Fix the cause and determine which artifacts were already published before
+retrying. If source changes are needed, use a new application/chart version;
+released versions are immutable. Do not delete/re-tag a public release as a
+version-mismatch workaround.
 
-# Package chart
-helm package deploy/charts/yanet-operator
-
-# Push to GHCR
-helm registry login ghcr.io
-helm push yanet-operator-${CHART_VERSION}.tgz oci://ghcr.io/yanet-platform
-```
-
-### 3. Generate install.yaml
-
-```bash
-APP_VERSION="2.0.4"
-
-make manifests
-make build-installer IMG=ghcr.io/yanet-platform/yanet-operator:${APP_VERSION}
-```
-
-### 4. Create GitHub Release
-
-```bash
-APP_VERSION="2.0.4"
-CHART_VERSION="0.1.8"
-
-gh release create v${APP_VERSION} \
-  --title "Release v${APP_VERSION}" \
-  --notes "Manual release v${APP_VERSION}" \
-  dist/install.yaml \
-  yanet-operator-${CHART_VERSION}.tgz
-```
-
-## 🔍 Troubleshooting
-
-### Release Pipeline Fails
-
-**Check GitHub Actions logs:**
-```bash
-gh run list --workflow=release.yml
-gh run view <run-id> --log
-```
-
-**Common issues:**
-
-1. **GHCR authentication fails**
-   - Ensure `packages: write` permission in workflow
-   - Verify `GITHUB_TOKEN` has correct scopes
-
-2. **Helm push fails**
-   - Check chart version in `Chart.yaml`
-   - Verify OCI registry credentials
-   - Ensure chart version doesn't already exist
-
-3. **Manifest generation fails**
-   - Run `make manifests` locally to check for errors
-   - Verify kustomize installation
-
-### Version Mismatch
-
-If `Chart.yaml` version doesn't match git tag:
-
-```bash
-# Update Chart.yaml manually
-vim deploy/charts/yanet-operator/Chart.yaml
-
-# Commit and re-tag
-git add deploy/charts/yanet-operator/Chart.yaml
-git commit -m "chore(release): bump chart version to 0.1.8"
-git tag -d v2.0.4
-git push origin :refs/tags/v2.0.4
-git tag -a v2.0.4 -m "Release v2.0.4"
-git push origin v2.0.4
-```
-
-### Rollback Release
-
-To delete a release:
-
-```bash
-APP_VERSION="2.0.4"
-
-# Delete GitHub release
-gh release delete v${APP_VERSION} --yes
-
-# Delete git tag
-git tag -d v${APP_VERSION}
-git push origin :refs/tags/v${APP_VERSION}
-
-# Delete Docker images (manual via GHCR UI)
-# Delete Helm charts (manual via registry UI)
-```
-
-## 📊 Release Metrics
-
-Track release health:
-
-- **GHCR downloads:** https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator
-- **GitHub releases:** https://github.com/yanet-platform/yanet-operator/releases
-- **Helm chart versions:** `helm search repo yanet-operator --versions`
-
-## 🔐 Required Secrets
-
-GitHub repository secrets:
-
-| Secret | Description | Required For |
-|--------|-------------|--------------|
-| `GITHUB_TOKEN` | Auto-provided by GitHub | GHCR, releases |
-
-## 📚 Related Documentation
-
-- [README](README.md) — Project overview
-- [Testing Guide](README_TESTS.md) — How to run tests
-- [Validation Webhooks](README_WEBHOOKS.md) — Admission control
-- [Prometheus Metrics](README_METRICS.md) — Monitoring
-- [Architecture](ARCHITECTURE.md) — Design decisions
-
-## 🎓 Best Practices
-
-1. **Always test before releasing**
-   ```bash
-   make test-docker
-   make lint-docker
-   ```
-
-2. **Update Chart.yaml version first**
-   - Commit version bump separately
-   - Tag after version is committed
-
-3. **Use semantic versioning**
-   - Breaking changes → major version
-   - New features → minor version
-   - Bug fixes → patch version
-
-4. **Write meaningful release notes**
-   - Highlight breaking changes
-   - List new features
-   - Document bug fixes
-
-5. **Verify multi-platform images**
-   ```bash
-   docker manifest inspect ghcr.io/yanet-platform/yanet-operator:2.0.4
-   ```
-
-6. **Test Helm chart installation**
-   ```bash
-   helm install test oci://ghcr.io/yanet-platform/yanet-operator \
-     --version 0.1.8 \
-     --namespace test \
-     --create-namespace \
-     --dry-run
-   ```
-
-## 🚀 Quick Release
-
-For experienced maintainers:
-
-```bash
-# 1. Update version
-vim deploy/charts/yanet-operator/Chart.yaml
-git add deploy/charts/yanet-operator/Chart.yaml
-git commit -m "chore(release): bump chart version to 0.1.8"
-
-# 2. Test
-make test-docker && make lint-docker
-
-# 3. Tag and push
-git tag -a v2.0.4 -m "Release v2.0.4"
-git push origin main v2.0.4
-
-# 4. Monitor
-gh run watch
-
-# 5. Verify
-docker pull ghcr.io/yanet-platform/yanet-operator:2.0.4
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.1.8
-```
-
----
-
-**Last Updated:** 2026-07-15
-**Workflow:** [`.github/workflows/release.yml`](.github/workflows/release.yml)
+Reference: [Helm CRD best practices](https://helm.sh/docs/v3/chart_best_practices/custom_resource_definitions/).

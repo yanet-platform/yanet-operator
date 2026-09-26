@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	yanetv2alpha1 "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -33,14 +33,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func TestReconcileV2DeletionIgnoresLabelDrift(t *testing.T) {
+func TestReconcileDeletionIgnoresLabelDrift(t *testing.T) {
 	for _, label := range []string{"", "another-installation"} {
 		t.Run("label="+label, func(t *testing.T) {
 			testContext := context.Background()
-			yanet := &yanetv2alpha1.YanetV2{ObjectMeta: metav1.ObjectMeta{
+			yanet := &yanetv1alpha1.Yanet{ObjectMeta: metav1.ObjectMeta{
 				Name: "y", Namespace: "yanet", UID: "current-owner", Finalizers: []string{yanetFinalizer},
 			}}
-			owner := *metav1.NewControllerRef(yanet, yanetv2alpha1.GroupVersion.WithKind("YanetV2"))
+			owner := *metav1.NewControllerRef(yanet, yanetv1alpha1.GroupVersion.WithKind("Yanet"))
 			deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 				Name: "owned", Namespace: yanet.Namespace, UID: "deployment-uid",
 				OwnerReferences: []metav1.OwnerReference{owner}, Finalizers: []string{"test.example/hold"},
@@ -79,7 +79,7 @@ func TestReconcileV2DeletionIgnoresLabelDrift(t *testing.T) {
 			if _, err := r.Reconcile(testContext, request); err != nil {
 				t.Fatal(err)
 			}
-			if err := r.Get(testContext, request.NamespacedName, &yanetv2alpha1.YanetV2{}); !apierrors.IsNotFound(err) {
+			if err := r.Get(testContext, request.NamespacedName, &yanetv1alpha1.Yanet{}); !apierrors.IsNotFound(err) {
 				t.Fatalf("owner must finish deletion: %v", err)
 			}
 			if err := r.Get(testContext, client.ObjectKeyFromObject(foreign), foreign); err != nil || !foreign.DeletionTimestamp.IsZero() {
@@ -89,15 +89,15 @@ func TestReconcileV2DeletionIgnoresLabelDrift(t *testing.T) {
 	}
 }
 
-func TestReconcileV2DeletionRetriesFailedCleanup(t *testing.T) {
+func TestReconcileDeletionRetriesFailedCleanup(t *testing.T) {
 	testContext := context.Background()
-	yanet := &yanetv2alpha1.YanetV2{ObjectMeta: metav1.ObjectMeta{
+	yanet := &yanetv1alpha1.Yanet{ObjectMeta: metav1.ObjectMeta{
 		Name: "y", Namespace: "yanet", UID: "owner", Finalizers: []string{yanetFinalizer},
 	}}
 	deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
 		Name: "owned", Namespace: yanet.Namespace,
 		Labels:          map[string]string{manifests.LabelYanet: yanet.Name},
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(yanet, yanetv2alpha1.GroupVersion.WithKind("YanetV2"))},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(yanet, yanetv1alpha1.GroupVersion.WithKind("Yanet"))},
 	}}
 	r, _ := makeReconcilerEnv(t, yanet, deployment)
 	if err := r.Delete(testContext, yanet); err != nil {
@@ -122,21 +122,21 @@ func TestReconcileV2DeletionRetriesFailedCleanup(t *testing.T) {
 	if _, err := r.Reconcile(testContext, request); err != nil {
 		t.Fatal(err)
 	}
-	if err := base.Get(testContext, request.NamespacedName, &yanetv2alpha1.YanetV2{}); !apierrors.IsNotFound(err) {
+	if err := base.Get(testContext, request.NamespacedName, &yanetv1alpha1.Yanet{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("successful retry must finish deletion: %v", err)
 	}
 }
 
-func TestReconcileV2ThrottledNodeEventuallyUpdates(t *testing.T) {
+func TestReconcileThrottledNodeEventuallyUpdates(t *testing.T) {
 	testContext := context.Background()
 	enabled := true
-	yanet := &yanetv2alpha1.YanetV2{
+	yanet := &yanetv1alpha1.Yanet{
 		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet", UID: "owner", Finalizers: []string{yanetFinalizer}},
-		Spec:       yanetv2alpha1.YanetSpec{BoxType: "release", AutoSync: &enabled},
+		Spec:       yanetv1alpha1.YanetSpec{BoxType: "release", AutoSync: &enabled},
 	}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-2"}}
 	r, snapshot := makeReconcilerEnv(t, yanet, node)
-	snapshot.Config = minimalConfigV2()
+	snapshot.Config = minimalConfig()
 	snapshot.Config.UpdateWindow = 3600
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(yanet)}
 	if _, err := r.Reconcile(testContext, request); err != nil {

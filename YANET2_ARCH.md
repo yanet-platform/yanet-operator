@@ -1,7 +1,7 @@
 # YANET2 — Target Architecture for yanet-operator
 
 > This document describes the target architecture of yanet2 on a Kubernetes
-> node that yanet-operator must be able to generate (CRD `v2alpha1`).
+> node that yanet-operator must be able to generate (CRD `v1alpha1`).
 > Sources: yanet2 developers + production config samples from
 > `/etc/yanet2/`.
 
@@ -60,7 +60,7 @@ while `[]` leaves the bind/gateway env but suppresses the Service.
 It reports publication status, not FIB/forwarding readiness.
 
 There are no fixed BIRD/netlink slots. See the
-[full example](deploy/examples/v2alpha1-yanetconfig-full.yaml) for separate images,
+[full example](deploy/examples/v1alpha1-yanetconfig-full.yaml) for separate images,
 config mounts, and the netconfig-specific security patch. Image release/pinning,
 host config generation, and a real Kubernetes forwarding smoke are rollout steps.
 
@@ -112,7 +112,7 @@ mount it only into the intended containers through a Deployment patch.
 
 ## 3. Service Topology
 
-Created by yanet-operator and owned by the cluster-scoped `YanetConfigV2/config`:
+Created by yanet-operator and owned by the cluster-scoped `YanetConfig/config`:
 
 | Service | Selector | Type / policy | Purpose |
 |---|---|---|---|
@@ -138,7 +138,7 @@ physical `numa<N>` entries and preserves their TLS. See
 - **Kubernetes 1.33+** — required so EndpointSlice resolves named Service
   target ports exposed by restartable init-container sidecars.
 - Host requirements: hugepages, `hostIPC`, DPDK devices, and netplan input.
-  Final v2 `hostNetwork: true` and nonzero `hostPort` are unsupported.
+  Final `hostNetwork: true` and nonzero `hostPort` are unsupported.
 - Compatible runtime images and prepared host configs for named gateway overrides.
   ACL runtime support is an external integration prerequisite.
 
@@ -253,20 +253,20 @@ flowchart TB
 ## 6. Configuration contract
 
 `components` declares the palette; `boxTypes` selects components and ordered
-Deployment patches; `YanetV2` selects a box and per-installation overrides.
+Deployment patches; `Yanet` selects a box and per-installation overrides.
 The current types and runnable examples are the source of truth:
 
-- [v2 API](api/v2alpha1/yanetconfig_types.go).
-- [Full configuration](deploy/examples/v2alpha1-yanetconfig-full.yaml).
+- [Operator API](api/v1alpha1/yanetconfig_types.go).
+- [Full configuration](deploy/examples/v1alpha1-yanetconfig-full.yaml).
 - [Rendering and ownership](ARCHITECTURE.md).
 
 There is no fixed announcer/BIRD/netlink slot, placement switch, host-network
-allocator or v2 auto-discovery. Announcer is an ordinary operator; BIRD and the
+allocator or auto-discovery. Announcer is an ordinary operator; BIRD and the
 network sidecars are declarations in `dataplane.sidecars[]`.
 
 ## 7. Component Config Sources
 
-CRD `v2alpha1` introduces a unified `config` schema (shared by controlplane,
+CRD `v1alpha1` introduces a unified `config` schema (shared by controlplane,
 dataplane, dataplane native sidecars, all operators / agents / announcer):
 
 ```yaml
@@ -275,7 +275,7 @@ config:
   inline: |
     logging: { level: info }
     ...
-  # variant 2 — hostPath (as in v1)
+  # variant 2 — hostPath
   hostPath: /etc/yanet2
   # Optional container directory; default /etc/yanet2
   mountPath: /etc/yanet2
@@ -290,4 +290,5 @@ does not offer an unimplemented URL source.
 
 - metrics-collector support in yanet-operator — **later** (DaemonSet is deployed separately).
 - CLI / web — out of scope.
-- Conversion webhook v1 ↔ v2 — **not implemented** (manual migration; v1 and v2 coexist).
+- Legacy API compatibility/conversion is unsupported. The operator serves only
+  the component-based `v1alpha1` API; see [release notes](release-notes/v3.0.0.md).

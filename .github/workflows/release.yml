@@ -204,6 +204,12 @@ jobs:
             echo "## Initial Release" > release_notes.md
           fi
 
+          # Include release-specific compatibility and upgrade notes.
+          if [ -f "release-notes/${VERSION}.md" ]; then
+            printf '\n\n' >> release_notes.md
+            cat "release-notes/${VERSION}.md" >> release_notes.md
+          fi
+
           # Add installation instructions
           cat >> release_notes.md << 'EOF'
 
@@ -211,8 +217,13 @@ jobs:
 
           ### Quick Install (kubectl)
 
+          Requires cert-manager v1 (including its webhook and CA injector) already
+          installed and running. This manifest does not install cert-manager.
+          Wait for the serving Certificate, operator rollout and webhook CA injection
+          before creating YanetConfig/Yanet resources; see the release guide.
+
           ```bash
-          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${VERSION}/install.yaml
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.yaml
           ```
 
           ### Helm Install (GitHub Container Registry)
@@ -239,15 +250,15 @@ jobs:
 
           ### Kubernetes Manifests
 
-          - `install.yaml` — Complete installation manifest (CRDs + Operator)
+          - `install.yaml` — CRDs, operator and admission TLS wiring (requires cert-manager)
 
           ## 📚 Documentation
 
-          - [README](https://github.com/${{ github.repository }}/blob/${VERSION}/README.md)
-          - [Testing Guide](https://github.com/${{ github.repository }}/blob/${VERSION}/README_TESTS.md)
-          - [Validation Webhooks](https://github.com/${{ github.repository }}/blob/${VERSION}/README_WEBHOOKS.md)
-          - [Prometheus Metrics](https://github.com/${{ github.repository }}/blob/${VERSION}/README_METRICS.md)
-          - [Release Guide](https://github.com/${{ github.repository }}/blob/${VERSION}/README_RELEASES.md)
+          - [README](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md)
+          - [Testing Guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_TESTS.md)
+          - [Validation Webhooks](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_WEBHOOKS.md)
+          - [Prometheus Metrics](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_METRICS.md)
+          - [Release Guide](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README_RELEASES.md)
 
           ## ✅ Verification
 

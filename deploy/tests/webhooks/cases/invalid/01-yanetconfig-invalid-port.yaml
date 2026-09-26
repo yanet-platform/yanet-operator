@@ -1,0 +1,27 @@
+# v1alpha1 YanetConfig - must be REJECTED by vyanetconfig.kb.io.
+# Reason: workloads cannot reserve a host port.
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: YanetConfig
+metadata:
+  name: config
+spec:
+  components:
+    controlplane:
+      image: {name: controlplane, tag: test}
+    dataplane:
+      image: {name: dataplane, tag: test}
+  patches:
+    - name: host-port
+      patch:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: dataplane
+                  ports:
+                    - {containerPort: 9000, hostPort: 9000}
+  boxTypes:
+    - name: release
+      components:
+        controlplane: {}
+        dataplane: {patches: [host-port]}

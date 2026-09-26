@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
-	api "github.com/yanet-platform/yanet-operator/api/v2alpha1"
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -33,7 +34,7 @@ func TestOperatorListenersContracts(t *testing.T) {
 					op.Kind = helpers.KindSidecar
 					op.PortIndex = 1
 				}
-				context := BuildContextV2{YanetName: "test", Namespace: "test", BoxType: "test"}
+				context := BuildContext{YanetName: "test", Namespace: "test", BoxType: "test"}
 				deployments, err := BuildDeployments(context, op)
 				if err != nil {
 					t.Fatal(err)
@@ -85,7 +86,7 @@ func manifestPlacementConfig(t *testing.T) (*api.YanetConfigSpec, *helpers.Resol
 
 func TestOperatorPlacementConfigComposition(t *testing.T) {
 	config, component := manifestPlacementConfig(t)
-	context := BuildContextV2{YanetName: "test", Namespace: "test", BoxType: "test"}
+	context := BuildContext{YanetName: "test", Namespace: "test", BoxType: "test"}
 	deployments, err := RenderDeployments(context, component, NewPatchRegistry(config.Patches))
 	if err != nil {
 		t.Fatal(err)
@@ -106,10 +107,17 @@ func TestOperatorPlacementConfigComposition(t *testing.T) {
 	if worker.VolumeMounts[0].Name != pod.InitContainers[0].VolumeMounts[0].Name {
 		t.Fatal("config downloader and consumer no longer share the volume")
 	}
+	foundMemory := false
 	for _, variable := range worker.Env {
-		if variable.Name == "OWN_MEMORY" && variable.ValueFrom.ResourceFieldRef.ContainerName != worker.Name {
-			t.Fatal("resourceFieldRef must use the composed container name")
+		if variable.Name == "OWN_MEMORY" {
+			foundMemory = true
+			if variable.ValueFrom == nil || variable.ValueFrom.ResourceFieldRef == nil || variable.ValueFrom.ResourceFieldRef.ContainerName != worker.Name {
+				t.Fatal("resourceFieldRef must use the composed container name")
+			}
 		}
+	}
+	if !foundMemory {
+		t.Fatal("composition lost OWN_MEMORY environment variable")
 	}
 
 	// A dataplane patch cannot remove/reorder the role or change restartPolicy.
@@ -127,22 +135,22 @@ func TestOperatorPlacementConfigComposition(t *testing.T) {
 }
 
 func TestOperatorPlacementRejectsFinalReferences(t *testing.T) {
-	for _, fragment := range []string{
-		`{"containers":[{"name":"worker","volumeMounts":[{"name":"missing","mountPath":"/missing"}]}]}`,
-		`{"containers":[{"name":"worker","volumeDevices":[{"name":"missing","devicePath":"/dev/x"}]}]}`,
-		`{"containers":[{"name":"INVALID","image":"test"}]}`,
-		`{"containers":[{"name":"agent","ports":[{"name":"grpc","containerPort":8082}]}]}`,
-		`{"containers":[{"name":"agent","ports":[{"name":"invalid-port-name-is-too-long","containerPort":9090}]}]}`,
-		`{"containers":[{"name":"agent","ports":[{"containerPort":65536}]}]}`,
-		`{"containers":[{"name":"worker","env":[{"name":"MEMORY","valueFrom":{"resourceFieldRef":{"containerName":"missing","resource":"limits.memory"}}}]}]}`,
-		`{"volumes":[{"name":"downward","downwardAPI":{"items":[{"path":"memory","resourceFieldRef":{"containerName":"missing","resource":"limits.memory"}}]}}]}`,
-		`{"containers":[{"name":"agent","restartPolicy":"Never"}]}`,
+	for _, tt := range []struct{ fragment, wantError string }{
+		{`{"containers":[{"name":"worker","volumeMounts":[{"name":"missing","mountPath":"/missing"}]}]}`, "references missing volume"},
+		{`{"containers":[{"name":"worker","volumeDevices":[{"name":"missing","devicePath":"/dev/x"}]}]}`, "references missing volume device"},
+		{`{"containers":[{"name":"INVALID","image":"test"}]}`, "must retain exactly its declared container"},
+		{`{"containers":[{"name":"worker","ports":[{"name":"custom","containerPort":8082}]}]}`, "port 8082 is reserved"},
+		{`{"containers":[{"name":"worker","ports":[{"name":"invalid-port-name-is-too-long","containerPort":9090}]}]}`, "invalid or duplicate port name"},
+		{`{"containers":[{"name":"worker","ports":[{"containerPort":65536}]}]}`, "invalid port 65536"},
+		{`{"containers":[{"name":"worker","env":[{"name":"MEMORY","valueFrom":{"resourceFieldRef":{"containerName":"missing","resource":"limits.memory"}}}]}]}`, "resourceFieldRef refers to missing container"},
+		{`{"volumes":[{"name":"downward","downwardAPI":{"items":[{"path":"memory","resourceFieldRef":{"containerName":"missing","resource":"limits.memory"}}]}}]}`, "resourceFieldRef refers to missing container"},
+		{`{"containers":[{"name":"worker","restartPolicy":"Never"}]}`, "unsupported restartPolicy"},
 	} {
-		t.Run(fragment, func(t *testing.T) {
+		t.Run(tt.fragment, func(t *testing.T) {
 			config, component := manifestPlacementConfig(t)
-			config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":` + fragment + `}}}`)
-			if _, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil {
-				t.Fatal("invalid composition must fail")
+			config.Patches[0].Patch.Raw = []byte(`{"spec":{"template":{"spec":` + tt.fragment + `}}}`)
+			if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, NewPatchRegistry(config.Patches)); err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("want error containing %q, got %v", tt.wantError, err)
 			}
 		})
 	}
@@ -155,7 +163,7 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 		port := corev1.ContainerPort{ContainerPort: 8080}
 		if useName {
 			port.ContainerPort = 9000
-			port.Name = BuildServices(BuildContextV2{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
+			port.Name = BuildServices(BuildContext{BoxType: "test"}, component.Sidecars[0])[0].Ports[0].TargetPortName
 		}
 		raw, err := json.Marshal(map[string]any{"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
 			"containers": []corev1.Container{{Name: "dataplane", Ports: []corev1.ContainerPort{port}}},
@@ -166,7 +174,7 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 		registry := NewPatchRegistry(config.Patches)
 		registry["capture"] = api.NamedPatch{Patch: runtime.RawExtension{Raw: raw}}
 		component.Patches = []string{"capture"}
-		if _, err := RenderDeployments(BuildContextV2{YanetName: "test"}, component, registry); err == nil {
+		if _, err := RenderDeployments(BuildContext{YanetName: "test"}, component, registry); err == nil {
 			t.Fatal("disabled role must retain both named and numeric port reservations")
 		}
 	}
@@ -175,8 +183,8 @@ func TestOperatorPlacementDisabledTargetCannotBeCaptured(t *testing.T) {
 func TestOperatorPlacementServicesDisambiguateRoleHashes(t *testing.T) {
 	first := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "role-47893"}
 	second := &helpers.ResolvedComponent{Kind: helpers.KindSidecar, Name: "role-89356"}
-	firstPlan := BuildServices(BuildContextV2{BoxType: "test"}, first)[0]
-	secondPlan := BuildServices(BuildContextV2{BoxType: "test"}, second)[0]
+	firstPlan := BuildServices(BuildContext{BoxType: "test"}, first)[0]
+	secondPlan := BuildServices(BuildContext{BoxType: "test"}, second)[0]
 	if reflect.DeepEqual(firstPlan.Selector, secondPlan.Selector) {
 		t.Fatal("Services must distinguish different roles even when their name hashes collide across revisions")
 	}

@@ -18,72 +18,527 @@ package v1alpha1
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
+	"path"
+	"strings"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// log is for logging in this package.
-var yanetconfiglog = logf.Log.WithName("yanetconfig-webhook")
+// yanetConfigLog is the package-level logger for YanetConfig webhook.
+var yanetConfigLog = logf.Log.WithName("yanetconfig-webhook")
 
-// SetupWebhookWithManager will setup the manager to manage the webhooks
-func (r *YanetConfig) SetupWebhookWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewWebhookManagedBy(mgr, r).
-		WithValidator(r).
+// YanetConfigCustomValidator validates a YanetConfig CR against the
+// final model: unique names, cross-references between boxTypes /
+// patches / operators, and a dry-run of every strategic-merge patch
+// against an empty appsv1.Deployment.
+// +kubebuilder:object:generate=false
+type YanetConfigCustomValidator struct{}
+
+var _ admission.Validator[*YanetConfig] = &YanetConfigCustomValidator{}
+
+// SetupYanetConfigWebhookWithManager wires the YanetConfig validating
+// webhook to the controller manager.
+func SetupYanetConfigWebhookWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewWebhookManagedBy(mgr, &YanetConfig{}).
+		WithValidator(&YanetConfigCustomValidator{}).
 		Complete()
 }
 
 //+kubebuilder:webhook:path=/validate-yanet-yanet-platform-io-v1alpha1-yanetconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=yanet.yanet-platform.io,resources=yanetconfigs,verbs=create;update,versions=v1alpha1,name=vyanetconfig.kb.io,admissionReviewVersions=v1
 
-var _ admission.Validator[*YanetConfig] = &YanetConfig{}
-
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *YanetConfig) ValidateCreate(ctx context.Context, obj *YanetConfig) (admission.Warnings, error) {
-	yanetconfiglog.Info("validate create", "name", obj.Name)
-
-	return obj.validateYanetConfig()
+// ValidateCreate implements admission.Validator.
+func (v *YanetConfigCustomValidator) ValidateCreate(ctx context.Context, cfg *YanetConfig) (admission.Warnings, error) {
+	yanetConfigLog.Info("validate create", "name", cfg.Name)
+	if err := validateYanetConfigIdentity(cfg); err != nil {
+		return nil, err
+	}
+	return nil, validateYanetConfig(&cfg.Spec)
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *YanetConfig) ValidateUpdate(ctx context.Context, oldObj, newObj *YanetConfig) (admission.Warnings, error) {
-	yanetconfiglog.Info("validate update", "name", newObj.Name)
-
-	return newObj.validateYanetConfig()
+// ValidateUpdate implements admission.Validator.
+func (v *YanetConfigCustomValidator) ValidateUpdate(ctx context.Context, _, cfg *YanetConfig) (admission.Warnings, error) {
+	yanetConfigLog.Info("validate update", "name", cfg.Name)
+	if err := validateYanetConfigIdentity(cfg); err != nil {
+		return nil, err
+	}
+	return nil, validateYanetConfig(&cfg.Spec)
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *YanetConfig) ValidateDelete(ctx context.Context, obj *YanetConfig) (admission.Warnings, error) {
-	yanetconfiglog.Info("validate delete", "name", obj.Name)
-
-	// No validation needed for delete
+// ValidateDelete implements admission.Validator. Deletes are always
+// allowed.
+func (v *YanetConfigCustomValidator) ValidateDelete(ctx context.Context, _ *YanetConfig) (admission.Warnings, error) {
 	return nil, nil
 }
 
-// validateYanetConfig performs common validation for YanetConfig
-func (r *YanetConfig) validateYanetConfig() (admission.Warnings, error) {
-	var warnings admission.Warnings
-
-	// Validate UpdateWindow is non-negative
-	if r.Spec.UpdateWindow < 0 {
-		return nil, fmt.Errorf("spec.updatewindow must be >= 0, got %d", r.Spec.UpdateWindow)
+func validateYanetConfigIdentity(cfg *YanetConfig) error {
+	if cfg.Name != YanetConfigName {
+		return fmt.Errorf("metadata.name must be %q for the cluster-wide YanetConfig singleton", YanetConfigName)
 	}
+	return nil
+}
 
-	// Warn if Stop is enabled
-	if r.Spec.Stop {
-		warnings = append(warnings, "Stop is enabled - operator will not reconcile resources")
+// validateYanetConfig runs the full model check: name uniqueness,
+// cross-references, and a strategic-merge dry-run for every patch.
+//
+// On the first error the function bails out — the caller (admission)
+// rejects the request with a single message.
+func validateYanetConfig(spec *YanetConfigSpec) error {
+	if spec.UpdateWindow < 0 {
+		return fmt.Errorf("spec.updateWindow must be >= 0, got %d", spec.UpdateWindow)
 	}
+	const maxUpdateWindow = math.MaxInt64 / int64(time.Second)
+	if int64(spec.UpdateWindow) > maxUpdateWindow {
+		return fmt.Errorf("spec.updateWindow must not exceed %d seconds, got %d", maxUpdateWindow, spec.UpdateWindow)
+	}
+	if err := validatePatchUniqueness(spec.Patches); err != nil {
+		return err
+	}
+	if err := dryRunPatches(spec.Patches); err != nil {
+		return err
+	}
+	if err := validateOperatorUniqueness(spec.Components.Operators); err != nil {
+		return err
+	}
+	if err := validateSidecarUniqueness(&spec.Components); err != nil {
+		return err
+	}
+	if err := validateBoxTypeUniqueness(spec.BoxTypes); err != nil {
+		return err
+	}
+	if err := validateBoxTypeRefs(spec); err != nil {
+		return err
+	}
+	if err := validateHugepages(spec.Components.Dataplane.Hugepages); err != nil {
+		return err
+	}
+	if err := ValidateNetworkAttachments(spec.Components.Dataplane.Networks); err != nil {
+		return fmt.Errorf("spec.components.dataplane.%w", err)
+	}
+	if err := validateComponentImages(&spec.Components); err != nil {
+		return err
+	}
+	if err := validateConfigSources(&spec.Components); err != nil {
+		return err
+	}
+	if err := validateDisabledNuma(&spec.Components.Controlplane); err != nil {
+		return err
+	}
+	return nil
+}
 
-	// Warn if AutoDiscovery is enabled without required URIs
-	if r.Spec.AutoDiscovery.Enable {
-		if r.Spec.AutoDiscovery.TypeUri == "" {
-			warnings = append(warnings, "AutoDiscovery is enabled but TypeUri is not set")
+func validateComponentImages(components *ComponentsSpec) error {
+	validate := func(path string, image ImageRef) error {
+		if image.Name == "" {
+			return fmt.Errorf("%s.name is required", path)
 		}
-		if r.Spec.AutoDiscovery.Namespace == "" {
-			warnings = append(warnings, "AutoDiscovery is enabled but Namespace is not set, using default")
+		return nil
+	}
+	if err := validate("spec.components.controlplane.image", components.Controlplane.Image); err != nil {
+		return err
+	}
+	if err := validate("spec.components.dataplane.image", components.Dataplane.Image); err != nil {
+		return err
+	}
+	for i, sidecar := range components.Dataplane.Sidecars {
+		if err := validate(fmt.Sprintf("spec.components.dataplane.sidecars[%d:%s].image", i, sidecar.Name), sidecar.Image); err != nil {
+			return err
 		}
 	}
+	if components.BirdAdapter != nil {
+		if err := validate("spec.components.birdAdapter.image", components.BirdAdapter.Image); err != nil {
+			return err
+		}
+	}
+	for i := range components.Operators {
+		for j := range components.Operators[i].Containers {
+			if err := validate(
+				fmt.Sprintf("spec.components.operators[%d].containers[%d].image", i, j),
+				components.Operators[i].Containers[j].Image,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
-	return warnings, nil
+func validateConfigSources(components *ComponentsSpec) error {
+	validate := func(fieldPath string, source *ConfigSource) error {
+		if source == nil {
+			return nil
+		}
+		if variants := source.VariantsSet(); variants != 1 {
+			return fmt.Errorf("%s must define exactly one of inline or hostPath, got %d", fieldPath, variants)
+		}
+		if source.HostPath != "" && !path.IsAbs(source.HostPath) {
+			return fmt.Errorf("%s.hostPath must be an absolute path", fieldPath)
+		}
+		if source.MountPath != "" && !path.IsAbs(source.MountPath) {
+			return fmt.Errorf("%s.mountPath must be an absolute path", fieldPath)
+		}
+		return nil
+	}
+
+	if err := validate("spec.components.controlplane.config", components.Controlplane.Config); err != nil {
+		return err
+	}
+	if err := validate("spec.components.dataplane.config", components.Dataplane.Config); err != nil {
+		return err
+	}
+	for i, sidecar := range components.Dataplane.Sidecars {
+		if err := validate(fmt.Sprintf("spec.components.dataplane.sidecars[%d:%s].config", i, sidecar.Name), sidecar.Config); err != nil {
+			return err
+		}
+	}
+	if components.BirdAdapter != nil {
+		if err := validate("spec.components.birdAdapter.config", components.BirdAdapter.Config); err != nil {
+			return err
+		}
+	}
+	for i := range components.Operators {
+		operator := &components.Operators[i]
+		for j := range operator.Containers {
+			container := &operator.Containers[j]
+			path := fmt.Sprintf("spec.components.operators[%d:%s].containers[%d:%s].config", i, operator.Name, j, container.Name)
+			if err := validate(path, container.Config); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateDisabledNuma checks the cluster-wide controlplane NUMA
+// opt-out list: indices must be non-negative, and the list must not
+// disable every NUMA domain the fan-out would produce (that would
+// leave the installation without any controlplane at all — use the
+// boxType or `enabled: false` to drop the component instead).
+//
+// An omitted `numa` uses the same single-domain default as the builder.
+func validateDisabledNuma(cp *ControlplaneSpec) error {
+	if cp.Numa != nil {
+		if err := ValidateControlplaneNuma(*cp.Numa); err != nil {
+			return err
+		}
+	}
+	if len(cp.DisabledNuma) == 0 {
+		return nil
+	}
+	seen := make(map[int32]struct{}, len(cp.DisabledNuma))
+	for _, n := range cp.DisabledNuma {
+		if n < 0 {
+			return fmt.Errorf(
+				"spec.components.controlplane.disabledNuma must contain non-negative indices, got %d", n)
+		}
+		seen[n] = struct{}{}
+	}
+	count := int32(1)
+	if cp.Numa != nil {
+		count = *cp.Numa
+	}
+	disabled := int32(0)
+	for index := range seen {
+		if index < count {
+			disabled++
+		}
+	}
+	if disabled >= count {
+		return fmt.Errorf(
+			"spec.components.controlplane.disabledNuma disables every one of the %d NUMA domains; "+
+				"drop the controlplane from the boxType instead", count)
+	}
+	return nil
+}
+
+func validateHugepages(hugepages *Hugepages) error {
+	if hugepages == nil {
+		return nil
+	}
+	if _, err := hugepages.TotalQuantity(); err != nil {
+		return fmt.Errorf("spec.components.dataplane.hugepages.%w", err)
+	}
+	return nil
+}
+
+func validatePatchUniqueness(patches []NamedPatch) error {
+	seen := make(map[string]struct{}, len(patches))
+	for i := range patches {
+		name := patches[i].Name
+		if name == "" {
+			return fmt.Errorf("spec.patches[%d].name is empty", i)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("spec.patches[%d].name %q is duplicated", i, name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+func validateOperatorUniqueness(ops []OperatorSpec) error {
+	reservedNames := map[string]struct{}{
+		"controlplane": {},
+		"dataplane":    {},
+		"bird-adapter": {},
+	}
+	seen := make(map[string]struct{}, len(ops))
+	for i := range ops {
+		name := ops[i].Name
+		if name == "" {
+			return fmt.Errorf("spec.components.operators[%d].name is empty", i)
+		}
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("spec.components.operators[%d].name %q is invalid: %s", i, name, strings.Join(errs, "; "))
+		}
+		if _, reserved := reservedNames[name]; reserved {
+			return fmt.Errorf("spec.components.operators[%d].name %q is reserved for a built-in component", i, name)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("spec.components.operators[%d].name %q is duplicated", i, name)
+		}
+		seen[name] = struct{}{}
+
+		if err := ValidateOperatorListeners(&ops[i]); err != nil {
+			return err
+		}
+		if count := len(ops[i].Containers); count < 1 || count > 8 {
+			return fmt.Errorf("spec.components.operators[%d:%s].containers must contain between 1 and 8 entries, got %d", i, name, count)
+		}
+		containerNames := make(map[string]struct{}, len(ops[i].Containers))
+		for j := range ops[i].Containers {
+			cname := ops[i].Containers[j].Name
+			if cname == "" {
+				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name is required", i, name, j)
+			}
+			if errs := k8svalidation.IsDNS1123Label(cname); len(errs) > 0 {
+				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name %q is invalid: %s", i, name, j, cname, strings.Join(errs, "; "))
+			}
+			if _, dup := containerNames[cname]; dup {
+				return fmt.Errorf("spec.components.operators[%d:%s].containers[%d].name %q is duplicated", i, name, j, cname)
+			}
+			containerNames[cname] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateBoxTypeUniqueness(boxes []BoxType) error {
+	if len(boxes) == 0 {
+		return fmt.Errorf("spec.boxTypes must contain at least one entry")
+	}
+	seen := make(map[string]struct{}, len(boxes))
+	for i := range boxes {
+		name := boxes[i].Name
+		if name == "" {
+			return fmt.Errorf("spec.boxTypes[%d].name is empty", i)
+		}
+		if errs := k8svalidation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("spec.boxTypes[%d].name %q is invalid: %s", i, name, strings.Join(errs, "; "))
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("spec.boxTypes[%d].name %q is duplicated", i, name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
+func validateSidecarUniqueness(components *ComponentsSpec) error {
+	if len(components.Dataplane.Sidecars) > MaxDataplaneSidecars {
+		return fmt.Errorf("spec.components.dataplane.sidecars exhausts the listener port range")
+	}
+	seen := map[string]bool{"controlplane": true, "dataplane": true, "bird-adapter": true}
+	for _, operator := range components.Operators {
+		seen[operator.Name] = true
+	}
+	for index, sidecar := range components.Dataplane.Sidecars {
+		if errs := k8svalidation.IsDNS1123Label(sidecar.Name); len(errs) > 0 {
+			return fmt.Errorf("spec.components.dataplane.sidecars[%d].name %q is invalid: %s", index, sidecar.Name, strings.Join(errs, "; "))
+		}
+		if seen[sidecar.Name] {
+			return fmt.Errorf("spec.components.dataplane.sidecars[%d].name %q duplicates a role or is reserved", index, sidecar.Name)
+		}
+		seen[sidecar.Name] = true
+		if err := ValidateListeners(sidecar.Name, sidecar.Listeners); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateBoxTypeRefs ensures every patch name listed in a boxType
+// component or operator slot exists in the patch registry, and every
+// operator key in box.operators[] exists in components.operators[].
+//
+// It also enforces the box-shape contract: a box must wire at least
+// controlplane and dataplane (other components are optional).
+func validateBoxTypeRefs(spec *YanetConfigSpec) error {
+	patchSet := make(map[string]struct{}, len(spec.Patches))
+	for i := range spec.Patches {
+		patchSet[spec.Patches[i].Name] = struct{}{}
+	}
+	operatorSet := make(map[string]struct{}, len(spec.Components.Operators))
+	for i := range spec.Components.Operators {
+		operatorSet[spec.Components.Operators[i].Name] = struct{}{}
+	}
+
+	for i := range spec.BoxTypes {
+		box := &spec.BoxTypes[i]
+		path := fmt.Sprintf("spec.boxTypes[%d:%s]", i, box.Name)
+
+		if box.Components.Controlplane == nil {
+			return fmt.Errorf("%s.components.controlplane is required", path)
+		}
+		if box.Components.Dataplane == nil {
+			return fmt.Errorf("%s.components.dataplane is required", path)
+		}
+
+		// hardcoded slots
+		if err := assertPatchesExist(path+".components.controlplane.patches", box.Components.Controlplane.Patches, patchSet); err != nil {
+			return err
+		}
+		if err := assertPatchesExist(path+".components.dataplane.patches", box.Components.Dataplane.Patches, patchSet); err != nil {
+			return err
+		}
+		if err := validateDataplaneSidecarRefs(path, spec, box.Components.Dataplane, patchSet); err != nil {
+			return err
+		}
+		if box.Components.BirdAdapter != nil {
+			if spec.Components.BirdAdapter == nil {
+				return fmt.Errorf("%s.components.birdAdapter has no matching spec.components.birdAdapter", path)
+			}
+			if err := assertPatchesExist(path+".components.birdAdapter.patches", box.Components.BirdAdapter.Patches, patchSet); err != nil {
+				return err
+			}
+		}
+		// operators
+		for opName, opSlot := range box.Operators {
+			if _, ok := operatorSet[opName]; !ok {
+				return fmt.Errorf("%s.operators[%s]: operator is not declared in spec.components.operators", path, opName)
+			}
+			if err := assertPatchesExist(path+".operators["+opName+"].patches", opSlot.Patches, patchSet); err != nil {
+				return err
+			}
+		}
+		if err := validateBoxPrivateNetwork(spec, box); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// validateBoxPrivateNetwork checks ordered patch results for every wired role.
+// The renderer repeats this check on the fully composed Pod before any writes.
+func validateBoxPrivateNetwork(spec *YanetConfigSpec, box *BoxType) error {
+	registry := make(map[string][]byte, len(spec.Patches))
+	for _, patch := range spec.Patches {
+		registry[patch.Name] = patch.Patch.Raw
+	}
+	groups := map[string][]string{
+		"controlplane": box.Components.Controlplane.Patches,
+		"dataplane":    box.Components.Dataplane.Patches,
+	}
+	if box.Components.BirdAdapter != nil {
+		groups["birdAdapter"] = box.Components.BirdAdapter.Patches
+	}
+	for name, operator := range box.Operators {
+		groups[name] = operator.Patches
+	}
+	for name, sidecar := range box.Components.Dataplane.Sidecars {
+		groups[name] = sidecar.Patches
+	}
+	for role, names := range groups {
+		merged := []byte(`{}`)
+		for _, name := range names {
+			var err error
+			merged, err = strategicpatch.StrategicMergePatch(merged, registry[name], appsv1.Deployment{})
+			if err != nil {
+				return fmt.Errorf("%s patch %q: %w", role, name, err)
+			}
+		}
+		var effective appsv1.Deployment
+		if err := json.Unmarshal(merged, &effective); err != nil {
+			return fmt.Errorf("decode patched %s: %w", role, err)
+		}
+		if err := ValidatePrivatePodNetwork(&effective.Spec.Template.Spec); err != nil {
+			return fmt.Errorf("%s: %w", role, err)
+		}
+	}
+	return nil
+}
+
+func validateDataplaneSidecarRefs(path string, spec *YanetConfigSpec, box *BoxDataplane, patchSet map[string]struct{}) error {
+	declared := make(map[string]bool, len(spec.Components.Dataplane.Sidecars))
+	for _, sidecar := range spec.Components.Dataplane.Sidecars {
+		declared[sidecar.Name] = true
+	}
+	for name, slot := range box.Sidecars {
+		field := path + ".components.dataplane.sidecars[" + name + "]"
+		if !declared[name] {
+			return fmt.Errorf("%s has no matching spec.components.dataplane.sidecars entry", field)
+		}
+		if err := assertPatchesExist(field+".patches", slot.Patches, patchSet); err != nil {
+			return err
+		}
+		for _, patchName := range slot.Patches {
+			for _, patch := range spec.Patches {
+				if patch.Name == patchName {
+					if err := ValidateSidecarPatch(patch.Patch.Raw); err != nil {
+						return fmt.Errorf("%s patch %q: %w", field, patchName, err)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func assertPatchesExist(path string, refs []string, registry map[string]struct{}) error {
+	for i, name := range refs {
+		if _, ok := registry[name]; !ok {
+			return fmt.Errorf("%s[%d]: patch %q is not defined in spec.patches", path, i, name)
+		}
+	}
+	return nil
+}
+
+// dryRunPatches verifies JSON object shape, strategic-merge applicability and
+// decoding of the merged Deployment's field types. This is not full Kubernetes
+// validation: the reconciler still checks the final rendered workload invariants.
+func dryRunPatches(patches []NamedPatch) error {
+	skeleton, err := json.Marshal(&appsv1.Deployment{})
+	if err != nil {
+		return fmt.Errorf("internal: marshal empty Deployment: %w", err)
+	}
+	for i := range patches {
+		raw := patches[i].Patch.Raw
+		if len(raw) == 0 {
+			return fmt.Errorf("spec.patches[%d:%s].patch is empty", i, patches[i].Name)
+		}
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &probe); err != nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch is not valid JSON: %w", i, patches[i].Name, err)
+		}
+		if probe == nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch must be a JSON object, not null", i, patches[i].Name)
+		}
+		merged, err := strategicpatch.StrategicMergePatch(skeleton, raw, appsv1.Deployment{})
+		if err != nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch is not a valid strategic merge fragment of appsv1.Deployment: %w", i, patches[i].Name, err)
+		}
+		var deployment appsv1.Deployment
+		if err := json.Unmarshal(merged, &deployment); err != nil {
+			return fmt.Errorf("spec.patches[%d:%s].patch has invalid Deployment field types: %w", i, patches[i].Name, err)
+		}
+	}
+	return nil
 }

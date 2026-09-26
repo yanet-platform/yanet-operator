@@ -1,0 +1,43 @@
+# Yanet CR (boxType=balancer) with typed per-installation overrides.
+# Available overrides (these only, no patches):
+#   components.<name>.enabled                       — true → replicas=1, false → replicas=0 (same as enable in v1)
+#   components.<name>.containers.<cname>.name       — override image name for container <cname>
+#   components.<name>.containers.<cname>.tag        — override image tag for container <cname>
+#   components.dataplane.sidecars.<sidecar>.enabled — enable/disable a wired native sidecar
+#   components.dataplane.sidecars.<sidecar>.name/tag — override its image
+#   components.controlplane.disabledNuma            — replace the default NUMA exclusions
+#
+# For fixed workloads <cname> equals the rendered container name. For operators
+# it must match an OperatorContainer.name from YanetConfig.
+---
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: Yanet
+metadata:
+  name: edge-pop1-balancer
+  namespace: yanet
+spec:
+  boxType: balancer
+  nodeSelector:
+    role: yanet-edge
+    type: balancer
+  enabled: true
+  autoSync: false        # manual rollouts for this installation
+
+  components:
+    # Pinpoint version pinning of cp/dp on this installation.
+    controlplane:
+      containers:
+        controlplane: {tag: v2.1.5-hotfix}
+    dataplane:
+      containers:
+        dataplane: {tag: v2.1.5-hotfix}
+      sidecars:
+        # Omit BIRD while retaining neighbour-sidecar/netconfig and their slots.
+        bird: {enabled: false}
+
+    # Replace bird-adapter image with a fork.
+    birdAdapter:
+      containers:
+        bird-adapter:
+          name: bird-adapter-forked
+          tag: v0.3-fork
