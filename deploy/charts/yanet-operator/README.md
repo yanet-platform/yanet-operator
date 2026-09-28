@@ -114,9 +114,11 @@ intermediate endpoint patches. All Pods require private networking and reject ho
 Sidecar index `i` reserves `8080+2*i` / `8081+2*i` even when disabled or unselected.
 External Service ports stay 8080/8081. `listeners: []` disables the Service, not the
 slot or host-config env. Metrics requires explicit `[http]`. Managed HostPath
-configs receive runtime bind, advertise and complete named NUMA gateway env after
-patches; ConfigMap content stays opaque. Deploy compatible runtime images and
-prepare host gateway identities/TLS before enabling the new profile.
+configs receive runtime bind, advertise and `YANET_GATEWAYS_<index>_ENDPOINT` env
+after patches; ConfigMap content stays opaque. Runtime images use standard
+`xcfg.WithEnv()`. Host configs already contain the correct active gateways in
+ascending physical NUMA order, with their names and TLS settings. Env indices are
+positions in that list, not physical NUMA IDs; only endpoints are changed.
 
 Optional `config.mountPath` is available for every configuration source.
 It selects an absolute container directory and defaults to `/etc/yanet2`.

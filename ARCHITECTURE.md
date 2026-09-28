@@ -148,11 +148,20 @@ Every final Pod uses private networking. `hostNetwork: true` and nonzero
   and physical NUMA identity, not the installation or node name.
 
 Only a managed HostPath config remaining after patches enables automatic runtime
-bind/Service-FQDN advertise and the complete named NUMA gateway environment.
+bind/Service-FQDN advertise and indexed gateway endpoint environment.
 Inline or externally patched ConfigMaps are opaque and get no automatic network
-environment. Managed environment values override conflicting patches. Runtime
-images must support `YANET_KUBERNETES_GATEWAYS`; the operator does not inspect
-application configuration addresses, ports or TLS content.
+environment. Managed environment values override conflicting patches.
+
+Runtime images use the existing `xcfg.WithEnv()` YAML-path contract:
+`YANET_SERVER_ENDPOINT`, `YANET_SERVER_ADVERTISE_ENDPOINT` and
+`YANET_GATEWAYS_<index>_ENDPOINT`. Host configs already contain the correct active
+gateways in ascending physical NUMA order. The index is the position in that list,
+not the NUMA ID: a config containing only `numa1` uses
+`YANET_GATEWAYS_0_ENDPOINT` pointing to the `controlplane-numa1` Service.
+Only endpoints are overridden; list membership, names and TLS remain in the host
+config. The operator neither reads nor rewrites application configuration.
+Other YAML schemas, such as an ACL's nested `operator.instances`, require explicit
+schema-specific env in palette patches through the same runtime loader.
 
 Before moving a role between standalone and dataplane, drain its current
 producers. Deployment/ReplicaSet/Pod guards prevent overlapping producers, and

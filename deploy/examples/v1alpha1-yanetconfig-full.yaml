@@ -1,5 +1,5 @@
 # Illustrative images: replace :example with independently tested releases.
-# Prepare host configs and a runtime supporting YANET_KUBERNETES_GATEWAYS first.
+# Prepare correct host gateway lists and a runtime supporting xcfg.WithEnv() first.
 # ConfigMap content is opaque. Only managed HostPath configs receive network env.
 # No runtime Kubernetes probes or blocking KNI waits: readiness is application-owned.
 apiVersion: yanet.yanet-platform.io/v1alpha1

@@ -62,9 +62,9 @@ type BuildContext struct {
 	// OwnerRef makes generated objects garbage-collected with the
 	// Yanet CR.
 	OwnerRef metav1.OwnerReference
-	// Gateways is the complete active physical-NUMA gateway selection.
-	// Nil means no deployment-specific gateway override was requested.
-	Gateways []GatewayEndpointOverride
+	// GatewayEndpoints follows the prepared host config's gateway list:
+	// active physical NUMA domains in ascending order, without gaps in list indices.
+	GatewayEndpoints []string
 }
 
 // BuildDeployments produces the Deployment skeletons for one

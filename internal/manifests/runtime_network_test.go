@@ -72,7 +72,7 @@ func TestRuntimeNetwork_AllSidecarsOwnSlotsAndHostEnvironment(t *testing.T) {
 		if container.Image != want.image || variables["YANET_SERVER_ENDPOINT"] != want.grpc {
 			t.Fatalf("sidecar %d: image/env = %s/%v, want %+v", index, container.Image, variables, want)
 		}
-		if variables["YANET_KUBERNETES_GATEWAYS"] != `[{"name":"numa1","endpoint":"yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080"}]` {
+		if variables["YANET_GATEWAYS_0_ENDPOINT"] != "yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080" {
 			t.Fatalf("sidecar %d lost the active physical NUMA gateway: %v", index, variables)
 		}
 		if container.RestartPolicy == nil || *container.RestartPolicy != corev1.ContainerRestartPolicyAlways {
@@ -282,7 +282,7 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 			if tc.name == "http" && variables["YANET_SERVER_ADVERTISE_ENDPOINT"] != "" {
 				t.Fatal("HTTP-only role advertised an absent gRPC Service")
 			}
-			if tc.role == helpers.KindOperator && variables["YANET_KUBERNETES_GATEWAYS"] != `[{"name":"numa1","endpoint":"yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080"}]` {
+			if tc.role == helpers.KindOperator && variables["YANET_GATEWAYS_0_ENDPOINT"] != "yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080" {
 				t.Fatalf("wrong physical NUMA selection: %v", variables)
 			}
 			if tc.role == helpers.KindControlplane && deployments[0].Labels[LabelNuma] != "1" {
@@ -290,6 +290,53 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 			}
 			if variables["YANET_SERVER_HTTP_ENDPOINT"] != "" {
 				t.Fatal("injected an unsupported generic HTTP runtime key")
+			}
+		})
+	}
+}
+
+// TestRuntimeNetwork_GatewayPositions verifies the environment consumed by xcfg:
+// dense positions in the prepared config, endpoints only, and no separate parser.
+func TestRuntimeNetwork_GatewayPositions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		disabled []int32
+		want     map[string]string
+	}{
+		{
+			name: "both domains",
+			want: map[string]string{
+				"YANET_GATEWAYS_0_ENDPOINT": "yanet-firewall-controlplane-numa0.yanet.svc.cluster.local:8080",
+				"YANET_GATEWAYS_1_ENDPOINT": "yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080",
+			},
+		},
+		{
+			name:     "prepared config contains only numa1",
+			disabled: []int32{0},
+			want: map[string]string{
+				"YANET_GATEWAYS_0_ENDPOINT": "yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080",
+			},
+		},
+		{
+			name:     "prepared config contains only numa0",
+			disabled: []int32{1},
+			want: map[string]string{
+				"YANET_GATEWAYS_0_ENDPOINT": "yanet-firewall-controlplane-numa0.yanet.svc.cluster.local:8080",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config, spec := runtimeNetworkFixture()
+			spec.Components.Controlplane.DisabledNuma = tc.disabled
+			config.Patches = []api.NamedPatch{patch("client-env", `{"spec":{"template":{"spec":{"containers":[{"name":"neighbour-sidecar","env":[{"name":"YANET_GATEWAYS_0_ENDPOINT","value":"stale:9000"},{"name":"YANET_GATEWAYS_0_TLS_SERVER_NAME","value":"gateway.example"}]}]}}}}`)}
+			config.BoxTypes[0].Components.Dataplane.Sidecars["neighbour-sidecar"] = api.BoxDataplaneSidecar{Patches: []string{"client-env"}}
+			deployment, _ := renderRuntimeDataplane(t, config, spec)
+			variables := envValues(deployment.Spec.Template.Spec.InitContainers[1].Env)
+			tc.want["YANET_SERVER_ENDPOINT"] = "[::]:8082"
+			tc.want["YANET_SERVER_ADVERTISE_ENDPOINT"] = "yanet-firewall-neighbour-sidecar.yanet.svc.cluster.local:8080"
+			tc.want["YANET_GATEWAYS_0_TLS_SERVER_NAME"] = "gateway.example"
+			if !reflect.DeepEqual(variables, tc.want) {
+				t.Fatalf("runtime environment = %v, want %v", variables, tc.want)
 			}
 		})
 	}
@@ -303,19 +350,19 @@ func TestRuntimeNetwork_ExplicitNUMAClearAndDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []GatewayEndpointOverride{
-		{Name: "numa0", Endpoint: "yanet-firewall-controlplane-numa0.yanet.svc.cluster.local:8080"},
-		{Name: "numa1", Endpoint: "yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080"},
+	want := []string{
+		"yanet-firewall-controlplane-numa0.yanet.svc.cluster.local:8080",
+		"yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080",
 	}
-	if !slices.Equal(build.Gateways, want) {
-		t.Fatalf("explicit empty override did not restore all gateways: %+v", build.Gateways)
+	if !slices.Equal(build.GatewayEndpoints, want) {
+		t.Fatalf("explicit empty override did not restore all gateways: %+v", build.GatewayEndpoints)
 	}
 	config.Components.Controlplane.Numa = nil
 	build, err = WithRuntimeNetwork(ctx(), config, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(build.Gateways, want[:1]) {
-		t.Fatalf("default NUMA must be exactly zero: %+v", build.Gateways)
+	if !slices.Equal(build.GatewayEndpoints, want[:1]) {
+		t.Fatalf("default NUMA must be exactly zero: %+v", build.GatewayEndpoints)
 	}
 }

@@ -126,9 +126,11 @@ palette and `[]` clears it. General annotations/resources belong in patches.
   Standalone Pods use 8080/8081; shared Service ports stay 8080/8081.
 - Omitted listeners default to grpc; HTTP-only requires `[http]`; `[]` suppresses
   the Service, not the reserved slot.
-- Only managed HostPath config enables runtime bind/advertise/named NUMA gateway
-  environment after patches. ConfigMap contents stay opaque. Do not validate
-  application configuration addresses/ports in the operator.
+- Only managed HostPath config enables runtime bind/advertise/indexed gateway
+  endpoint environment after patches through the standard `xcfg.WithEnv()` contract.
+  Host configs already contain active gateways in ascending physical NUMA order;
+  env indices are list positions, not NUMA IDs. Preserve names, TLS and membership.
+  ConfigMap contents stay opaque. Do not validate application addresses/ports here.
 - Typed networks couple externally managed NADs to matching resource quantities.
   Reject patches conflicting with the managed Multus annotation/reservations.
 - Preserve role-migration drain and shared-Service cutover guards.

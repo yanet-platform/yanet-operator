@@ -1,7 +1,6 @@
 package manifests
 
 import (
-	"encoding/json"
 	"fmt"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
@@ -10,12 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// GatewayEndpointOverride matches the shared runtime's named selection contract.
-type GatewayEndpointOverride struct {
-	Name     string `json:"name"`
-	Endpoint string `json:"endpoint"`
-}
-
 // WithRuntimeNetwork resolves physical NUMA endpoints once for a rendering pass.
 func WithRuntimeNetwork(ctx BuildContext, config *api.YanetConfigSpec, spec *api.YanetSpec) (BuildContext, error) {
 	controlplane, err := helpers.ResolveBoxComponent(config, spec, helpers.KindControlplane, "")
@@ -23,16 +16,14 @@ func WithRuntimeNetwork(ctx BuildContext, config *api.YanetConfigSpec, spec *api
 		return ctx, err
 	}
 	if controlplane != nil {
-		ctx.Gateways = []GatewayEndpointOverride{}
+		ctx.GatewayEndpoints = nil
 		disabled := disabledNumaSet(controlplane)
 		for index := int32(0); index < effectiveNuma(controlplane); index++ {
 			if _, skip := disabled[index]; skip {
 				continue
 			}
-			ctx.Gateways = append(ctx.Gateways, GatewayEndpointOverride{
-				Name:     fmt.Sprintf("numa%d", index),
-				Endpoint: serviceEndpoint(ctx, SharedServiceName(ctx.BoxType, controlplane.Name, &index), ServiceGRPCPort),
-			})
+			ctx.GatewayEndpoints = append(ctx.GatewayEndpoints,
+				serviceEndpoint(ctx, SharedServiceName(ctx.BoxType, controlplane.Name, &index), ServiceGRPCPort))
 		}
 	}
 	return ctx, nil
@@ -112,12 +103,13 @@ func configureRuntimeContainer(deployment *appsv1.Deployment, ctx BuildContext, 
 				})
 			}
 		}
-		if ctx.Gateways != nil {
-			value, err := json.Marshal(ctx.Gateways)
-			if err != nil {
-				return fmt.Errorf("encode gateway endpoints: %w", err)
-			}
-			variables = append(variables, corev1.EnvVar{Name: "YANET_KUBERNETES_GATEWAYS", Value: string(value)})
+		// Host configs already contain the active gateways in physical NUMA order.
+		// xcfg indexes that list densely; it does not select or rename gateways.
+		for index, endpoint := range ctx.GatewayEndpoints {
+			variables = append(variables, corev1.EnvVar{
+				Name:  fmt.Sprintf("YANET_GATEWAYS_%d_ENDPOINT", index),
+				Value: endpoint,
+			})
 		}
 	}
 	owned := make(map[string]bool, len(variables))

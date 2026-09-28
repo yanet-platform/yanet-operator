@@ -3,6 +3,7 @@ package manifests
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,8 +45,11 @@ func TestControlplaneNumaMaximumPhysicalDomains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(build.Gateways) != 2 || build.Gateways[0].Name != "numa1" || build.Gateways[1].Name != "numa3" {
-		t.Fatalf("physical gateways changed: %+v", build.Gateways)
+	if !slices.Equal(build.GatewayEndpoints, []string{
+		"yanet-firewall-controlplane-numa1.yanet.svc.cluster.local:8080",
+		"yanet-firewall-controlplane-numa3.yanet.svc.cluster.local:8080",
+	}) {
+		t.Fatalf("physical gateways changed: %+v", build.GatewayEndpoints)
 	}
 	component, err := helpers.ResolveBoxComponent(config, spec, helpers.KindControlplane, "")
 	if err != nil {
@@ -87,8 +91,8 @@ func TestControlplaneNumaDefaultAndExplicitZero(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || len(build.Gateways) != 1 || build.Gateways[0].Name != "numa0" {
-				t.Fatalf("nil NUMA must retain the single-domain default: %+v / %v", build.Gateways, err)
+			if err != nil || !slices.Equal(build.GatewayEndpoints, []string{"yanet-firewall-controlplane-numa0.yanet.svc.cluster.local:8080"}) {
+				t.Fatalf("nil NUMA must retain the single-domain default: %+v / %v", build.GatewayEndpoints, err)
 			}
 		})
 	}
