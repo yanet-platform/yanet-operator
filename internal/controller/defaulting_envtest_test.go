@@ -227,6 +227,31 @@ func TestAPIServerDefaulting(t *testing.T) {
 		}
 		checkSynced(t)
 	})
+	t.Run("cordon-preserves-workloads", func(t *testing.T) {
+		before := deployments(t)
+		node := reviewNode()
+		for _, unschedulable := range []bool{true, true, false} {
+			if err := c.Get(testContext, client.ObjectKeyFromObject(node), node); err != nil {
+				t.Fatal(err)
+			}
+			node.Spec.Unschedulable = unschedulable
+			if err := c.Update(testContext, node); err != nil {
+				t.Fatal(err)
+			}
+			reconcile(t)
+			for _, original := range before {
+				got := &appsv1.Deployment{}
+				if err := c.Get(testContext, client.ObjectKeyFromObject(&original), got); err != nil {
+					t.Fatalf("cordon=%t lost Deployment %s: %v", unschedulable, original.Name, err)
+				}
+				if !got.DeletionTimestamp.IsZero() || got.UID != original.UID || got.ResourceVersion != original.ResourceVersion {
+					t.Fatalf("cordon=%t must not delete, recreate or update Deployment %s: UID %s -> %s, RV %s -> %s, deletionTimestamp=%v",
+						unschedulable, original.Name, original.UID, got.UID, original.ResourceVersion, got.ResourceVersion, got.DeletionTimestamp)
+				}
+			}
+			checkSynced(t)
+		}
+	})
 	t.Run("no-throttle", func(t *testing.T) {
 		snapshot.Lock.Lock()
 		snapshot.Config.UpdateWindow = 3600

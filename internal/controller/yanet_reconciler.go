@@ -707,24 +707,15 @@ func (r *YanetReconciler) snapshotYanetConfig() (yanetv1alpha1.YanetConfigSpec, 
 	return *r.GlobalConfig.Config.DeepCopy(), true
 }
 
-// listNodesForYanet lists the nodes that match
-// Yanet.spec.nodeSelector. An empty selector matches all schedulable
-// nodes.
+// listNodesForYanet lists the nodes that match Yanet.spec.nodeSelector.
+// An empty selector matches all nodes. Cordon changes scheduling, not ownership:
+// excluding unschedulable nodes would prune their existing workloads as orphans.
 func (r *YanetReconciler) listNodesForYanet(ctx context.Context, yanet *yanetv1alpha1.Yanet) ([]corev1.Node, error) {
 	nodes := &corev1.NodeList{}
 	if err := r.Client.List(ctx, nodes, client.MatchingLabels(yanet.Spec.NodeSelector)); err != nil {
 		return nil, err
 	}
-	out := make([]corev1.Node, 0, len(nodes.Items))
-	for i := range nodes.Items {
-		// Skip nodes marked unschedulable to avoid creating
-		// Deployments that will never schedule.
-		if nodes.Items[i].Spec.Unschedulable {
-			continue
-		}
-		out = append(out, nodes.Items[i])
-	}
-	return out, nil
+	return nodes.Items, nil
 }
 
 // validateExclusiveNodes enforces the host-resource invariant that one node
