@@ -103,6 +103,10 @@ deletion before releasing the installation finalizer and node claim.
 `enabled: false` with `autoSync: true` scales the installation's Deployments to zero.
 Shared Services have a separate lifecycle and remain available for box-type roles.
 
+Node selection depends on labels, not schedulability. Cordon must not remove a
+matching node from the desired set or prune its workloads. Scheduling constraints
+do not revoke the installation's ownership of that node.
+
 ### Three-tier configuration
 
 1. `YanetConfig.spec.components`: controlplane, dataplane, optional birdAdapter,

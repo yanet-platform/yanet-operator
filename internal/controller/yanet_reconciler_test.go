@@ -661,7 +661,7 @@ func TestReconcile_AutoSyncOn_CreatesDeploymentsAndReportsSharedServices(t *test
 	}
 }
 
-func TestReconcile_UnschedulableNodeSkipped(t *testing.T) {
+func TestReconcile_CordonedNodeRemainsSelected(t *testing.T) {
 	autoSync := true
 	yanet := &yanetv1alpha1.Yanet{
 		ObjectMeta: metav1.ObjectMeta{Name: "y", Namespace: "yanet"},
@@ -677,19 +677,25 @@ func TestReconcile_UnschedulableNodeSkipped(t *testing.T) {
 	}
 	r, snap := makeReconcilerEnv(t, yanet, node)
 	snap.Config = minimalConfig()
-	if _, err := r.reconcileYanet(context.Background(), yanet); err != nil {
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(yanet)}
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("finalizer install: %v", err)
 	}
-	if err := r.Client.Get(context.Background(), types.NamespacedName{Name: "y", Namespace: "yanet"}, yanet); err != nil {
-		t.Fatalf("re-get: %v", err)
-	}
-	if _, err := r.reconcileYanet(context.Background(), yanet); err != nil {
+	if _, err := r.Reconcile(context.Background(), request); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	deps := &appsv1.DeploymentList{}
-	_ = r.Client.List(context.Background(), deps, client.InNamespace("yanet"))
-	if len(deps.Items) != 0 {
-		t.Errorf("unschedulable node must be skipped, got %d deployments", len(deps.Items))
+	if err := r.Client.List(context.Background(), deps, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list deployments: %v", err)
+	}
+	if len(deps.Items) != 2 {
+		t.Fatalf("cordoned node must retain desired cp+dp, got %d deployments", len(deps.Items))
+	}
+	if err := r.Client.Get(context.Background(), request.NamespacedName, yanet); err != nil {
+		t.Fatalf("get Yanet: %v", err)
+	}
+	if len(yanet.Status.NodesStatus[node.Name].Deployments) != 2 {
+		t.Errorf("cordoned node must remain in desired status: %+v", yanet.Status.NodesStatus)
 	}
 }
 
