@@ -129,8 +129,8 @@ pair, with stable external `8080/8081`. Sidecars use membership-label selectors.
 Every role defaults omitted listeners to `[grpc]`; metrics must explicitly select
 `[http]`. `listeners: []` disables Service exposure, not the slot or host-config env.
 Only the managed config volume after patches enables the HostPath overlay; inline
-ConfigMap/no-config roles receive none. Runtime gateway env selects active
-physical `numa<N>` entries and preserves their TLS. See
+ConfigMap/no-config roles receive none. Standard indexed runtime env changes only
+endpoints in the already-correct gateway list; identities and TLS stay in YAML. See
 [the environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
 
 ## 4. Dependencies
@@ -139,7 +139,8 @@ physical `numa<N>` entries and preserves their TLS. See
   target ports exposed by restartable init-container sidecars.
 - Host requirements: hugepages, `hostIPC`, DPDK devices, and netplan input.
   Final `hostNetwork: true` and nonzero `hostPort` are unsupported.
-- Compatible runtime images and prepared host configs for named gateway overrides.
+- Runtime images with `xcfg.WithEnv()` and prepared host configs with the correct
+  active gateways in ascending physical NUMA order.
   ACL runtime support is an external integration prerequisite.
 
 ## 5. Mermaid diagram

@@ -122,11 +122,17 @@ All runtime Pods use private networking; `hostNetwork: true` and nonzero
 Shared Services `yanet-<boxType>-<role>[-numa<N>]` expose 8080/8081 with
 `internalTrafficPolicy: Local`; they remain present for disabled roles.
 
-Managed HostPath config receives runtime bind/advertise and named NUMA gateway
+Managed HostPath config receives runtime bind/advertise and indexed gateway endpoint
 environment after patches. Inline ConfigMap data stays opaque and receives no
 automatic environment. Optional `config.mountPath` selects the container directory
 (default `/etc/yanet2`); inline data is mounted as `<mountPath>/config`.
 Only `{numa}` in controlplane arguments is substituted; all other arguments are literal.
+
+Gateway endpoints use standard `xcfg.WithEnv()` variables
+`YANET_GATEWAYS_<index>_ENDPOINT`. Host configs already define the correct active
+gateways in ascending physical NUMA order; indices are list positions, not NUMA IDs.
+Names, TLS and list membership stay in the config. No runtime-specific gateway
+selection parser is required. See the [environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
 
 Typed `components.dataplane.networks` couples existing NADs to device resources.
 An installation list replaces the palette, `[]` clears it, and omission/null
