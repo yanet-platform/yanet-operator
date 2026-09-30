@@ -4,9 +4,10 @@ Application releases follow [Semantic Versioning](https://semver.org/).
 Incompatible API changes require a major release. Helm chart versions are
 independent and must also be new for each release.
 
-The next release is **operator 3.0.0 / chart 0.2.0**. Its API reset and replacement
-procedure are documented in [release notes](release-notes/v3.0.0.md). Release
-preparation in a pull request does not publish images or qualify a live cluster.
+The release being prepared is **operator 3.0.1 / chart 0.2.1**. Its compatibility
+notes are documented in [release notes](release-notes/v3.0.1.md). Upgrades from
+pre-3.0 installations must still follow the [3.0.0 API replacement procedure](release-notes/v3.0.0.md).
+Release preparation in a pull request does not publish images or qualify a live cluster.
 
 ## Prepare
 
@@ -37,8 +38,8 @@ After the reviewed commit is merged and its checks pass:
 
 ```bash
 git fetch origin main --tags
-git tag -a v3.0.0 origin/main -m "Release v3.0.0"
-git push origin v3.0.0
+git tag -a v3.0.1 origin/main -m "Release v3.0.1"
+git push origin v3.0.1
 ```
 
 Verify that `origin/main` is the intended release revision before tagging.
@@ -61,9 +62,9 @@ workflow so a single-platform build cannot overwrite the multi-platform release.
 
 ```bash
 gh run list --workflow=release.yml
-gh release view v3.0.0
-docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.0
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.2.0
+gh release view v3.0.1
+docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.1
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.2.1
 ```
 
 Check both image platforms, the source revision/digest, chart `appVersion` and
@@ -75,7 +76,7 @@ For a new cluster:
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.2.0 \
+  --version 0.2.1 \
   --namespace yanet-system \
   --create-namespace
 ```
