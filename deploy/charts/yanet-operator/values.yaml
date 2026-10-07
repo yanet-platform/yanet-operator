@@ -99,14 +99,15 @@ yanetconfig: {}
 #    updateWindow: 60
 #    images:
 #      registry: cr.yandex/yanet
+#      tag: v2.1
 #    components:
 #      controlplane:
-#        image: {name: controlplane, tag: v2.1}
+#        image: {name: controlplane}
 #        numa: 2
 #        config: {hostPath: /etc/yanet2}
 #      dataplane:
-#        image: {name: dataplane, tag: v2.1}
-#        hugepages: {size: 1Gi, count: 8}
+#        image: {name: dataplane}
+#        hugepages: {size: 1Gi}  # Count omitted: reserve node allocatable; positive count overrides it.
 #        # Existing device-backed NAD; repeat with a different interface for another PF.
 #        networks:
 #          - {name: yanet-pf, interface: eth2, resourceName: yanet-platform.io/pf}

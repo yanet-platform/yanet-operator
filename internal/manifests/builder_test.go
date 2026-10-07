@@ -26,6 +26,7 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -199,6 +200,115 @@ func TestBuildDeployments_Dataplane_InvalidHugepagesReturnsError(t *testing.T) {
 	}
 	if _, err := BuildDeployments(ctx(), c); err == nil {
 		t.Fatal("invalid hugepage size must return an error")
+	}
+}
+
+func TestBuildDeployments_Dataplane_NodeHugepages(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		hugepages   *yanetv1alpha1.Hugepages
+		allocatable corev1.ResourceList
+		wantKey     corev1.ResourceName
+		want        string
+		wantErr     string
+	}{
+		{
+			name: "infer two MiB pool", allocatable: corev1.ResourceList{
+				"hugepages-2Mi": resource.MustParse("16Gi"), "hugepages-1Gi": resource.MustParse("0"),
+			}, wantKey: "hugepages-2Mi", want: "16Gi",
+		},
+		{
+			name: "infer one GiB pool", allocatable: corev1.ResourceList{"hugepages-1Gi": resource.MustParse("4Gi")},
+			wantKey: "hugepages-1Gi", want: "4Gi",
+		},
+		{
+			name: "select size among multiple pools", hugepages: &yanetv1alpha1.Hugepages{Size: "2Mi"},
+			allocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("8Gi"), "hugepages-1Gi": resource.MustParse("2Gi")},
+			wantKey:     "hugepages-2Mi", want: "8Gi",
+		},
+		{
+			name: "explicit count overrides node", hugepages: &yanetv1alpha1.Hugepages{Size: "2Mi", Count: 1024},
+			allocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("16Gi")},
+			wantKey:     "hugepages-2Mi", want: "2Gi",
+		},
+		{
+			name: "missing selected pool", hugepages: &yanetv1alpha1.Hugepages{Size: "2Mi"},
+			allocatable: corev1.ResourceList{"hugepages-1Gi": resource.MustParse("4Gi")}, wantErr: "no allocatable hugepages-2Mi",
+		},
+		{
+			name: "zero selected pool", hugepages: &yanetv1alpha1.Hugepages{Size: "2Mi"},
+			allocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("0")}, wantErr: "no allocatable hugepages-2Mi",
+		},
+		{
+			name: "ambiguous pools", allocatable: corev1.ResourceList{
+				"hugepages-2Mi": resource.MustParse("16Gi"), "hugepages-1Gi": resource.MustParse("4Gi"),
+			}, wantErr: "multiple hugepage sizes",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			build := ctx()
+			build.NodeAllocatable = tt.allocatable
+			component := &helpers.ResolvedComponent{Kind: helpers.KindDataplane, Name: "dataplane", Enabled: true,
+				Image: helpers.ResolvedImage{Name: "dp"}, Hugepages: tt.hugepages}
+			before := tt.hugepages.DeepCopy()
+			deployments, err := BuildDeployments(build, component)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || len(deployments) != 0 {
+					t.Fatalf("deployments = %v, error = %v, want %q and no resources", deployments, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			pod := deployments[0].Spec.Template.Spec
+			container := pod.Containers[0]
+			want := resource.MustParse(tt.want)
+			for kind, resources := range map[string]corev1.ResourceList{"requests": container.Resources.Requests, "limits": container.Resources.Limits} {
+				got := resources[tt.wantKey]
+				if got.Cmp(want) != 0 || len(resources) != 1 {
+					t.Errorf("%s = %v, want only %s=%s", kind, resources, tt.wantKey, tt.want)
+				}
+			}
+			if !hasMount(container.VolumeMounts, "/dev/hugepages", false) || !hasVolume(pod.Volumes, "hugepages") {
+				t.Error("automatic hugepage reservation lost the shared arena mount")
+			}
+			if diff := cmp.Diff(before, component.Hugepages); diff != "" {
+				t.Fatalf("build mutated shared configuration (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestBuildDeployments_RuntimeTolerations(t *testing.T) {
+	want := []corev1.Toleration{
+		{Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+		{Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+	}
+	for _, kind := range []helpers.ComponentKind{helpers.KindControlplane, helpers.KindDataplane, helpers.KindBirdAdapter, helpers.KindOperator} {
+		t.Run(string(kind), func(t *testing.T) {
+			component := &helpers.ResolvedComponent{Kind: kind, Name: "worker", Enabled: true, Image: helpers.ResolvedImage{Name: "worker"}}
+			if kind == helpers.KindOperator {
+				component.Containers = []helpers.ResolvedContainer{{Name: "worker", Image: component.Image}}
+			}
+			deployments, err := RenderDeployments(ctx(), component, nil)
+			if err != nil {
+				t.Fatalf("render defaults: %v", err)
+			}
+			if diff := cmp.Diff(want, deployments[0].Spec.Template.Spec.Tolerations); diff != "" {
+				t.Errorf("runtime tolerations (-want +got):\n%s", diff)
+			}
+			component.Patches = []string{"placement"}
+			registry := NewPatchRegistry([]yanetv1alpha1.NamedPatch{patch("placement", `{"spec":{"template":{"spec":{"tolerations":[{"key":"maintenance","operator":"Exists","effect":"NoSchedule"}]}}}}`)})
+			deployments, err = RenderDeployments(ctx(), component, registry)
+			if err != nil {
+				t.Fatalf("render placement override: %v", err)
+			}
+			custom := []corev1.Toleration{{Key: "maintenance", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}}
+			if diff := cmp.Diff(custom, deployments[0].Spec.Template.Spec.Tolerations); diff != "" {
+				t.Errorf("patched tolerations (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

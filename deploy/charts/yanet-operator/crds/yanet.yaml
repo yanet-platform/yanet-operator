@@ -219,7 +219,7 @@ spec:
                         type: object
                       image:
                         description: |-
-                          ImageRef identifies a palette image. Registry and prefix default to
+                          ImageRef identifies a palette image. Registry, prefix and tag default to
                           YanetConfig.spec.images but can be overridden independently for each image.
                         properties:
                           name:
@@ -237,7 +237,8 @@ spec:
                               an explicit empty string omits the registry segment.
                             type: string
                           tag:
-                            description: Tag is the image tag.
+                            description: Tag overrides the global image tag. Empty
+                              inherits ImagesSpec.Tag.
                             type: string
                         required:
                         - name
@@ -306,7 +307,7 @@ spec:
                         type: array
                       image:
                         description: |-
-                          ImageRef identifies a palette image. Registry and prefix default to
+                          ImageRef identifies a palette image. Registry, prefix and tag default to
                           YanetConfig.spec.images but can be overridden independently for each image.
                         properties:
                           name:
@@ -324,7 +325,8 @@ spec:
                               an explicit empty string omits the registry segment.
                             type: string
                           tag:
-                            description: Tag is the image tag.
+                            description: Tag overrides the global image tag. Empty
+                              inherits ImagesSpec.Tag.
                             type: string
                         required:
                         - name
@@ -396,23 +398,27 @@ spec:
                             type: string
                         type: object
                       hugepages:
-                        description: Hugepages requested by the Pod.
+                        description: |-
+                          Hugepages requested by the Pod. When omitted, infer the single positive
+                          hugepage pool advertised in the node's allocatable resources. Set Size
+                          explicitly when the node advertises multiple page sizes.
                         properties:
                           count:
-                            description: Count is the number of hugepages requested.
+                            description: |-
+                              Count is the number of hugepages requested. Omitted or zero reserves the
+                              node's allocatable quantity for Size; a positive value overrides it.
                             format: int32
-                            minimum: 1
+                            minimum: 0
                             type: integer
                           size:
                             description: Size of a single hugepage (e.g. "1Gi", "2Mi").
                             type: string
                         required:
-                        - count
                         - size
                         type: object
                       image:
                         description: |-
-                          ImageRef identifies a palette image. Registry and prefix default to
+                          ImageRef identifies a palette image. Registry, prefix and tag default to
                           YanetConfig.spec.images but can be overridden independently for each image.
                         properties:
                           name:
@@ -430,7 +436,8 @@ spec:
                               an explicit empty string omits the registry segment.
                             type: string
                           tag:
-                            description: Tag is the image tag.
+                            description: Tag overrides the global image tag. Empty
+                              inherits ImagesSpec.Tag.
                             type: string
                         required:
                         - name
@@ -535,7 +542,7 @@ spec:
                               type: object
                             image:
                               description: |-
-                                ImageRef identifies a palette image. Registry and prefix default to
+                                ImageRef identifies a palette image. Registry, prefix and tag default to
                                 YanetConfig.spec.images but can be overridden independently for each image.
                               properties:
                                 name:
@@ -553,7 +560,8 @@ spec:
                                     an explicit empty string omits the registry segment.
                                   type: string
                                 tag:
-                                  description: Tag is the image tag.
+                                  description: Tag overrides the global image tag.
+                                    Empty inherits ImagesSpec.Tag.
                                   type: string
                               required:
                               - name
@@ -639,7 +647,7 @@ spec:
                                 type: object
                               image:
                                 description: |-
-                                  ImageRef identifies a palette image. Registry and prefix default to
+                                  ImageRef identifies a palette image. Registry, prefix and tag default to
                                   YanetConfig.spec.images but can be overridden independently for each image.
                                 properties:
                                   name:
@@ -657,7 +665,8 @@ spec:
                                       an explicit empty string omits the registry segment.
                                     type: string
                                   tag:
-                                    description: Tag is the image tag.
+                                    description: Tag overrides the global image tag.
+                                      Empty inherits ImagesSpec.Tag.
                                     type: string
                                 required:
                                 - name
@@ -751,6 +760,11 @@ spec:
                   registry:
                     description: Registry is the default registry for palette images
                       without an override.
+                    type: string
+                  tag:
+                    description: |-
+                      Tag is inherited by palette images without an explicit tag. Installation
+                      container overrides take precedence over both palette and global tags.
                     type: string
                 type: object
               patches:

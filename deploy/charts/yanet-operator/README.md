@@ -9,7 +9,7 @@ Requires Kubernetes 1.33+ for named Service target ports on native sidecars.
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.2.0 \
+  --version 3.0.2 \
   --namespace yanet-system \
   --create-namespace
 ```
@@ -86,11 +86,13 @@ before enabling workloads:
 ```yaml
 yanetconfig:
   spec:
+    images:
+      tag: example
     components:
       controlplane:
-        image: {name: controlplane, tag: example}
+        image: {name: controlplane}
       dataplane:
-        image: {name: dataplane, tag: example}
+        image: {name: dataplane}
     boxTypes:
       - name: release
         components:
@@ -146,6 +148,25 @@ part. These fields are not installation container overrides. Controlplane
 Set `yanetconfig.spec.components.controlplane.numa` explicitly for multi-NUMA
 hosts before upgrading. It defaults to 1 and does not depend on node labels.
 Per-installation `disabledNuma` excludes domains without renumbering the rest.
+
+Image tags follow installation container override, palette tag, then
+`yanetconfig.spec.images.tag`. Omitted/empty palette tags inherit the global tag.
+Set the common runtime version once and keep explicit tags only for exceptions.
+
+Dataplane hugepages use node `status.allocatable`, not raw capacity or free
+scheduler resources. Omitted `hugepages` selects a single positive page-size pool;
+multiple positive pools require an explicit size. `hugepages: {size: 2Mi}` reserves
+the allocatable pool of that size, while `{size: 2Mi, count: 1024}` explicitly
+reserves 2Gi. A missing selected pool fails preflight before workload writes.
+The operator does not provision hugepages or modify the host dataplane config.
+
+Runtime Pods tolerate all `NoSchedule` and `NoExecute` taints by default; custom
+Deployment patches can replace or clear those tolerations. The top-level Helm
+`tolerations` value applies only to the controller, not the runtime Pods.
+
+Keep BIRD's host socket directory separate from host-package `/run/bird` cleanup.
+The full example maps host `/run/yanet2/bird` to `/run/bird` in BIRD and its clients,
+so existing runtime configs/arguments keep the same container socket path.
 
 There is no `autoDiscovery`, `config.url`, or container-level `hostIPC` field.
 Use explicit Deployment patches for config downloaders, Pod IPC and agent

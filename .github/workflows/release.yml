@@ -94,18 +94,20 @@ jobs:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
 
+      - name: Sync chart and application versions with release
+        id: release_version
+        env:
+          RELEASE_VERSION: ${{ needs.docker.outputs.version }}
+        run: |
+          sed -i "s/^version:.*/version: ${RELEASE_VERSION}/; s/^appVersion:.*/appVersion: \"${RELEASE_VERSION}\"/" deploy/charts/yanet-operator/Chart.yaml
+          echo "Synced chart and appVersion to ${RELEASE_VERSION}"
+
       - name: Extract chart version
         id: chart_version
         run: |
           CHART_VERSION=$(grep '^version:' deploy/charts/yanet-operator/Chart.yaml | awk '{print $2}')
           echo "version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
           echo "Chart version: ${CHART_VERSION}"
-
-      - name: Sync appVersion with git tag
-        run: |
-          GIT_TAG=${GITHUB_REF#refs/tags/v}
-          sed -i "s/^appVersion:.*/appVersion: \"${GIT_TAG}\"/" deploy/charts/yanet-operator/Chart.yaml
-          echo "Synced appVersion to ${GIT_TAG}"
 
       - name: Update Helm dependencies
         run: |

@@ -164,7 +164,7 @@ type YanetControlplaneOverride struct {
 	DisabledNuma []int32 `json:"disabledNuma"`
 }
 
-// ImageRef identifies a palette image. Registry and prefix default to
+// ImageRef identifies a palette image. Registry, prefix and tag default to
 // YanetConfig.spec.images but can be overridden independently for each image.
 type ImageRef struct {
 	// Registry overrides the global registry. Nil inherits the global value;
@@ -182,7 +182,7 @@ type ImageRef struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name,omitempty"`
 
-	// Tag is the image tag.
+	// Tag overrides the global image tag. Empty inherits ImagesSpec.Tag.
 	// +optional
 	Tag string `json:"tag,omitempty"`
 }

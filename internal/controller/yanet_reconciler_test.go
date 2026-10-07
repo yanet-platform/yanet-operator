@@ -27,6 +27,7 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -172,6 +173,107 @@ func TestReconcileConfiguredNumaWithoutNodeMetadata(t *testing.T) {
 				t.Errorf("Service roles = %v, want %v", yanet.Status.Services, tt.wantServices)
 			}
 		})
+	}
+}
+
+func TestReconcileHugepagesFromNodeAllocatable(t *testing.T) {
+	testContext := context.Background()
+	installation := &yanetv1alpha1.Yanet{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "yanet", UID: "edge-uid", Finalizers: []string{yanetFinalizer}},
+		Spec:       yanetv1alpha1.YanetSpec{BoxType: "release", AutoSync: helpers.PtrTrue()},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Status: corev1.NodeStatus{
+			Capacity:    corev1.ResourceList{"hugepages-2Mi": resource.MustParse("16Gi")},
+			Allocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("8Gi")},
+		},
+	}
+	reconciler, snapshot := makeReconcilerEnv(t, installation, node)
+	snapshot.Config = minimalConfig()
+	snapshot.Config.Components.Dataplane.Hugepages = &yanetv1alpha1.Hugepages{Size: "2Mi"}
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(installation)}
+	for _, wanted := range []string{"8Gi", "12Gi"} {
+		node.Status.Allocatable["hugepages-2Mi"] = resource.MustParse(wanted)
+		if err := reconciler.Status().Update(testContext, node); err != nil {
+			t.Fatalf("update node allocatable: %v", err)
+		}
+		if _, err := reconciler.Reconcile(testContext, request); err != nil {
+			t.Fatalf("reconcile %s allocatable: %v", wanted, err)
+		}
+		deployments := &appsv1.DeploymentList{}
+		if err := reconciler.List(testContext, deployments, client.InNamespace("yanet"), client.MatchingLabels{manifests.LabelComponent: "dataplane"}); err != nil {
+			t.Fatalf("list dataplane: %v", err)
+		}
+		if len(deployments.Items) != 1 {
+			t.Fatalf("dataplane count = %d, want 1", len(deployments.Items))
+		}
+		container := deployments.Items[0].Spec.Template.Spec.Containers[0]
+		want := resource.MustParse(wanted)
+		for kind, resources := range map[string]corev1.ResourceList{"requests": container.Resources.Requests, "limits": container.Resources.Limits} {
+			got := resources["hugepages-2Mi"]
+			if got.Cmp(want) != 0 {
+				t.Fatalf("%s hugepages = %s, want allocatable %s, not capacity 16Gi", kind, got.String(), wanted)
+			}
+		}
+		if snapshot.Config.Components.Dataplane.Hugepages.Count != 0 {
+			t.Fatal("reconcile published a node-specific count into shared configuration")
+		}
+	}
+	// Losing the pool must not prevent an explicit installation shutdown.
+	node.Status.Allocatable["hugepages-2Mi"] = resource.MustParse("0")
+	if err := reconciler.Status().Update(testContext, node); err != nil {
+		t.Fatalf("remove allocatable pool: %v", err)
+	}
+	if err := reconciler.Get(testContext, request.NamespacedName, installation); err != nil {
+		t.Fatalf("get installation: %v", err)
+	}
+	installation.Spec.Enabled = helpers.PtrFalse()
+	if err := reconciler.Update(testContext, installation); err != nil {
+		t.Fatalf("disable installation: %v", err)
+	}
+	if _, err := reconciler.Reconcile(testContext, request); err != nil {
+		t.Fatalf("disable without hugepages: %v", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := reconciler.List(testContext, deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list disabled workloads: %v", err)
+	}
+	if len(deployments.Items) != 2 {
+		t.Fatalf("disabled installation must retain two zero-replica Deployments, got %d", len(deployments.Items))
+	}
+	for _, deployment := range deployments.Items {
+		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 {
+			t.Fatalf("disabled workload %s still has replicas %v", deployment.Name, deployment.Spec.Replicas)
+		}
+	}
+}
+
+func TestReconcileMissingAutomaticHugepagesPreventsWorkloadWrites(t *testing.T) {
+	installation := &yanetv1alpha1.Yanet{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "yanet", UID: "edge-uid", Finalizers: []string{yanetFinalizer}},
+		Spec:       yanetv1alpha1.YanetSpec{BoxType: "release", AutoSync: helpers.PtrTrue()},
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker"}}
+	reconciler, snapshot := makeReconcilerEnv(t, installation, node)
+	snapshot.Config = minimalConfig()
+	snapshot.Config.Components.Dataplane.Hugepages = &yanetv1alpha1.Hugepages{Size: "2Mi"}
+	snapshot.Config.Components.Controlplane.Config = &yanetv1alpha1.ConfigSource{Inline: "logging: {}"}
+	ctx := context.Background()
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(installation)})
+	if err == nil || !strings.Contains(err.Error(), "no allocatable hugepages-2Mi") {
+		t.Fatalf("reconcile error = %v, want missing allocatable pool", err)
+	}
+	deployments := &appsv1.DeploymentList{}
+	if err := reconciler.List(ctx, deployments, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list deployments: %v", err)
+	}
+	configMaps := &corev1.ConfigMapList{}
+	if err := reconciler.List(ctx, configMaps, client.InNamespace("yanet")); err != nil {
+		t.Fatalf("list ConfigMaps: %v", err)
+	}
+	if len(deployments.Items) != 0 || len(configMaps.Items) != 0 {
+		t.Fatalf("failed preflight wrote resources: Deployments=%d ConfigMaps=%d", len(deployments.Items), len(configMaps.Items))
 	}
 }
 

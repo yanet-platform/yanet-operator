@@ -86,6 +86,11 @@ type ImagesSpec struct {
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
 
+	// Tag is inherited by palette images without an explicit tag. Installation
+	// container overrides take precedence over both palette and global tags.
+	// +optional
+	Tag string `json:"tag,omitempty"`
+
 	// PullPolicy applies to every container the operator generates.
 	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
 	// +optional
@@ -186,7 +191,9 @@ type DataplaneSpec struct {
 	// +optional
 	Config *ConfigSource `json:"config,omitempty"`
 
-	// Hugepages requested by the Pod.
+	// Hugepages requested by the Pod. When omitted, infer the single positive
+	// hugepage pool advertised in the node's allocatable resources. Set Size
+	// explicitly when the node advertises multiple page sizes.
 	// +optional
 	Hugepages *Hugepages `json:"hugepages,omitempty"`
 
@@ -269,16 +276,17 @@ type Hugepages struct {
 	// +kubebuilder:validation:Required
 	Size string `json:"size"`
 
-	// Count is the number of hugepages requested.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Minimum=1
-	Count int32 `json:"count"`
+	// Count is the number of hugepages requested. Omitted or zero reserves the
+	// node's allocatable quantity for Size; a positive value overrides it.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	Count int32 `json:"count,omitempty"`
 }
 
-// TotalQuantity validates the Hugepages spec and returns the total memory
-// reservation (single page size multiplied by Count). It is the single
-// source of truth for both the admission webhook and the manifest builder,
-// so validation rules cannot drift between them.
+// TotalQuantity validates a resolved positive Count and returns the total
+// reservation (single page size multiplied by Count). Admission validates an
+// automatic request with one page; rendering first resolves its node-specific
+// count. Both paths share these page-size and overflow checks.
 func (h *Hugepages) TotalQuantity() (resource.Quantity, error) {
 	pageQty, err := resource.ParseQuantity(h.Size)
 	if err != nil {

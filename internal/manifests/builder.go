@@ -32,6 +32,8 @@ package manifests
 
 import (
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
@@ -55,6 +57,9 @@ type BuildContext struct {
 	// the builder falls back to YanetSpec.NodeSelector and skips
 	// the kubernetes.io/hostname constraint.
 	NodeName string
+	// NodeAllocatable supplies hugepage pools for automatic dataplane sizing.
+	// It is a node snapshot, not currently unallocated scheduler capacity.
+	NodeAllocatable corev1.ResourceList
 	// PullPolicy is propagated from YanetConfig.spec.images.
 	PullPolicy corev1.PullPolicy
 	// PullSecrets are propagated from YanetConfig.spec.images.
@@ -77,6 +82,22 @@ type BuildContext struct {
 func BuildDeployments(ctx BuildContext, c *helpers.ResolvedComponent) ([]*appsv1.Deployment, error) {
 	if c == nil {
 		return nil, fmt.Errorf("buildDeployments: nil ResolvedComponent")
+	}
+	if c.Kind == helpers.KindDataplane {
+		// Do not publish a node-specific count into the shared palette or
+		// the rendering input reused for another node.
+		resolved := *c
+		if !c.Enabled && (c.Hugepages == nil || c.Hugepages.Count == 0) {
+			// A missing pool must never prevent scaling an installation down.
+			resolved.Hugepages = nil
+		} else {
+			hugepages, err := resolveNodeHugepages(ctx, c.Hugepages)
+			if err != nil {
+				return nil, fmt.Errorf("buildDeployments: node %q hugepages: %w", ctx.NodeName, err)
+			}
+			resolved.Hugepages = hugepages
+		}
+		c = &resolved
 	}
 	if c.Kind == helpers.KindControlplane {
 		if err := yanetv1alpha1.ValidateControlplaneNuma(effectiveNuma(c)); err != nil {
@@ -219,6 +240,7 @@ func buildSingle(ctx BuildContext, c *helpers.ResolvedComponent) *appsv1.Deploym
 		Volumes:          volumes,
 		ImagePullSecrets: ctx.PullSecrets,
 		NodeSelector:     nodeSelector(ctx),
+		Tolerations:      runtimeTolerations(),
 	}
 	switch c.Kind {
 	case helpers.KindDataplane:
@@ -270,6 +292,7 @@ func buildOperator(ctx BuildContext, c *helpers.ResolvedComponent) *appsv1.Deplo
 	pod := corev1.PodSpec{
 		ImagePullSecrets: ctx.PullSecrets,
 		NodeSelector:     nodeSelector(ctx),
+		Tolerations:      runtimeTolerations(),
 	}
 	for i, rc := range c.Containers {
 		volumes, mounts, _, configArgs := buildConfigVolumesForContainer(ctx, c, &rc, i)
@@ -616,6 +639,52 @@ func applyControlplaneShmem(c *corev1.Container, volumes *[]corev1.Volume) {
 
 // -- hugepages ---------------------------------------------------------------
 
+// resolveNodeHugepages uses allocatable resources, never raw node capacity.
+// Explicit counts retain their original meaning. With no size selected, only
+// one positive pool is unambiguous; offline rendering without pools stays valid.
+func resolveNodeHugepages(ctx BuildContext, requested *yanetv1alpha1.Hugepages) (*yanetv1alpha1.Hugepages, error) {
+	if requested != nil && requested.Count != 0 {
+		return requested, nil
+	}
+	if requested == nil {
+		var sizes []string
+		for name, quantity := range ctx.NodeAllocatable {
+			if strings.HasPrefix(string(name), corev1.ResourceHugePagesPrefix) && quantity.Sign() > 0 {
+				sizes = append(sizes, strings.TrimPrefix(string(name), corev1.ResourceHugePagesPrefix))
+			}
+		}
+		if len(sizes) == 0 {
+			return nil, nil
+		}
+		if len(sizes) > 1 {
+			slices.Sort(sizes)
+			return nil, fmt.Errorf("multiple hugepage sizes (%s); set spec.components.dataplane.hugepages.size", strings.Join(sizes, ", "))
+		}
+		requested = &yanetv1alpha1.Hugepages{Size: sizes[0]}
+	}
+	resolved := *requested
+	resolved.Count = 1
+	page, err := resolved.TotalQuantity()
+	if err != nil {
+		return nil, err
+	}
+	name := corev1.ResourceName(corev1.ResourceHugePagesPrefix + resolved.Size)
+	quantity := ctx.NodeAllocatable[name]
+	if quantity.Sign() <= 0 {
+		return nil, fmt.Errorf("no allocatable %s; reserve hugepages on the node or set an explicit count", name)
+	}
+	bytes, exact := quantity.AsInt64()
+	if !exact || bytes%page.Value() != 0 {
+		return nil, fmt.Errorf("allocatable %s=%s must be a whole number of %s pages", name, quantity.String(), resolved.Size)
+	}
+	count := bytes / page.Value()
+	if count < 1 || count > math.MaxInt32 {
+		return nil, fmt.Errorf("allocatable %s page count %d must be between 1 and %d", name, count, math.MaxInt32)
+	}
+	resolved.Count = int32(count)
+	return &resolved, nil
+}
+
 // applyHugepages adds a hugepages volume + mount + resource request
 // to the dataplane main container. The exact size key is derived
 // from Hugepages.Size: "1Gi" → hugepages-1Gi, "2Mi" → hugepages-2Mi.
@@ -649,6 +718,13 @@ func applyHugepages(c *corev1.Container, volumes *[]corev1.Volume, hp *yanetv1al
 }
 
 // -- misc helpers ------------------------------------------------------------
+
+func runtimeTolerations() []corev1.Toleration {
+	return []corev1.Toleration{
+		{Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+		{Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute},
+	}
+}
 
 func copyMap(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
