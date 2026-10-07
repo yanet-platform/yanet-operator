@@ -3,6 +3,10 @@
 Application releases follow [Semantic Versioning](https://semver.org/).
 Incompatible API changes require a major release. From 3.0.2 onward the operator
 image and Helm chart share one release number. Each release must use a new version.
+Images remain at `ghcr.io/yanet-platform/yanet-operator`; charts from 3.0.2 use
+`oci://ghcr.io/yanet-platform/charts/yanet-operator`. Separate OCI repositories
+prevent one artifact from replacing the other's version tag. Historical 0.2.x
+charts remain at their original repository.
 
 The release being prepared is **operator 3.0.2 / chart 3.0.2**. Its compatibility
 notes are documented in [release notes](release-notes/v3.0.2.md). Upgrades from
@@ -65,7 +69,7 @@ workflow so a single-platform build cannot overwrite the multi-platform release.
 gh run list --workflow=release.yml
 gh release view v3.0.2
 docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.2
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 3.0.2
+helm show chart oci://ghcr.io/yanet-platform/charts/yanet-operator --version 3.0.2
 ```
 
 Check both image platforms, the source revision/digest, chart `appVersion` and
@@ -76,7 +80,7 @@ For a new cluster:
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --version 3.0.2 \
   --namespace yanet-system \
   --create-namespace

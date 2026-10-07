@@ -8,7 +8,7 @@ Requires Kubernetes 1.33+ for named Service target ports on native sidecars.
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --version 3.0.2 \
   --namespace yanet-system \
   --create-namespace
@@ -269,7 +269,7 @@ shared-memory startup-lifecycle requirement.
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --namespace yanet-system \
   --create-namespace
 ```
@@ -278,7 +278,7 @@ helm install yanet-operator \
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --namespace yanet-system \
   --create-namespace \
   --set grafana.dashboards.namespace=monitoring
@@ -288,7 +288,7 @@ helm install yanet-operator \
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --namespace yanet-system \
   --create-namespace \
   --set metrics.enabled=false \
@@ -299,7 +299,7 @@ helm install yanet-operator \
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --namespace yanet-system \
   --create-namespace \
   --set webhook.certManager.enabled=true
@@ -309,7 +309,7 @@ helm install yanet-operator \
 
 ```bash
 helm upgrade yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
   --namespace yanet-system
 ```
 

@@ -1,5 +1,6 @@
 """Render real deployment artifacts and validate their cross-resource contracts."""
 
+import json
 import os
 from pathlib import Path
 import shlex
@@ -108,6 +109,35 @@ class PackagingTest(unittest.TestCase):
 
 
 class ReleasePipelineTest(unittest.TestCase):
+    def test_chart_publication_does_not_overwrite_image(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        step = next(s for s in workflow["jobs"]["helm"]["steps"] if s["name"] == "Push Helm chart to GitHub Container Registry")
+        expressions = {
+            "github.repository_owner": "yanet-platform",
+            "env.CHART_NAME": "yanet-operator",
+            "env.HELM_REPO": workflow["env"].get("HELM_REPO", ""),
+            "steps.chart_version.outputs.version": "3.0.2",
+        }
+        command = step["run"]
+        for key, value in expressions.items():
+            command = command.replace("${{ " + key + " }}", value)
+        command = command.replace("${{ github.repository_owner }}", "yanet-platform")
+        with tempfile.TemporaryDirectory() as directory:
+            # The destination passed to Helm is the publication contract; no
+            # registry write belongs in this deterministic regression test.
+            executable = Path(directory) / "helm"
+            executable.write_text("#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+            executable.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", command], cwd=directory,
+                env={**os.environ, "PATH": directory + ":" + os.environ["PATH"]},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), [
+                "push", "yanet-operator-3.0.2.tgz", "oci://ghcr.io/yanet-platform/charts",
+            ], "the chart would overwrite the Docker image's 3.0.2 tag")
+
     def test_chart_and_image_versions_follow_release(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         steps = workflow["jobs"]["helm"]["steps"]

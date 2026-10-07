@@ -10,6 +10,7 @@ on:
 
 env:
   GHCR_REPO: ghcr.io/${{ github.repository }}
+  HELM_REPO: ghcr.io/${{ github.repository_owner }}/charts
   CHART_NAME: yanet-operator
 
 jobs:
@@ -119,7 +120,7 @@ jobs:
 
       - name: Push Helm chart to GitHub Container Registry
         run: |
-          helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}
+          helm push ${{ env.CHART_NAME }}-${{ steps.chart_version.outputs.version }}.tgz oci://${{ env.HELM_REPO }}
 
       - name: Upload chart artifact
         uses: actions/upload-artifact@v4
@@ -232,7 +233,7 @@ jobs:
 
           ```bash
           helm install yanet-operator \
-            oci://ghcr.io/${{ github.repository_owner }}/yanet-operator \
+            oci://${{ env.HELM_REPO }}/${{ env.CHART_NAME }} \
             --version ${{ needs.helm.outputs.chart_version }} \
             --namespace yanet-system \
             --create-namespace
@@ -248,7 +249,7 @@ jobs:
           ### Helm Chart
 
           **OCI Registries:**
-          - GHCR: `oci://ghcr.io/${{ github.repository_owner }}/yanet-operator:${{ needs.helm.outputs.chart_version }}`
+          - GHCR: `oci://${{ env.HELM_REPO }}/${{ env.CHART_NAME }}:${{ needs.helm.outputs.chart_version }}`
 
           ### Kubernetes Manifests
 
@@ -269,7 +270,7 @@ jobs:
           docker pull ${{ env.GHCR_REPO }}:${{ needs.docker.outputs.version }}
 
           # Verify Helm chart
-          helm show chart oci://ghcr.io/${{ github.repository_owner }}/yanet-operator --version ${{ needs.helm.outputs.chart_version }}
+          helm show chart oci://${{ env.HELM_REPO }}/${{ env.CHART_NAME }} --version ${{ needs.helm.outputs.chart_version }}
 
           # Check operator version
           kubectl get deployment yanet-operator -n yanet-system -o jsonpath='{.spec.template.spec.containers[0].image}'
