@@ -797,6 +797,11 @@ func (in *YanetControlplaneOverride) DeepCopy() *YanetControlplaneOverride {
 func (in *YanetDataplaneOverride) DeepCopyInto(out *YanetDataplaneOverride) {
 	*out = *in
 	in.YanetComponentOverride.DeepCopyInto(&out.YanetComponentOverride)
+	if in.Hugepages != nil {
+		in, out := &in.Hugepages, &out.Hugepages
+		*out = new(Hugepages)
+		**out = **in
+	}
 	if in.Networks != nil {
 		in, out := &in.Networks, &out.Networks
 		*out = make([]NetworkAttachment, len(*in))

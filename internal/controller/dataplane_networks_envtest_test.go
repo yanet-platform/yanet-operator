@@ -70,6 +70,46 @@ var _ = Describe("Dataplane network attachments", func() {
 })
 
 var _ = Describe("Runtime image and hugepage defaults", func() {
+	It("stores installation hugepages and resolves explicit and automatic reservations without modifying the palette", func() {
+		ctx := context.Background()
+		config := &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalConfigSpec()}
+		config.Spec.Stop = true
+		config.Spec.Components.Dataplane.Hugepages = &api.Hugepages{Size: "1Gi", Count: 4}
+		Expect(k8sClient.Create(ctx, config)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, config)).To(Succeed()) })
+		installation := &api.Yanet{ObjectMeta: metav1.ObjectMeta{Name: "hugepage-api", Namespace: whTestNS}, Spec: api.YanetSpec{
+			BoxType: "release", Components: &api.YanetComponentsOverride{Dataplane: &api.YanetDataplaneOverride{Hugepages: &api.Hugepages{Size: "2Mi", Count: 1024}}},
+		}}
+		Expect(k8sClient.Create(ctx, installation)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, installation)).To(Succeed()) })
+		fresh := &api.Yanet{}
+		build := manifests.BuildContext{YanetName: installation.Name, Namespace: whTestNS, BoxType: "release", NodeName: "worker",
+			NodeAllocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("8Gi")}}
+		for _, tc := range []struct {
+			count int32
+			want  string
+		}{{1024, "2Gi"}, {0, "8Gi"}} {
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(installation), fresh)).To(Succeed())
+			fresh.Spec.Components.Dataplane.Hugepages.Count = tc.count
+			Expect(k8sClient.Update(ctx, fresh)).To(Succeed())
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(installation), fresh)).To(Succeed())
+			Expect(fresh.Spec.Components.Dataplane.Hugepages).To(Equal(&api.Hugepages{Size: "2Mi", Count: tc.count}))
+			component, err := helpers.ResolveBoxComponent(&config.Spec, &fresh.Spec, helpers.KindDataplane, "")
+			Expect(err).NotTo(HaveOccurred())
+			deployments, err := manifests.RenderDeployments(build, component, nil)
+			Expect(err).NotTo(HaveOccurred())
+			resources := deployments[0].Spec.Template.Spec.Containers[0].Resources
+			requested, limited := resources.Requests["hugepages-2Mi"], resources.Limits["hugepages-2Mi"]
+			Expect(requested.Cmp(resource.MustParse(tc.want))).To(BeZero())
+			Expect(limited.Cmp(resource.MustParse(tc.want))).To(BeZero())
+			Expect(resources.Requests).NotTo(HaveKey(corev1.ResourceName("hugepages-1Gi")))
+		}
+		fresh.Spec.Components.Dataplane.Hugepages.Count = -1
+		Expect(k8sClient.Update(ctx, fresh)).NotTo(Succeed())
+		palette := &api.YanetConfig{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(config), palette)).To(Succeed())
+		Expect(palette.Spec.Components.Dataplane.Hugepages).To(Equal(&api.Hugepages{Size: "1Gi", Count: 4}))
+	})
 	It("preserves a common image tag and an automatic hugepage count through admission and storage", func() {
 		ctx := context.Background()
 		config := &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalConfigSpec()}

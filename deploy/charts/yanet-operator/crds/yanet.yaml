@@ -946,7 +946,7 @@ spec:
 
               No patches and no inline component specs are accepted here. The only
               per-installation customisation knobs are typed point-overrides for images,
-              enablement, controlplane NUMA selection and dataplane network attachments.
+              enablement, controlplane NUMA selection, hugepages and dataplane networks.
               Native sidecars can also be disabled through components.dataplane.sidecars.
             properties:
               autoSync:
@@ -969,8 +969,8 @@ spec:
                 description: |-
                   Components offers narrow, per-installation overrides for
                   individual components: images, enabled flags, controlplane NUMA selection
-                  and the dataplane's complete network attachment list. General annotations
-                  and resources live in YanetConfig patches.
+                  and the dataplane's hugepages and complete network attachment list.
+                  General annotations and other resources live in YanetConfig patches.
                 properties:
                   birdAdapter:
                     description: |-
@@ -1103,6 +1103,25 @@ spec:
                           true → replicas=1, false → replicas=0 (component still
                           rendered, but with zero pods).
                         type: boolean
+                      hugepages:
+                        description: |-
+                          Hugepages replaces the palette request for this installation.
+                          Omitted/null inherits. A size with omitted/zero count uses the node's
+                          allocatable pool; a positive count is an explicit reservation.
+                        properties:
+                          count:
+                            description: |-
+                              Count is the number of hugepages requested. Omitted or zero reserves the
+                              node's allocatable quantity for Size; a positive value overrides it.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          size:
+                            description: Size of a single hugepage (e.g. "1Gi", "2Mi").
+                            type: string
+                        required:
+                        - size
+                        type: object
                       networks:
                         description: |-
                           Networks replaces the palette's complete list of Multus attachments.

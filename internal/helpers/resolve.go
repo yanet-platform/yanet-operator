@@ -74,6 +74,9 @@ type ResolvedComponent struct {
 	ListenerNames []string
 	PortIndex     int
 	Patches       []string
+	// Overrides retains explicit installation fields for final post-patch rendering.
+	Overrides       *yanetv1alpha1.YanetComponentOverride
+	SidecarOverride *yanetv1alpha1.YanetContainerOverride
 }
 
 // ResolvedContainer carries a standalone operator container's effective inputs.
@@ -141,6 +144,7 @@ func ResolveBoxComponent(config *yanetv1alpha1.YanetConfigSpec, yanet *yanetv1al
 			Image:  mergeImage(config.Images, cp.Image, containerOverride(override, "controlplane")),
 			Config: cp.Config, Numa: Int32Value(cp.Numa, 0),
 			DisabledNuma: resolveDisabledNuma(cp.DisabledNuma, yanet), Patches: box.Components.Controlplane.Patches,
+			Overrides: override,
 		}, nil
 	case KindDataplane:
 		if box.Components.Dataplane == nil {
@@ -156,11 +160,16 @@ func ResolveBoxComponent(config *yanetv1alpha1.YanetConfigSpec, yanet *yanetv1al
 			return nil, err
 		}
 		override := componentOverride(yanet, kind, "")
+		hugepages := dp.Hugepages
+		if yanet.Components != nil && yanet.Components.Dataplane != nil && yanet.Components.Dataplane.Hugepages != nil {
+			hugepages = yanet.Components.Dataplane.Hugepages
+		}
 		return &ResolvedComponent{
 			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),
 			Image:  mergeImage(config.Images, dp.Image, containerOverride(override, "dataplane")),
-			Config: dp.Config, Hugepages: dp.Hugepages, Sidecars: sidecars, Patches: box.Components.Dataplane.Patches,
+			Config: dp.Config, Hugepages: hugepages.DeepCopy(), Sidecars: sidecars, Patches: box.Components.Dataplane.Patches,
 			Networks: networks, NetworkResources: resources,
+			Overrides: override,
 		}, nil
 	case KindSidecar:
 		if box.Components.Dataplane == nil {
@@ -192,6 +201,7 @@ func ResolveBoxComponent(config *yanetv1alpha1.YanetConfigSpec, yanet *yanetv1al
 			Kind: kind, Name: string(kind), Enabled: resolveEnabled(override),
 			Image:  mergeImage(config.Images, adapter.Image, containerOverride(override, "bird-adapter")),
 			Config: adapter.Config, Patches: box.Components.BirdAdapter.Patches,
+			Overrides: override,
 		}, nil
 	case KindOperator:
 		return resolveOperator(config, yanet, box, operatorName)
@@ -322,6 +332,7 @@ func resolveDataplaneSidecars(config *yanetv1alpha1.YanetConfigSpec, yanet *yane
 			Kind: KindSidecar, Name: sidecar.Name, Enabled: enabled,
 			Image: mergeImage(config.Images, sidecar.Image, override), Config: sidecar.Config,
 			ListenerNames: resolveListeners(sidecar.Listeners), PortIndex: index, Patches: slot.Patches,
+			SidecarOverride: override,
 		})
 	}
 	for name := range box.Components.Dataplane.Sidecars {
@@ -361,6 +372,7 @@ func resolveOperator(config *yanetv1alpha1.YanetConfigSpec, yanet *yanetv1alpha1
 		Kind: KindOperator, Name: name, Enabled: resolveEnabled(override),
 		Image: containers[0].Image, Containers: containers, Patches: slot.Patches,
 		ListenerNames: resolveListeners(operator.Listeners),
+		Overrides:     override,
 	}, nil
 }
 

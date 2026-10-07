@@ -116,8 +116,12 @@ do not revoke the installation's ownership of that node.
 
 An installation selects an immutable `boxType`. Overrides are limited to
 container image name/tag, workload/sidecar enablement, controlplane `disabledNuma`
-and dataplane `networks`. Networks omitted/null inherit, a list replaces the
-palette and `[]` clears it. General annotations/resources belong in patches.
+and dataplane `networks`/`hugepages`. Networks omitted/null inherit, a list replaces the
+palette and `[]` clears it. Hugepages omitted/null inherit; a supplied object
+replaces the palette request. Omitted/zero count uses Node.status.allocatable.
+Explicit image and enablement overrides win palette patches during final rendering;
+inherited replica patches and network ownership guards remain intact.
+General annotations/resources belong in patches.
 
 ### Rendering and networking
 

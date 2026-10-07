@@ -28,7 +28,7 @@ import (
 //
 // No patches and no inline component specs are accepted here. The only
 // per-installation customisation knobs are typed point-overrides for images,
-// enablement, controlplane NUMA selection and dataplane network attachments.
+// enablement, controlplane NUMA selection, hugepages and dataplane networks.
 // Native sidecars can also be disabled through components.dataplane.sidecars.
 type YanetSpec struct {
 	// BoxType selects a boxType definition from
@@ -68,8 +68,8 @@ type YanetSpec struct {
 
 	// Components offers narrow, per-installation overrides for
 	// individual components: images, enabled flags, controlplane NUMA selection
-	// and the dataplane's complete network attachment list. General annotations
-	// and resources live in YanetConfig patches.
+	// and the dataplane's hugepages and complete network attachment list.
+	// General annotations and other resources live in YanetConfig patches.
 	// +optional
 	Components *YanetComponentsOverride `json:"components,omitempty"`
 }
@@ -110,6 +110,12 @@ type YanetComponentOverride struct {
 // YanetDataplaneOverride separates the primary container from named sidecars.
 type YanetDataplaneOverride struct {
 	YanetComponentOverride `json:",inline"`
+
+	// Hugepages replaces the palette request for this installation.
+	// Omitted/null inherits. A size with omitted/zero count uses the node's
+	// allocatable pool; a positive count is an explicit reservation.
+	// +optional
+	Hugepages *Hugepages `json:"hugepages,omitempty"`
 
 	// Networks replaces the palette's complete list of Multus attachments.
 	// Omitted/null inherits; [] explicitly removes the declared attachments.
