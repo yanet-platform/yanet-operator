@@ -1,12 +1,12 @@
 # yanet-operator
 
 [![GitHub Container Registry](https://img.shields.io/badge/GHCR-latest-blue?logo=github)](https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator)
-[![Helm Chart](https://img.shields.io/badge/Helm-OCI-0f1689?logo=helm)](https://github.com/yanet-platform/yanet-operator/pkgs/container/yanet-operator)
+[![Helm Chart](https://img.shields.io/badge/Helm-OCI-0f1689?logo=helm)](https://github.com/yanet-platform/yanet-operator/releases)
 
 Kubernetes operator for YANET2 workloads: component palettes, named strategic-merge
 patches, box-type presets, multi-node installations and per-NUMA controlplanes.
 
-**Operator 3.0.0 / chart 0.2.0** uses one API, `yanet.yanet-platform.io/v1alpha1`.
+**Operator and chart 3.0.2** use one API, `yanet.yanet-platform.io/v1alpha1`.
 The former component-based API is exposed as `Yanet` and `YanetConfig`. The legacy
 single-node implementation is removed. See the [breaking release notes](release-notes/v3.0.0.md)
 before replacing an existing installation; no compatibility conversion is provided.
@@ -28,8 +28,8 @@ After release publication, install into a cluster with the new CRDs:
 
 ```bash
 helm install yanet-operator \
-  oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.2.0 \
+  oci://ghcr.io/yanet-platform/charts/yanet-operator \
+  --version 3.0.2 \
   --namespace yanet-system \
   --create-namespace
 ```
