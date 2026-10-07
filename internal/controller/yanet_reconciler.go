@@ -308,13 +308,14 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			Deployments: map[string]string{},
 		}
 		buildCtx := manifests.BuildContext{
-			YanetName:   yanet.Name,
-			Namespace:   yanet.Namespace,
-			BoxType:     yanet.Spec.BoxType,
-			NodeName:    node.Name,
-			PullPolicy:  pullPolicy,
-			PullSecrets: cfg.Spec.Images.PullSecrets,
-			OwnerRef:    owner,
+			YanetName:       yanet.Name,
+			Namespace:       yanet.Namespace,
+			BoxType:         yanet.Spec.BoxType,
+			NodeName:        node.Name,
+			NodeAllocatable: node.Status.Allocatable,
+			PullPolicy:      pullPolicy,
+			PullSecrets:     cfg.Spec.Images.PullSecrets,
+			OwnerRef:        owner,
 		}
 		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, &cfg.Spec, &yanet.Spec)
 		if err != nil {
@@ -337,6 +338,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			if rc.IsColocated() {
 				continue
 			}
+			rc.Enabled = rc.Enabled && installationEnabled
 
 			// ConfigMaps for inline configs (must land before the
 			// Deployment to avoid CreateContainerConfigError).
@@ -531,13 +533,14 @@ func (r *YanetReconciler) preflightResources(
 		node := &nodes[i]
 		var workloads []renderedWorkload
 		buildCtx := manifests.BuildContext{
-			YanetName:   yanet.Name,
-			Namespace:   yanet.Namespace,
-			BoxType:     yanet.Spec.BoxType,
-			NodeName:    node.Name,
-			PullPolicy:  pullPolicy,
-			PullSecrets: cfg.Images.PullSecrets,
-			OwnerRef:    owner,
+			YanetName:       yanet.Name,
+			Namespace:       yanet.Namespace,
+			BoxType:         yanet.Spec.BoxType,
+			NodeName:        node.Name,
+			PullPolicy:      pullPolicy,
+			PullSecrets:     cfg.Images.PullSecrets,
+			OwnerRef:        owner,
+			NodeAllocatable: node.Status.Allocatable,
 		}
 		var err error
 		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, cfg, &yanet.Spec)
@@ -553,6 +556,7 @@ func (r *YanetReconciler) preflightResources(
 			if rc == nil {
 				continue
 			}
+			rc.Enabled = rc.Enabled && installationEnabled
 			deployments, err := manifests.RenderDeployments(buildCtx, rc, registry)
 			if err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("build %s on node %s: %w", rc.Name, node.Name, err))

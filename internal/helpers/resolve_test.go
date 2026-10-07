@@ -426,6 +426,60 @@ func TestResolveBoxComponent_MixedRegistryPalette(t *testing.T) {
 	}
 }
 
+func TestResolveBoxComponent_GlobalImageTag(t *testing.T) {
+	config := fixtureConfig()
+	config.Images.Tag = "0.1.1"
+	config.Components.Controlplane.Image.Tag = ""
+	config.Components.Dataplane.Image.Tag = ""
+	config.Components.Dataplane.Sidecars[0].Image.Tag = ""
+	config.Components.BirdAdapter.Image.Tag = ""
+	config.Components.Operators[0].Containers[0].Image.Tag = ""
+	before := config.DeepCopy()
+	installation := &yanetv1alpha1.YanetSpec{BoxType: "firewall"}
+	for _, tt := range []struct {
+		name     string
+		kind     ComponentKind
+		operator string
+		want     string
+	}{
+		{"controlplane", KindControlplane, "", "registry.example/test/edge/controlplane:0.1.1"},
+		{"dataplane", KindDataplane, "", "registry.example/test/edge/dataplane:0.1.1"},
+		{"sidecar", KindSidecar, "netlink-dataplane-sidecar", "registry.example/test/edge/netlink-dataplane-sidecar:0.1.1"},
+		{"adapter", KindBirdAdapter, "", "registry.example/test/edge/bird-adapter:0.1.1"},
+		{"operator", KindOperator, "antiddos", "registry.example/test/edge/antiddos-operator:0.1.1"},
+		{"palette exception", KindSidecar, "bird", "registry.example/test/edge/bird:2.15"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			component, err := ResolveBoxComponent(config, installation, tt.kind, tt.operator)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got := component.Image.FullPath(); got != tt.want {
+				t.Fatalf("image = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	installation.Components = &yanetv1alpha1.YanetComponentsOverride{
+		Controlplane: &yanetv1alpha1.YanetControlplaneOverride{
+			YanetComponentOverride: yanetv1alpha1.YanetComponentOverride{
+				Containers: map[string]yanetv1alpha1.YanetContainerOverride{"controlplane": {Tag: "hotfix"}},
+			},
+		},
+	}
+	config.Components.Controlplane.Image.Tag = "palette-version"
+	component, err := ResolveBoxComponent(config, installation, KindControlplane, "")
+	if err != nil {
+		t.Fatalf("resolve installation override: %v", err)
+	}
+	if got := component.Image.FullPath(); got != "registry.example/test/edge/controlplane:hotfix" {
+		t.Fatalf("installation image = %q, want hotfix", got)
+	}
+	config.Components.Controlplane.Image.Tag = ""
+	if diff := cmp.Diff(before, config); diff != "" {
+		t.Fatalf("resolution mutated the palette (-want +got):\n%s", diff)
+	}
+}
+
 func TestEnabledComponentsForBox_UndeclaredOperator(t *testing.T) {
 	config := fixtureConfig()
 	config.BoxTypes[0].Operators = map[string]yanetv1alpha1.BoxOperator{"missing": {}}

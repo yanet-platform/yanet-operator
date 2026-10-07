@@ -414,7 +414,10 @@ func resolveEnabled(override *yanetv1alpha1.YanetComponentOverride) bool {
 func mergeImage(images yanetv1alpha1.ImagesSpec, base yanetv1alpha1.ImageRef,
 	override *yanetv1alpha1.YanetContainerOverride,
 ) ResolvedImage {
-	result := ResolvedImage{Registry: images.Registry, Prefix: images.Prefix, Name: base.Name, Tag: base.Tag}
+	result := ResolvedImage{Registry: images.Registry, Prefix: images.Prefix, Name: base.Name, Tag: images.Tag}
+	if base.Tag != "" {
+		result.Tag = base.Tag
+	}
 	if base.Registry != nil {
 		result.Registry = *base.Registry
 	}

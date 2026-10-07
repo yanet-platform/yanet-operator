@@ -1,18 +1,18 @@
 # Release guide
 
 Application releases follow [Semantic Versioning](https://semver.org/).
-Incompatible API changes require a major release. Helm chart versions are
-independent and must also be new for each release.
+Incompatible API changes require a major release. From 3.0.2 onward the operator
+image and Helm chart share one release number. Each release must use a new version.
 
-The release being prepared is **operator 3.0.1 / chart 0.2.1**. Its compatibility
-notes are documented in [release notes](release-notes/v3.0.1.md). Upgrades from
+The release being prepared is **operator 3.0.2 / chart 3.0.2**. Its compatibility
+notes are documented in [release notes](release-notes/v3.0.2.md). Upgrades from
 pre-3.0 installations must still follow the [3.0.0 API replacement procedure](release-notes/v3.0.0.md).
 Release preparation in a pull request does not publish images or qualify a live cluster.
 
 ## Prepare
 
-1. Update `deploy/charts/yanet-operator/Chart.yaml`: `version` is the chart version,
-   `appVersion` is the operator image version without `v`.
+1. Update `deploy/charts/yanet-operator/Chart.yaml`: set `version` and `appVersion`
+   to the same release number without `v`.
 2. Write compatibility notes in `release-notes/v<application-version>.md`.
 3. Regenerate API artifacts and run the relevant checks through Make/Docker:
 
@@ -38,8 +38,8 @@ After the reviewed commit is merged and its checks pass:
 
 ```bash
 git fetch origin main --tags
-git tag -a v3.0.1 origin/main -m "Release v3.0.1"
-git push origin v3.0.1
+git tag -a v3.0.2 origin/main -m "Release v3.0.2"
+git push origin v3.0.2
 ```
 
 Verify that `origin/main` is the intended release revision before tagging.
@@ -48,7 +48,8 @@ Never move/reuse an existing release tag or OCI chart version.
 `.github/workflows/release.yml` is the sole owner of stable tagged publication:
 
 1. Build/publish `linux/amd64` and `linux/arm64` images to GHCR.
-2. Package/publish the chart to GHCR OCI, with `appVersion` set from the tag.
+2. Package/publish the chart to GHCR OCI, with `version` and `appVersion` set to
+   the released image version before extracting the package filename/version.
 3. Generate `install.yaml` with the matching image.
 4. Create the GitHub Release with chart/manifests, commit changelog and the
    version-specific compatibility notes.
@@ -62,9 +63,9 @@ workflow so a single-platform build cannot overwrite the multi-platform release.
 
 ```bash
 gh run list --workflow=release.yml
-gh release view v3.0.1
-docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.1
-helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 0.2.1
+gh release view v3.0.2
+docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.2
+helm show chart oci://ghcr.io/yanet-platform/yanet-operator --version 3.0.2
 ```
 
 Check both image platforms, the source revision/digest, chart `appVersion` and
@@ -76,7 +77,7 @@ For a new cluster:
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/yanet-operator \
-  --version 0.2.1 \
+  --version 3.0.2 \
   --namespace yanet-system \
   --create-namespace
 ```

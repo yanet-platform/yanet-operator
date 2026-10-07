@@ -140,7 +140,7 @@ spec:
                     - {name: bird-socket, mountPath: /run/bird}
               volumes:
                 - name: bird-socket
-                  hostPath: {path: /run/bird, type: DirectoryOrCreate}
+                  hostPath: {path: /run/yanet2/bird, type: DirectoryOrCreate}
     - name: adapter-socket
       patch:
         spec:
@@ -152,7 +152,7 @@ spec:
                     - {name: bird-socket, mountPath: /run/bird}
               volumes:
                 - name: bird-socket
-                  hostPath: {path: /run/bird, type: DirectoryOrCreate}
+                  hostPath: {path: /run/yanet2/bird, type: DirectoryOrCreate}
     - name: announcer-socket
       patch:
         spec:
@@ -164,7 +164,7 @@ spec:
                     - {name: bird-socket, mountPath: /run/bird}
               volumes:
                 - name: bird-socket
-                  hostPath: {path: /run/bird, type: DirectoryOrCreate}
+                  hostPath: {path: /run/yanet2/bird, type: DirectoryOrCreate}
     - name: netconfig-runtime
       patch:
         spec:

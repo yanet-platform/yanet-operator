@@ -9,6 +9,7 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -65,5 +66,33 @@ var _ = Describe("Dataplane network attachments", func() {
 		Expect(k8sClient.Update(testContext, fresh)).NotTo(Succeed(), "duplicate interface names must be rejected by admission")
 		Expect(k8sClient.Get(testContext, client.ObjectKeyFromObject(installation), fresh)).To(Succeed())
 		Expect(fresh.Spec.Components.Dataplane.Networks).To(HaveLen(1))
+	})
+})
+
+var _ = Describe("Runtime image and hugepage defaults", func() {
+	It("preserves a common image tag and an automatic hugepage count through admission and storage", func() {
+		ctx := context.Background()
+		config := &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: minimalConfigSpec()}
+		config.Spec.Stop = true
+		config.Spec.Images.Tag = "0.1.1"
+		config.Spec.Components.Dataplane.Image.Tag = ""
+		config.Spec.Components.Dataplane.Hugepages = &api.Hugepages{Size: "2Mi"}
+		Expect(k8sClient.Create(ctx, config)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, config)).To(Succeed()) })
+		fresh := &api.YanetConfig{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(config), fresh)).To(Succeed())
+		Expect(fresh.Spec.Images.Tag).To(Equal("0.1.1"))
+		Expect(fresh.Spec.Components.Dataplane.Hugepages).To(Equal(&api.Hugepages{Size: "2Mi"}))
+		component, err := helpers.ResolveBoxComponent(&fresh.Spec, &api.YanetSpec{BoxType: "release"}, helpers.KindDataplane, "")
+		Expect(err).NotTo(HaveOccurred())
+		build := manifests.BuildContext{YanetName: "edge", Namespace: whTestNS, NodeName: "worker", BoxType: "release",
+			NodeAllocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("8Gi")}}
+		deployments, err := manifests.RenderDeployments(build, component, nil)
+		Expect(err).NotTo(HaveOccurred())
+		container := deployments[0].Spec.Template.Spec.Containers[0]
+		Expect(container.Image).To(Equal("dataplane:0.1.1"))
+		requested, limited := container.Resources.Requests["hugepages-2Mi"], container.Resources.Limits["hugepages-2Mi"]
+		Expect(requested.Cmp(resource.MustParse("8Gi"))).To(BeZero())
+		Expect(limited.Cmp(resource.MustParse("8Gi"))).To(BeZero())
 	})
 })

@@ -263,7 +263,13 @@ func validateHugepages(hugepages *Hugepages) error {
 	if hugepages == nil {
 		return nil
 	}
-	if _, err := hugepages.TotalQuantity(); err != nil {
+	check := *hugepages
+	if check.Count == 0 {
+		// Admission has no node snapshot. Validate the page size now; the
+		// renderer resolves and validates the allocatable count per node.
+		check.Count = 1
+	}
+	if _, err := check.TotalQuantity(); err != nil {
 		return fmt.Errorf("spec.components.dataplane.hugepages.%w", err)
 	}
 	return nil

@@ -159,6 +159,6 @@ handwritten Helm RBAC/webhook templates aligned with generated resources.
 ## Release
 
 See `README_RELEASES.md` and `release-notes/v3.0.0.md`. Application and chart
-versions are independent. `release.yml` owns stable publication; PR chart builds
-only produce artifacts. A CRD reset requires a coordinated clean installation,
+versions share the same release number from 3.0.2 onward. `release.yml` owns stable
+publication; PR chart builds only produce artifacts. A CRD reset requires a coordinated clean installation,
 not an implicit Helm upgrade or automatic adoption of old objects.

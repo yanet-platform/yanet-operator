@@ -107,6 +107,30 @@ class PackagingTest(unittest.TestCase):
         self.assertNotIn("volumes", pod(docs))
 
 
+class ReleasePipelineTest(unittest.TestCase):
+    def test_chart_and_image_versions_follow_release(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        steps = workflow["jobs"]["helm"]["steps"]
+        with tempfile.TemporaryDirectory() as directory:
+            chart_path = Path(directory) / "deploy/charts/yanet-operator/Chart.yaml"
+            chart_path.parent.mkdir(parents=True)
+            chart_path.write_text('apiVersion: v2\nname: yanet-operator\nversion: 0.2.1\nappVersion: "3.0.1"\n')
+            output = Path(directory) / "output"
+            for step in steps:
+                if step.get("id") not in {"release_version", "chart_version"}:
+                    continue
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=directory,
+                    env={**os.environ, "GITHUB_REF": "refs/tags/v3.0.2", "RELEASE_VERSION": "3.0.2", "GITHUB_OUTPUT": str(output)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+            metadata = yaml.safe_load(chart_path.read_text())
+            self.assertEqual(metadata["version"], "3.0.2")
+            self.assertEqual(metadata["appVersion"], "3.0.2")
+            self.assertEqual(output.read_text().strip(), "version=3.0.2")
+
+
 class ReviewPipelineTest(unittest.TestCase):
     def test_analysis_failures_propagate(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ai-code-review.yml").read_text())
