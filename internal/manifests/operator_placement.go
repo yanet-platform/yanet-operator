@@ -55,7 +55,11 @@ func RenderDeployments(ctx BuildContext, component *helpers.ResolvedComponent, r
 			}
 		}
 		identity := CaptureWorkloadIdentity(deployment)
+		unpatched := deployment.DeepCopy()
 		if err := ApplyPatches(deployment, component.Patches, registry); err != nil {
+			return nil, err
+		}
+		if err := applyInstallationOverrides(deployment, unpatched, component); err != nil {
 			return nil, err
 		}
 		if component.Kind == helpers.KindDataplane {
@@ -103,6 +107,9 @@ func composeSidecar(ctx BuildContext, deployment *appsv1.Deployment, sidecar *he
 	}
 	op := buildSingle(ctx, sidecar)
 	if err := ApplyPatches(op, sidecar.Patches, registry); err != nil {
+		return err
+	}
+	if err := applyImageOverride(op, sidecar.Name, sidecar.Image, sidecar.SidecarOverride); err != nil {
 		return err
 	}
 	pod := &op.Spec.Template.Spec

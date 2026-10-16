@@ -57,7 +57,7 @@ requires the coordinated [replacement procedure](release-notes/v3.0.0.md).
 3. `boxTypes`: named presets selecting components and their ordered patches.
 
 An installation selects a box type and nodes, with narrow image, enablement, NUMA
-and network overrides. General resources, annotations and extra mounts belong in
+and hugepage/network overrides. General resources, annotations and extra mounts belong in
 the palette's patches.
 
 ### Configure the palette

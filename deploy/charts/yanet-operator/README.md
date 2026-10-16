@@ -153,12 +153,29 @@ Image tags follow installation container override, palette tag, then
 `yanetconfig.spec.images.tag`. Omitted/empty palette tags inherit the global tag.
 Set the common runtime version once and keep explicit tags only for exceptions.
 
+Explicit installation image overrides are applied after palette patches, using
+the effective palette registry/prefix and inherited image fields. Component
+`enabled: true` forces one replica even if a preset patch specifies standby;
+`enabled: false` and installation-wide disable force zero. When component
+enablement is omitted, the preset's replicas remain unchanged. Native sidecar
+enablement controls composition, and their explicit images also win later
+dataplane patches. Network ownership checks still reject competing typed NAD
+annotations and device reservations.
+
 Dataplane hugepages use node `status.allocatable`, not raw capacity or free
 scheduler resources. Omitted `hugepages` selects a single positive page-size pool;
 multiple positive pools require an explicit size. `hugepages: {size: 2Mi}` reserves
 the allocatable pool of that size, while `{size: 2Mi, count: 1024}` explicitly
 reserves 2Gi. A missing selected pool fails preflight before workload writes.
 The operator does not provision hugepages or modify the host dataplane config.
+
+An installation may set `Yanet.spec.components.dataplane.hugepages`. Omitted/null
+inherits the palette; a supplied object replaces it, including its page size.
+For example, `{size: 2Mi}` selects the node pool even if the palette has an explicit
+count, and `{size: 1Gi, count: 4}` reserves 4Gi. The precedence is installation,
+palette, then node-derived defaults. Final hugepage requests and limits match
+the resolved reservation after patches, without stale page-size resource keys;
+CPU, ordinary memory and unrelated resource patches remain intact.
 
 Runtime Pods tolerate all `NoSchedule` and `NoExecute` taints by default; custom
 Deployment patches can replace or clear those tolerations. The top-level Helm
@@ -231,7 +248,8 @@ device-plugin DaemonSet and common NAD can be deployed with `extraManifests`.
 When adopting typed networks, remove the Multus annotation and corresponding
 device quantities from dataplane/sidecar patches. Conflicts are rejected before
 workload changes, including stale default-pool reservations after an override.
-CPU, memory, hugepages and unrelated device-resource patches are retained. If
+CPU, memory and unrelated device-resource patches are retained. Hugepages follow
+the resolved typed reservation described above. If
 typed networks are omitted everywhere, existing patch-based networking remains
 supported.
 

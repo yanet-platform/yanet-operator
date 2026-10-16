@@ -36,6 +36,34 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+func TestYanetWebhook_HugepageOverrideWithoutConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		request *Hugepages
+		invalid bool
+	}{
+		{"inherit", nil, false},
+		{"automatic", &Hugepages{Size: "2Mi"}, false},
+		{"explicit", &Hugepages{Size: "1Gi", Count: 4}, false},
+		{"missing size", &Hugepages{Count: 1}, true},
+		{"negative count", &Hugepages{Size: "2Mi", Count: -1}, true},
+		{"invalid size", &Hugepages{Size: "invalid"}, true},
+		{"overflow", &Hugepages{Size: "8Ei", Count: 2}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			y := makeYanet("edge", "yanet", "release")
+			y.Spec.Components = &YanetComponentsOverride{Dataplane: &YanetDataplaneOverride{Hugepages: tc.request}}
+			warnings, err := (&YanetCustomValidator{Client: newClientWith(t)}).ValidateCreate(context.Background(), y)
+			if (err != nil) != tc.invalid {
+				t.Fatalf("error = %v, want invalid=%t", err, tc.invalid)
+			}
+			if !tc.invalid && len(warnings) != 1 {
+				t.Fatalf("missing-config warning = %v", warnings)
+			}
+		})
+	}
+}
+
 func newClientWith(t *testing.T, objects ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objects...).Build()
