@@ -5,10 +5,10 @@ type: application
 # Native-sidecar named target ports are resolved by EndpointSlice starting in 1.33.
 kubeVersion: ">=1.33.0-0"
 # Chart and application versions share the release number from 3.0.2 onward.
-version: 3.0.2
+version: 3.0.3
 # Stable release CI synchronizes both fields with the released image version.
 # It determines the Docker image tag: ghcr.io/yanet-platform/yanet-operator:<appVersion>
-appVersion: "3.0.2"
+appVersion: "3.0.3"
 maintainers:
   - name: yanet-platform
     url: https://github.com/yanet-platform
