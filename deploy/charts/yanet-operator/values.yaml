@@ -1,5 +1,9 @@
 replicaCount: 2
 
+# Opt-in: cert-manager CRDs/issuer and a policy-constrained approver must exist.
+# This grants Certificate permissions only; the manager never reads TLS Secrets.
+manageCertificates: false
+
 image:
   repository: ghcr-io.mirror.yandex.net/yanet-platform/yanet-operator
   pullPolicy: IfNotPresent

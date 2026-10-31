@@ -20,6 +20,8 @@ before replacing an existing installation; no compatibility conversion is provid
 - Typed Multus attachments with matching device resource requests/limits.
 - Admission validation, drift reporting, conditions, events and Prometheus metrics.
 - Ownership-aware cleanup and guarded role/network transitions.
+- Opt-in cert-manager issuance with role-scoped persistent credential delivery;
+  see [managed certificates](MANAGED_CERTIFICATES.md) for prerequisites and limits.
 
 ## Installation
 

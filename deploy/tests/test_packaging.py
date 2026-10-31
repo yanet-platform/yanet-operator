@@ -40,6 +40,19 @@ def pod(docs):
 
 
 class PackagingTest(unittest.TestCase):
+    def test_workload_certificate_opt_in(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                docs = chart(f"manageCertificates={str(enabled).lower()}")
+                args = pod(docs)["containers"][0]["args"]
+                self.assertEqual("--manage-certificates" in args, enabled)
+                role = next(d for d in docs if d["kind"] == "ClusterRole" and d["metadata"]["name"] == "manager-role")
+                certificate_rules = [r for r in role["rules"] if "cert-manager.io" in r["apiGroups"]]
+                self.assertEqual(bool(certificate_rules), enabled)
+                for rule in certificate_rules:
+                    self.assertEqual(rule["resources"], ["certificates"])
+                self.assertFalse(any("secrets" in r["resources"] for r in role["rules"]))
+
     def assert_certificate_wiring(self, docs):
         certificate = one(docs, "Certificate")
         issuer = one(docs, "Issuer")

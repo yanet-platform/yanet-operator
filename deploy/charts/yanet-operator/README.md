@@ -16,6 +16,11 @@ helm install yanet-operator \
 
 ## Configuration
 
+`manageCertificates` is an optional boolean, default `false`. It enables the
+manager's cert-manager Certificate watch and Certificate-only RBAC. Configure
+`yanetconfig.spec.certificates` as described in [managed workload certificates](../../../MANAGED_CERTIFICATES.md).
+Install cert-manager CRDs and the constrained issuer/approver before enabling it.
+
 ### Metrics and Monitoring
 
 Enable Prometheus metrics collection:

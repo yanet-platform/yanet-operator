@@ -123,7 +123,7 @@ test-docker-race: ## Run tests with race detector in Docker container.
 .PHONY: test-docker-unit
 test-docker-unit: ## Run unit tests in Docker container.
 	$(call docker-go,go mod download && \
-		go test -v ./api/... ./internal/helpers/... ./internal/manifests/... -coverprofile cover-unit.out)
+		go test -v ./api/... ./internal/helpers/... ./internal/manifests/... ./internal/credentials/... -coverprofile cover-unit.out)
 
 .PHONY: test-docker-integration
 test-docker-integration: ## Run integration tests in Docker container.
