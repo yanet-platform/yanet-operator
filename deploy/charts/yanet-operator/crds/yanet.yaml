@@ -154,6 +154,124 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+              certificates:
+                description: |-
+                  Certificates enables cert-manager issuance and persistent node-local delivery.
+                  Requires the manager's --manage-certificates flag and cert-manager CRDs.
+                  Omitted leaves existing workloads and installations unchanged.
+                properties:
+                  duration:
+                    description: Duration and RenewBefore are explicit Go durations
+                      accepted by cert-manager.
+                    type: string
+                  exporterImage:
+                    description: ExporterImage is an exact operator image containing
+                      /manager credential-sync.
+                    type: string
+                  hostPath:
+                    description: HostPath must be a persistent directory, not /run,
+                      /tmp or kubelet cache.
+                    type: string
+                  issuerRef:
+                    description: CertificateIssuerRef references an externally provisioned,
+                      policy-constrained issuer.
+                    properties:
+                      group:
+                        description: Group defaults to cert-manager.io.
+                        type: string
+                      kind:
+                        description: Kind is Issuer/ClusterIssuer for cert-manager.io,
+                          or an external issuer kind.
+                        type: string
+                      name:
+                        type: string
+                    required:
+                    - kind
+                    - name
+                    type: object
+                  profiles:
+                    items:
+                      description: |-
+                        CertificateProfile is one node-bound role, shared by its NUMA instances.
+                        Each selected container receives only this profile's read-only HostPath.
+                      properties:
+                        component:
+                          description: Component is controlplane, dataplane, birdAdapter,
+                            or a palette operator/sidecar name.
+                          type: string
+                        container:
+                          description: Container is the logical container name, before
+                            native-sidecar namespacing.
+                          type: string
+                        dnsNames:
+                          description: DNSNames supports {node}, {namespace}, {boxType}
+                            placeholders for server SANs.
+                          items:
+                            type: string
+                          type: array
+                        mountPath:
+                          description: MountPath contains current/{tls.crt,tls.key,ca.crt}
+                            and immutable generations.
+                          type: string
+                        name:
+                          maxLength: 40
+                          type: string
+                        usage:
+                          enum:
+                          - client
+                          - server
+                          type: string
+                      required:
+                      - component
+                      - container
+                      - mountPath
+                      - name
+                      - usage
+                      type: object
+                    maxItems: 32
+                    minItems: 1
+                    type: array
+                  renewBefore:
+                    type: string
+                  trustBundle:
+                    description: |-
+                      TrustBundle is an independently managed public CA bundle in each installation
+                      namespace. The leaf Secret's ca.crt is deliberately not a trust source.
+                    properties:
+                      key:
+                        description: The key to select.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the ConfigMap or its key must
+                          be defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  trustDomain:
+                    description: TrustDomain identifies role-specific SPIFFE URI SANs,
+                      with no CommonName.
+                    type: string
+                required:
+                - duration
+                - exporterImage
+                - hostPath
+                - issuerRef
+                - profiles
+                - renewBefore
+                - trustBundle
+                - trustDomain
+                type: object
               components:
                 description: |-
                   Components is the palette of available workload components plus a
