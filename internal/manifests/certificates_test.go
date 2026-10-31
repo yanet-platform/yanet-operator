@@ -15,7 +15,7 @@ import (
 func certificateBuildContext() BuildContext {
 	return BuildContext{YanetName: "edge", Namespace: "default", BoxType: "firewall", NodeName: "worker.example.test", NodeUID: "node-uid", OwnerRef: metav1.OwnerReference{APIVersion: api.GroupVersion.String(), Kind: "Yanet", Name: "edge", UID: "installation-uid", Controller: helpers.PtrTrue()}, Certificates: &api.CertificateManagementSpec{
 		IssuerRef: api.CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test", TrustBundle: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"},
-		HostPath: "/var/lib/yanet/credentials", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "720h", RenewBefore: "480h",
+		HostPath: "/var/lib/yanet/credentials", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "87600h", RenewBefore: "480h",
 		Profiles: []api.CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}", "yanet-{boxType}-controlplane-numa0.{namespace}.svc.cluster.local"}}},
 	}}
 }

@@ -27,7 +27,7 @@ func certificateEnvironment(t *testing.T) (*YanetReconciler, *api.Yanet, *corev1
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(yanet, node).WithStatusSubresource(&api.Yanet{}, &appsv1.Deployment{}, newCertificate()).Build()
 	cfg := minimalConfig()
-	cfg.Certificates = &api.CertificateManagementSpec{IssuerRef: api.CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test", TrustBundle: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"}, HostPath: "/var/lib/yanet/pki", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "720h", RenewBefore: "480h", Profiles: []api.CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}"}}}}
+	cfg.Certificates = &api.CertificateManagementSpec{IssuerRef: api.CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test", TrustBundle: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"}, HostPath: "/var/lib/yanet/pki", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "87600h", RenewBefore: "480h", Profiles: []api.CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}"}}}}
 	return &YanetReconciler{Client: cl, Scheme: scheme, GlobalConfig: &api.MutexYanetConfigSpec{Config: cfg}, ManageCertificates: true}, yanet, node
 }
 
@@ -63,7 +63,7 @@ func TestManagedCertificatesWaitForIssuanceAndDelivery(t *testing.T) {
 		t.Fatalf("reconcile rewrote the certificate: %s -> %s", version, got)
 	}
 	// A typed cert-manager webhook may canonicalize durations and omit false.
-	certificate.Object["spec"].(map[string]any)["duration"] = "720h0m0s"
+	certificate.Object["spec"].(map[string]any)["duration"] = "87600h0m0s"
 	certificate.Object["spec"].(map[string]any)["renewBefore"] = "480h0m0s"
 	delete(certificate.Object["spec"].(map[string]any), "isCA")
 	if err := r.Update(context.Background(), certificate); err != nil {

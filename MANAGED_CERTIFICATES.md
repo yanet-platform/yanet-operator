@@ -19,7 +19,7 @@ certificates:
   trustBundle: {name: yanet-workload-trust, key: ca.crt}
   hostPath: /var/lib/yanet/credentials
   exporterImage: example.test/yanet-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  duration: 720h
+  duration: 87600h
   renewBefore: 480h
   profiles:
     - name: gateway
@@ -37,6 +37,10 @@ certificates:
       mountPath: /etc/yanet2/pki/acl
       usage: client
 ```
+
+The initial profile requests `87600h` (3650 days, ten 365-day years), with renewal
+starting `480h` (20 days) before expiry. Confirm the issuer policy permits that
+lifetime and the issuing CA chain remains valid for the intended period.
 
 Each referenced logical component/container must be declared in the palette.
 Profiles are rendered only for selected effective workloads, including enabled

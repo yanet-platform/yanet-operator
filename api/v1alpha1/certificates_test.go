@@ -8,7 +8,7 @@ import (
 )
 
 func TestCertificateConfigurationBoundaries(t *testing.T) {
-	base := CertificateManagementSpec{IssuerRef: CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test", TrustBundle: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"}, HostPath: "/var/lib/yanet/pki", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "720h", RenewBefore: "480h", Profiles: []CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}", "yanet-{boxType}.{namespace}.svc.cluster.local"}}}}
+	base := CertificateManagementSpec{IssuerRef: CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test", TrustBundle: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"}, HostPath: "/var/lib/yanet/pki", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "87600h", RenewBefore: "480h", Profiles: []CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}", "yanet-{boxType}.{namespace}.svc.cluster.local"}}}}
 	components := ComponentsSpec{}
 	if err := ValidateCertificates(&base, &components); err != nil {
 		t.Fatalf("valid config: %v", err)
@@ -27,7 +27,7 @@ func TestCertificateConfigurationBoundaries(t *testing.T) {
 		{"relative mount", func(c *CertificateManagementSpec) { c.Profiles[0].MountPath = "pki" }},
 		{"floating exporter", func(c *CertificateManagementSpec) { c.ExporterImage = "example.test/operator:latest" }},
 		{"incomplete digest", func(c *CertificateManagementSpec) { c.ExporterImage = "example.test/operator@sha256:1234" }},
-		{"renew beyond lifetime", func(c *CertificateManagementSpec) { c.RenewBefore = "721h" }},
+		{"renew beyond lifetime", func(c *CertificateManagementSpec) { c.RenewBefore = "87601h" }},
 		{"missing trust", func(c *CertificateManagementSpec) { c.TrustBundle.Name = "" }},
 		{"invalid trust name", func(c *CertificateManagementSpec) { c.TrustBundle.Name = "invalid/name" }},
 		{"invalid trust key", func(c *CertificateManagementSpec) { c.TrustBundle.Key = "invalid key" }},
