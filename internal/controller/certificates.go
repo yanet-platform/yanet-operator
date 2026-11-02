@@ -43,7 +43,7 @@ func (r *YanetReconciler) applyCertificates(ctx context.Context, yanet *api.Yane
 				return err
 			}
 			if !controlledByYanet(existing, yanet) {
-				return fmt.Errorf("Certificate %s/%s has a different controller owner", existing.GetNamespace(), existing.GetName())
+				return fmt.Errorf("certificate %s/%s has a different controller owner", existing.GetNamespace(), existing.GetName())
 			}
 			if !existing.GetDeletionTimestamp().IsZero() {
 				ready = false
@@ -108,7 +108,7 @@ func normalizedCertificateSpec(certificate *unstructured.Unstructured) (map[stri
 		if value, ok := spec[field].(string); ok {
 			duration, parseErr := time.ParseDuration(value)
 			if parseErr != nil {
-				return nil, fmt.Errorf("Certificate %s %s: %w", certificate.GetName(), field, parseErr)
+				return nil, fmt.Errorf("certificate %s %s: %w", certificate.GetName(), field, parseErr)
 			}
 			spec[field] = duration.String()
 		}

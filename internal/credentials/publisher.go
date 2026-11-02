@@ -75,6 +75,8 @@ func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time
 // immutable files and atomically switches current. A failed delivery leaves the
 // last generation intact. Consumers must resolve current once per pair load;
 // separate path lookups across a switch can otherwise observe different pairs.
+// Paths are trusted administrative inputs from the node-bound delivery Pod;
+// certificate contents cannot select paths outside its configured mounts.
 func Publish(source, destination, trustFile string, identity Identity, now time.Time) (string, error) {
 	// Pin the kubelet generation before reading either file. Reading tls.crt and
 	// tls.key through separate projection symlinks races Secret renewal.
@@ -90,7 +92,7 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 	if err != nil {
 		return "", err
 	}
-	trust, err := os.ReadFile(trustFile)
+	trust, err := os.ReadFile(trustFile) // #nosec G304 -- The independent trust path is selected by the trusted delivery configuration.
 	if err != nil {
 		return "", err
 	}
@@ -102,11 +104,11 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 	if err := os.MkdirAll(destination, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(destination, 0o700); err != nil {
+	if err := os.Chmod(destination, 0o700); err != nil { // #nosec G302 -- This is an owner-only directory, which requires search permission.
 		return "", err
 	}
 	final := filepath.Join(destination, name)
-	_, statErr := os.Stat(final)
+	_, statErr := os.Stat(final) // #nosec G703 -- The only content-derived path component is a SHA-256 hex digest.
 	if os.IsNotExist(statErr) {
 		temp, err := os.MkdirTemp(destination, ".generation-")
 		if err != nil {
@@ -121,14 +123,14 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 		if err := syncDirectory(temp); err != nil {
 			return "", err
 		}
-		if err := os.Rename(temp, final); err != nil {
+		if err := os.Rename(temp, final); err != nil { // #nosec G703 -- Both paths are under the trusted destination; name is a SHA-256 hex digest.
 			return "", err
 		}
 	} else if statErr != nil {
 		return "", statErr
 	} else {
 		for filename, expected := range map[string][]byte{"tls.crt": cert, "tls.key": key, "ca.crt": trust} {
-			stored, err := os.ReadFile(filepath.Join(final, filename))
+			stored, err := os.ReadFile(filepath.Join(final, filename)) // #nosec G304 G703 -- SHA-256 hex directory and fixed PEM basenames under the trusted destination.
 			if err != nil {
 				return "", err
 			}
@@ -156,6 +158,7 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 }
 
 // Check validates a single installed generation without the API or Secret cache.
+// As in Publish, destination and trustFile are trusted administrative paths.
 func Check(destination, trustFile string, identity Identity, now time.Time) error {
 	generation, err := filepath.EvalSymlinks(filepath.Join(destination, "current"))
 	if err != nil {
@@ -169,7 +172,7 @@ func Check(destination, trustFile string, identity Identity, now time.Time) erro
 	if err != nil {
 		return err
 	}
-	trust, err := os.ReadFile(trustFile)
+	trust, err := os.ReadFile(trustFile) // #nosec G304 -- The independent trust path is selected by the trusted delivery configuration.
 	if err != nil {
 		return err
 	}
@@ -177,7 +180,7 @@ func Check(destination, trustFile string, identity Identity, now time.Time) erro
 }
 
 func writeSynced(name string, data []byte) (err error) {
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- Fixed PEM basename under a private MkdirTemp directory; O_EXCL prevents replacement.
 	if err != nil {
 		return err
 	}
@@ -193,7 +196,7 @@ func writeSynced(name string, data []byte) (err error) {
 }
 
 func syncDirectory(name string) (err error) {
-	f, err := os.Open(name)
+	f, err := os.Open(name) // #nosec G304 -- Only the trusted destination or its private MkdirTemp directory is synced.
 	if err != nil {
 		return err
 	}
