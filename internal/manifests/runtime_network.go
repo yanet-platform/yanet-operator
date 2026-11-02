@@ -86,6 +86,17 @@ func configureRuntimeContainer(deployment *appsv1.Deployment, ctx BuildContext, 
 		variables = []corev1.EnvVar{
 			{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: bind(grpcPort)},
 		}
+		if ctx.Certificates != nil {
+			for _, profile := range ctx.Certificates.Profiles {
+				if profile.Component == "controlplane" && profile.Container == "controlplane" && profile.Usage == "server" {
+					// Keep the reserved Service port on the native TLS listener. A
+					// parallel plaintext bind would conflict with that same port.
+					variables[0].Value = ""
+					variables = append(variables, corev1.EnvVar{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", Value: bind(grpcPort)})
+					break
+				}
+			}
+		}
 	case helpers.KindBirdAdapter:
 		variables = []corev1.EnvVar{
 			{Name: "YANET_LISTEN_ADDR", Value: bind(grpcPort)},

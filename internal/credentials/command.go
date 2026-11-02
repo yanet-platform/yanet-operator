@@ -1,9 +1,12 @@
 package credentials
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 )
@@ -12,6 +15,23 @@ type dnsNames []string
 
 func (d *dnsNames) String() string         { return fmt.Sprint([]string(*d)) }
 func (d *dnsNames) Set(value string) error { *d = append(*d, value); return nil }
+
+type gatewayAccounts []GatewayAccount
+
+func (a *gatewayAccounts) String() string { return fmt.Sprint([]GatewayAccount(*a)) }
+func (a *gatewayAccounts) Set(value string) error {
+	var account GatewayAccount
+	decoder := json.NewDecoder(bytes.NewBufferString(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&account); err != nil {
+		return fmt.Errorf("decode gateway account: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fmt.Errorf("gateway account must contain exactly one JSON object")
+	}
+	*a = append(*a, account)
+	return nil
+}
 
 // Run starts the node-local exporter or checks the last published generation.
 // The exporter has no API credentials; kubelet projects precisely its Secrets.
@@ -25,6 +45,9 @@ func Run(ctx context.Context, args []string) error {
 	check := flags.Bool("check", false, "Validate the installed generation and exit")
 	var names dnsNames
 	flags.Var(&names, "dns", "Exact expected DNS SAN, repeatable")
+	var accounts gatewayAccounts
+	gatewayPolicy := flags.Bool("gateway-policy", false, "Deliver gateway identity and permission files, including an empty policy")
+	flags.Var(&accounts, "gateway-account", "Public gateway account JSON with username and permissions, repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -32,14 +55,23 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("an expected URI and no positional arguments are required")
 	}
 	identity := Identity{URI: *uri, Usage: *usage, DNSNames: names}
+	if (*gatewayPolicy || len(accounts) > 0) && *usage != "server" {
+		return fmt.Errorf("gateway accounts can only accompany server credentials")
+	}
+	if *gatewayPolicy && accounts == nil {
+		accounts = make(gatewayAccounts, 0)
+	}
+	if _, err := accountFiles(accounts); err != nil {
+		return err
+	}
 	if *check {
-		return Check(*destination, *trust, identity, time.Now())
+		return Check(*destination, *trust, identity, time.Now(), accounts...)
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	lastGeneration := ""
 	for {
-		generation, err := Publish(*source, *destination, *trust, identity, time.Now())
+		generation, err := Publish(*source, *destination, *trust, identity, time.Now(), accounts...)
 		if err != nil {
 			slog.Error("credential delivery failed; keeping the previous generation", "error", err)
 		} else if generation != lastGeneration {

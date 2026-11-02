@@ -301,6 +301,23 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 	}
 }
 
+func TestRuntimeNetwork_ManagedGatewayUsesTLSOnReservedPort(t *testing.T) {
+	build := certificateBuildContext()
+	component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}}
+	deployments, err := RenderDeployments(build, component, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variables := envValues(deployments[0].Spec.Template.Spec.Containers[0].Env)
+	plaintext, present := variables["YANET_GATEWAY_SERVER_GRPC_ENDPOINT"]
+	if !present || plaintext != "" || variables["YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT"] != "[::]:8080" {
+		t.Fatalf("TLS and plaintext listener binds conflict: %v", variables)
+	}
+	if _, present := variables["YANET_GATEWAY_SERVER_HTTP_ENDPOINT"]; present {
+		t.Fatal("ambiguous HTTP environment override returned")
+	}
+}
+
 // TestRuntimeNetwork_GatewayPositions verifies the environment consumed by xcfg:
 // dense positions in the prepared config, endpoints only, and no separate parser.
 func TestRuntimeNetwork_GatewayPositions(t *testing.T) {

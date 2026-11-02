@@ -36,6 +36,9 @@ certificates:
       container: acl
       mountPath: /etc/yanet2/pki/acl
       usage: client
+      # Illustrative grant; supply the complete least-privilege RPC set for the role.
+      gatewayPermissions:
+        - /controlplane.ynpb.v1.Gateway/Register
 ```
 
 The initial profile requests `87600h` (3650 days, ten 365-day years), with renewal
@@ -71,6 +74,8 @@ trust ConfigMap. It runs one exporter per role, without a service-account token,
 with read-only source mounts and write access only to that role's host directory.
 The root exporter drops capabilities and uses a read-only root filesystem.
 Persistent files are root-owned; consumers currently need UID 0 to read them.
+The delivery Deployment uses `Recreate`, preventing overlapping writers during
+policy changes.
 
 The filesystem layout is:
 
@@ -130,7 +135,29 @@ create Certificates is not sufficient authorization to issue an arbitrary leaf.
 Provision issuer keys outside this controller, with separate backup/rotation.
 
 Authentication mode, RPC permissions and account mapping are application policy.
-URI principals must be present in the actual identity provider/permission store.
+Client profiles can declare `gatewayPermissions`: at most 128 full
+`/package.Service/Method` patterns, with `*` allowed within service/method names.
+Only effective node workloads receive accounts. Every server-role exporter writes
+their exact installation/Node UID-bound URI principals to `identities.yaml` and
+their explicit grants to `permissions.yaml` alongside the PEMs in `current`.
+An empty set writes an explicit empty policy, including after the last grant is
+removed. No account is implied by certificate issuance alone.
+
+Configure the gateway's file identity provider and permission store to read
+`<server mountPath>/current/identities.yaml` and `permissions.yaml`. The operator
+does not enable authentication or infer role permissions. Policy changes create
+a new durable generation and change the gateway Pod template; a read-only
+`credential-sync --check` init container rejects stale policy before startup.
+It uses only cached public trust and the role directory, so the gate also works
+without the API. Normal leaf rotation does not change the Pod template.
+
+For a managed controlplane server profile the reserved gRPC port is assigned to
+`gateway.server.grpc.tls.endpoint` and the plaintext gRPC listener is disabled.
+The host file must configure native TLS key pairs, authentication and the HTTP
+listener. Clients must explicitly configure their supported `gateway_tls` or
+`gateways[].tls` fields and bounded reconnect behavior. Callback listeners need
+their own transport/access boundary; mounting certificates does not secure them.
+
 Do not add anonymous registration to bypass missing credentials. Verify transport
 boundaries, reload/reconnect, issuer failure and API-unavailable cold start on
 the matched runtime images before a production rollout.

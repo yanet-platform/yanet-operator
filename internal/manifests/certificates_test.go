@@ -1,6 +1,7 @@
 package manifests
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -127,5 +128,84 @@ func TestCertificateRoleIsolation(t *testing.T) {
 	plan := BuildCertificatePlan(build, append(cp, acl...), true)
 	if len(plan.Certificates) != 2 || len(plan.Delivery.Spec.Template.Spec.Containers) != 2 {
 		t.Fatal("effective roles did not get separate delivery/key pairs")
+	}
+}
+
+func TestCertificateGatewayAccountsFollowEffectiveNodeRoles(t *testing.T) {
+	build := certificateBuildContext()
+	build.Certificates.Profiles = append(build.Certificates.Profiles,
+		api.CertificateProfile{Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/yanet2/pki/acl", Usage: "client", GatewayPermissions: []string{"/example.v1.Service/Update"}},
+		api.CertificateProfile{Name: "unused", Component: "unused", Container: "unused", MountPath: "/etc/yanet2/pki/unused", Usage: "client", GatewayPermissions: []string{"/example.v1.Service/*"}},
+	)
+	cp, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "acl", Enabled: true, Containers: []helpers.ResolvedContainer{{Name: "acl"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := BuildCertificatePlan(build, append(cp, acl...), true)
+	if plan.Delivery.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatal("credential publishers can overlap during rollout")
+	}
+	var accounts []map[string]any
+	for _, arg := range plan.Delivery.Spec.Template.Spec.Containers[0].Args {
+		if value, ok := strings.CutPrefix(arg, "--gateway-account="); ok {
+			var account map[string]any
+			if err := json.Unmarshal([]byte(value), &account); err != nil {
+				t.Fatal(err)
+			}
+			accounts = append(accounts, account)
+		}
+	}
+	if len(accounts) != 1 || accounts[0]["username"] != "spiffe://example.test/ns/default/installation/installation-uid/node/node-uid/role/acl" || accounts[0]["permissions"].([]any)[0] != "/example.v1.Service/Update" {
+		t.Fatalf("wrong effective node policy: %+v", accounts)
+	}
+	for _, arg := range plan.Delivery.Spec.Template.Spec.Containers[1].Args {
+		if strings.HasPrefix(arg, "--gateway-account=") {
+			t.Fatal("client role received another role's account policy")
+		}
+	}
+	initialHash := cp[0].Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"]
+	if initialHash == "" || len(cp[0].Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatal("gateway lacks a policy-bound startup gate")
+	}
+	gate := cp[0].Spec.Template.Spec.InitContainers[0]
+	if gate.Image != build.Certificates.ExporterImage || len(gate.VolumeMounts) != 1 || gate.VolumeMounts[0].Name != "yanet-credential-gateway" || !gate.VolumeMounts[0].ReadOnly {
+		t.Fatalf("gateway gate escaped its read-only role: %+v", gate)
+	}
+	if len(acl[0].Spec.Template.Spec.InitContainers) != 0 {
+		t.Fatal("client unnecessarily acquired gateway account initialization")
+	}
+	build.Certificates.Profiles[1].GatewayPermissions = []string{"/example.v1.Service/Read"}
+	cp2, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	BuildCertificatePlan(build, append(cp2, acl...), true)
+	if cp2[0].Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"] == initialHash {
+		t.Fatal("gateway will not restart after an account policy update")
+	}
+	build.Certificates.Profiles[1].GatewayPermissions = nil
+	cp3, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := BuildCertificatePlan(build, append(cp3, acl...), true)
+	if len(cp3[0].Spec.Template.Spec.InitContainers) != 1 || cp3[0].Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"] == cp2[0].Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"] {
+		t.Fatal("removing the last granted role lost the policy gate or rollout")
+	}
+	policyEnabled := false
+	for _, arg := range empty.Delivery.Spec.Template.Spec.Containers[0].Args {
+		if strings.HasPrefix(arg, "--gateway-account=") {
+			t.Fatalf("removed role retained account %s", arg)
+		}
+		if arg == "--gateway-policy" {
+			policyEnabled = true
+		}
+	}
+	if !policyEnabled {
+		t.Fatal("last account revocation must deliver an explicit empty policy")
 	}
 }

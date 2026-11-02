@@ -1,6 +1,7 @@
 package credentials_test
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
+	"gopkg.in/yaml.v3"
 )
 
 var clock = time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
@@ -195,5 +197,113 @@ func TestServerSANAndTrustOverlap(t *testing.T) {
 	identity.DNSNames = []string{"other.example.test"}
 	if err := credentials.Validate(cert, key, next.pem, identity, clock); err == nil {
 		t.Fatal("wrong server DNS accepted")
+	}
+}
+
+// A policy-only update must create a new durable generation, and a gateway
+// startup check must reject old, missing or damaged account files without API access.
+func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {
+	a := newAuthority(t)
+	source, destination := t.TempDir(), t.TempDir()
+	trust := filepath.Join(t.TempDir(), "ca.crt")
+	write(t, trust, a.pem)
+	identity := credentials.Identity{URI: identityURI, Usage: "server", DNSNames: []string{"gateway.example.test"}}
+	cert, key := a.leaf(t, 30, func(c *x509.Certificate) {
+		c.DNSNames = identity.DNSNames
+		c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	})
+	project(t, source, "first", cert, key)
+	account := credentials.GatewayAccount{Username: identityURI, Permissions: []string{"/example.v1.Service/Read"}}
+	first, err := credentials.Publish(source, destination, trust, identity, clock, account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"identities.yaml", "permissions.yaml"} {
+		data, err := os.ReadFile(filepath.Join(destination, "current", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document map[string]any
+		if err := yaml.Unmarshal(data, &document); err != nil {
+			t.Fatal(err)
+		}
+		if name == "identities.yaml" {
+			entries := document["identities"].([]any)
+			if len(entries) != 1 || entries[0].(map[string]any)["username"] != identityURI {
+				t.Fatalf("wrong account identities: %s", data)
+			}
+		} else {
+			users := document["permissions"].(map[string]any)["users"].([]any)
+			user := users[0].(map[string]any)
+			if len(users) != 1 || user["username"] != identityURI || user["permissions"].([]any)[0] != "/example.v1.Service/Read" {
+				t.Fatalf("wrong least-privilege policy: %s", data)
+			}
+		}
+	}
+	account.Permissions = []string{"/example.v1.Service/Watch"}
+	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
+		t.Fatal("new gateway accepted the old account policy")
+	}
+	second, err := credentials.Publish(source, destination, trust, identity, clock, account)
+	if err != nil || second == first {
+		t.Fatalf("policy-only update reused its generation: %s %v", second, err)
+	}
+	emptyPolicy := make([]credentials.GatewayAccount, 0)
+	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy...); err == nil {
+		t.Fatal("revoking the last account accepted the old nonempty policy")
+	}
+	third, err := credentials.Publish(source, destination, trust, identity, clock, emptyPolicy...)
+	if err != nil || third == second {
+		t.Fatalf("last account revocation reused its generation: %s %v", third, err)
+	}
+	for name, expected := range map[string]string{"identities.yaml": "identities: []\n", "permissions.yaml": "permissions:\n    users: []\n"} {
+		data, err := os.ReadFile(filepath.Join(destination, "current", name))
+		if err != nil || string(data) != expected {
+			t.Fatalf("empty policy %s: %q %v", name, data, err)
+		}
+	}
+	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := credentials.Publish(source, destination, trust, identity, clock, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock, account); err != nil {
+		t.Fatalf("offline policy gate: %v", err)
+	}
+	write(t, filepath.Join(destination, "current", "permissions.yaml"), []byte("permissions: {}\n"))
+	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
+		t.Fatal("damaged account policy passed the startup gate")
+	}
+	if err := os.Remove(filepath.Join(destination, "current", "identities.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
+		t.Fatal("missing identities passed the startup gate")
+	}
+}
+
+func TestGatewayAccountCommandRejectsInvalidPolicyBeforeDelivery(t *testing.T) {
+	for _, account := range []string{
+		`{"username":"not-a-spiffe-identity","permissions":["/example.v1.Service/Read"]}`,
+		`{"username":"` + identityURI + `","permissions":["*"]}`,
+		`{"username":"` + identityURI + `","permission":["/example.v1.Service/Read"]}`,
+		`{"username":"` + identityURI + `","permissions":[]} {}`,
+	} {
+		t.Run(account, func(t *testing.T) {
+			destination := filepath.Join(t.TempDir(), "uncreated")
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := credentials.Run(ctx, []string{"--uri=" + identityURI, "--usage=server", "--destination=" + destination, "--gateway-account=" + account})
+			if err == nil {
+				t.Fatal("invalid policy entered the delivery loop")
+			}
+			if _, err := os.Stat(destination); !os.IsNotExist(err) {
+				t.Fatalf("invalid policy touched persistent state: %v", err)
+			}
+		})
 	}
 }

@@ -209,6 +209,15 @@ spec:
                           items:
                             type: string
                           type: array
+                        gatewayPermissions:
+                          description: |-
+                            GatewayPermissions grants this client profile's UID-bound account explicit
+                            gRPC method patterns. Server profiles receive the effective client accounts
+                            in persistent current/{identities.yaml,permissions.yaml} files.
+                          items:
+                            type: string
+                          maxItems: 128
+                          type: array
                         mountPath:
                           description: MountPath contains current/{tls.crt,tls.key,ca.crt}
                             and immutable generations.

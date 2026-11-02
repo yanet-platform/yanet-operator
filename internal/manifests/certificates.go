@@ -3,11 +3,13 @@ package manifests
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/credentials"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +49,11 @@ func ConfigureCertificates(d *appsv1.Deployment, ctx BuildContext) error {
 			containerName = scopedOperatorName(p.Component, p.Container)
 		}
 		pod := &d.Spec.Template.Spec
+		for _, container := range pod.InitContainers {
+			if container.Name == "yanet-credential-"+p.Name+"-check" {
+				return fmt.Errorf("patch conflicts with certificate profile %q startup gate", p.Name)
+			}
+		}
 		var target *corev1.Container
 		for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
 			for i := range containers {
@@ -104,6 +111,18 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			selected[v.Name] = true
 		}
 	}
+	var accountArgs []string
+	for _, profile := range ctx.Certificates.Profiles {
+		if !selected[pemVolumePrefix+profile.Name] || len(profile.GatewayPermissions) == 0 {
+			continue
+		}
+		account := credentials.GatewayAccount{
+			Username:    api.CertificateURI(ctx.Certificates.TrustDomain, ctx.Namespace, string(ctx.OwnerRef.UID), ctx.NodeUID, profile.Name),
+			Permissions: profile.GatewayPermissions,
+		}
+		encoded, _ := json.Marshal(account) // Only strings and string slices; encoding cannot fail.
+		accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
+	}
 	pod := corev1.PodSpec{
 		AutomountServiceAccountToken: helpers.PtrFalse(),
 		NodeSelector:                 nodeSelector(ctx), Tolerations: runtimeTolerations(), ImagePullSecrets: ctx.PullSecrets,
@@ -122,6 +141,11 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			value = strings.NewReplacer("{node}", ctx.NodeName, "{namespace}", ctx.Namespace, "{boxType}", ctx.BoxType).Replace(value)
 			dns = append(dns, value)
 			args = append(args, "--dns="+value)
+		}
+		if p.Usage == "server" {
+			args = append(args, "--gateway-policy")
+			args = append(args, accountArgs...)
+			configureGatewayAccountGate(ctx, workloads, p, args)
 		}
 		group := ctx.Certificates.IssuerRef.Group
 		if group == "" {
@@ -165,10 +189,52 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 	component := &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "credential-delivery", Enabled: enabled}
 	d := buildSingle(ctx, component)
 	d.Spec.Template.Spec = pod
+	d.Spec.Strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 	// The writer is deliberately not a runtime recovery workload. It requires
 	// the API for renewal; consumers continue to use the durable last generation.
 	plan.Delivery = d
 	return plan
+}
+
+// A gateway reads identities once at startup. Gate each new Pod on the exact
+// delivered policy, so it cannot start with an older still-valid PEM generation
+// while the independent delivery Deployment is catching up.
+func configureGatewayAccountGate(ctx BuildContext, workloads []*appsv1.Deployment, profile api.CertificateProfile, args []string) {
+	volumeName := pemVolumePrefix + profile.Name
+	digest := sha256.Sum256([]byte(strings.Join(args, "\x00")))
+	for _, workload := range workloads {
+		for _, volume := range workload.Spec.Template.Spec.Volumes {
+			if volume.Name != volumeName {
+				continue
+			}
+			if workload.Spec.Template.Annotations == nil {
+				workload.Spec.Template.Annotations = map[string]string{}
+			}
+			workload.Spec.Template.Annotations["yanet.yanet-platform.io/accounts-"+profile.Name] = hex.EncodeToString(digest[:])
+			checkArgs := append([]string{}, args...)
+			checkArgs = append(checkArgs, "--destination=/persist", "--trust=/persist/current/ca.crt", "--check")
+			gate := corev1.Container{
+				Name: "yanet-credential-" + profile.Name + "-check", Image: ctx.Certificates.ExporterImage, ImagePullPolicy: ctx.PullPolicy,
+				Command: []string{"/manager"}, Args: checkArgs,
+				SecurityContext: &corev1.SecurityContext{RunAsUser: ptr[int64](0), RunAsGroup: ptr[int64](0), RunAsNonRoot: helpers.PtrFalse(), AllowPrivilegeEscalation: helpers.PtrFalse(), ReadOnlyRootFilesystem: helpers.PtrTrue(), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},
+				VolumeMounts:    []corev1.VolumeMount{{Name: volumeName, MountPath: "/persist", ReadOnly: true}},
+			}
+			containers := &workload.Spec.Template.Spec.InitContainers
+			index := -1
+			for i := range *containers {
+				if (*containers)[i].Name == gate.Name {
+					index = i
+					break
+				}
+			}
+			if index >= 0 {
+				(*containers)[index] = gate
+			} else {
+				*containers = append([]corev1.Container{gate}, (*containers)...)
+			}
+			break
+		}
+	}
 }
 
 func ptr[T any](value T) *T { return &value }

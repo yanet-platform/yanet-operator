@@ -77,7 +77,14 @@ func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time
 // separate path lookups across a switch can otherwise observe different pairs.
 // Paths are trusted administrative inputs from the node-bound delivery Pod;
 // certificate contents cannot select paths outside its configured mounts.
-func Publish(source, destination, trustFile string, identity Identity, now time.Time) (string, error) {
+func Publish(source, destination, trustFile string, identity Identity, now time.Time, accounts ...GatewayAccount) (string, error) {
+	files, err := accountFiles(accounts)
+	if err != nil {
+		return "", err
+	}
+	if files == nil {
+		files = make(map[string][]byte)
+	}
 	// Pin the kubelet generation before reading either file. Reading tls.crt and
 	// tls.key through separate projection symlinks races Secret renewal.
 	generation, err := filepath.EvalSymlinks(filepath.Join(source, "..data"))
@@ -99,8 +106,13 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 	if err := Validate(cert, key, trust, identity, now); err != nil {
 		return "", err
 	}
-	digest := sha256.Sum256(append(bytes.Clone(cert), trust...))
+	content := append(bytes.Clone(cert), trust...)
+	for _, filename := range []string{"identities.yaml", "permissions.yaml"} {
+		content = append(content, files[filename]...)
+	}
+	digest := sha256.Sum256(content)
 	name := hex.EncodeToString(digest[:])
+	files["tls.crt"], files["tls.key"], files["ca.crt"] = cert, key, trust
 	if err := os.MkdirAll(destination, 0o700); err != nil {
 		return "", err
 	}
@@ -115,7 +127,7 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 			return "", err
 		}
 		defer func() { _ = os.RemoveAll(temp) }()
-		for filename, data := range map[string][]byte{"tls.crt": cert, "tls.key": key, "ca.crt": trust} {
+		for filename, data := range files {
 			if err := writeSynced(filepath.Join(temp, filename), data); err != nil {
 				return "", err
 			}
@@ -129,7 +141,7 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 	} else if statErr != nil {
 		return "", statErr
 	} else {
-		for filename, expected := range map[string][]byte{"tls.crt": cert, "tls.key": key, "ca.crt": trust} {
+		for filename, expected := range files {
 			stored, err := os.ReadFile(filepath.Join(final, filename)) // #nosec G304 G703 -- SHA-256 hex directory and fixed PEM basenames under the trusted destination.
 			if err != nil {
 				return "", err
@@ -159,7 +171,11 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 
 // Check validates a single installed generation without the API or Secret cache.
 // As in Publish, destination and trustFile are trusted administrative paths.
-func Check(destination, trustFile string, identity Identity, now time.Time) error {
+func Check(destination, trustFile string, identity Identity, now time.Time, accounts ...GatewayAccount) error {
+	files, err := accountFiles(accounts)
+	if err != nil {
+		return err
+	}
 	generation, err := filepath.EvalSymlinks(filepath.Join(destination, "current"))
 	if err != nil {
 		return err
@@ -176,7 +192,19 @@ func Check(destination, trustFile string, identity Identity, now time.Time) erro
 	if err != nil {
 		return err
 	}
-	return Validate(cert, key, trust, identity, now)
+	if err := Validate(cert, key, trust, identity, now); err != nil {
+		return err
+	}
+	for filename, expected := range files {
+		stored, err := os.ReadFile(filepath.Join(generation, filename)) // #nosec G304 -- Fixed account basenames under the trusted, pinned generation.
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(stored, expected) {
+			return fmt.Errorf("installed gateway accounts do not match the requested policy: %s", filename)
+		}
+	}
+	return nil
 }
 
 func writeSynced(name string, data []byte) (err error) {

@@ -37,6 +37,9 @@ func TestCertificateConfigurationBoundaries(t *testing.T) {
 		{"client server SAN", func(c *CertificateManagementSpec) { c.Profiles[0].Usage = "client" }},
 		{"server without SAN", func(c *CertificateManagementSpec) { c.Profiles[0].DNSNames = nil }},
 		{"duplicate role", func(c *CertificateManagementSpec) { c.Profiles = append(c.Profiles, c.Profiles[0]) }},
+		{"server gateway grants", func(c *CertificateManagementSpec) {
+			c.Profiles[0].GatewayPermissions = []string{"/example.v1.Service/Read"}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			c := base.DeepCopy()
@@ -45,5 +48,21 @@ func TestCertificateConfigurationBoundaries(t *testing.T) {
 				t.Fatal("invalid certificate contract accepted")
 			}
 		})
+	}
+}
+
+func TestCertificateGatewayPermissionPatterns(t *testing.T) {
+	for _, pattern := range []string{"/example.v1.Service/Read", "/*/GetMetrics", "/example.*.ReadinessService/Ready", "/example.v1.Service/*"} {
+		if err := ValidateGatewayPermissions([]string{pattern}); err != nil {
+			t.Errorf("valid pattern %q: %v", pattern, err)
+		}
+	}
+	for _, pattern := range []string{"", "*", "/example.v1.Service", "/example.v1.Service/Read/Other", "/example.v1.Service/{Read,Write}", "/example.v1.Service/Read\n"} {
+		if err := ValidateGatewayPermissions([]string{pattern}); err == nil {
+			t.Errorf("invalid pattern %q accepted", pattern)
+		}
+	}
+	if err := ValidateGatewayPermissions(make([]string, 129)); err == nil {
+		t.Fatal("unbounded permission list accepted")
 	}
 }

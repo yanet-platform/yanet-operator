@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -58,6 +59,27 @@ type CertificateProfile struct {
 	// DNSNames supports {node}, {namespace}, {boxType} placeholders for server SANs.
 	// +optional
 	DNSNames []string `json:"dnsNames,omitempty"`
+	// GatewayPermissions grants this client profile's UID-bound account explicit
+	// gRPC method patterns. Server profiles receive the effective client accounts
+	// in persistent current/{identities.yaml,permissions.yaml} files.
+	// +optional
+	// +kubebuilder:validation:MaxItems=128
+	GatewayPermissions []string `json:"gatewayPermissions,omitempty"`
+}
+
+var gatewayMethodPattern = regexp.MustCompile(`^/[A-Za-z0-9_.*]+/[A-Za-z0-9_*]+$`)
+
+// ValidateGatewayPermissions accepts full gRPC paths with optional '*' globs.
+func ValidateGatewayPermissions(permissions []string) error {
+	if len(permissions) > 128 {
+		return fmt.Errorf("gatewayPermissions accepts at most 128 method patterns")
+	}
+	for _, permission := range permissions {
+		if len(permission) > 256 || !gatewayMethodPattern.MatchString(permission) {
+			return fmt.Errorf("invalid gateway permission %q: use /service/method with optional '*' globs", permission)
+		}
+	}
+	return nil
 }
 
 // ValidateCertificates is shared by admission and rendering of persisted objects.
@@ -117,6 +139,12 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 		}
 		if (p.Usage == "server") != (len(p.DNSNames) > 0) {
 			return fmt.Errorf("certificate profile %q requires DNSNames only for server usage", p.Name)
+		}
+		if p.Usage != "client" && len(p.GatewayPermissions) > 0 {
+			return fmt.Errorf("certificate profile %q grants gatewayPermissions only for client usage", p.Name)
+		}
+		if err := ValidateGatewayPermissions(p.GatewayPermissions); err != nil {
+			return fmt.Errorf("certificate profile %q: %w", p.Name, err)
 		}
 		for _, name := range p.DNSNames {
 			name = strings.NewReplacer("{node}", "node.example", "{namespace}", "default", "{boxType}", "edge").Replace(name)
