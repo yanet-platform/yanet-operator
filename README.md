@@ -129,6 +129,9 @@ environment after patches. Inline ConfigMap data stays opaque and receives no
 automatic environment. Optional `config.mountPath` selects the container directory
 (default `/etc/yanet2`); inline data is mounted as `<mountPath>/config`.
 Only `{numa}` in controlplane arguments is substituted; all other arguments are literal.
+Controlplane configs use the native `gateway.server.grpc` section. Configure their
+HTTP bind in the file on `[::]:8081`; the corresponding environment variable is
+ambiguous with the deprecated HTTP key and is not injected.
 
 Gateway endpoints use standard `xcfg.WithEnv()` variables
 `YANET_GATEWAYS_<index>_ENDPOINT`. Host configs already define the correct active

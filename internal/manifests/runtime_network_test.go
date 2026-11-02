@@ -243,7 +243,7 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 		listeners *[]api.OperatorListener
 		want      map[string]string
 	}{
-		{helpers.KindControlplane, "", nil, map[string]string{"YANET_GATEWAY_SERVER_ENDPOINT": "[::]:8080", "YANET_GATEWAY_SERVER_HTTP_ENDPOINT": "[::]:8081"}},
+		{helpers.KindControlplane, "", nil, map[string]string{"YANET_GATEWAY_SERVER_GRPC_ENDPOINT": "[::]:8080"}},
 		{helpers.KindBirdAdapter, "", nil, map[string]string{"YANET_LISTEN_ADDR": "[::]:8080", "YANET_ROUTE_OPERATOR_ENDPOINT": "yanet-firewall-route.yanet.svc.cluster.local:8080"}},
 		{helpers.KindOperator, "route", nil, map[string]string{"YANET_SERVER_ENDPOINT": "[::]:8080", "YANET_SERVER_ADVERTISE_ENDPOINT": "yanet-firewall-route.yanet.svc.cluster.local:8080"}},
 		{helpers.KindOperator, "http", &[]api.OperatorListener{"http"}, map[string]string{"YANET_SERVER_ENDPOINT": "[::]:8081"}},
@@ -287,6 +287,12 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 			}
 			if tc.role == helpers.KindControlplane && deployments[0].Labels[LabelNuma] != "1" {
 				t.Fatal("physical NUMA index was compacted")
+			}
+			if tc.role == helpers.KindControlplane && variables["YANET_GATEWAY_SERVER_ENDPOINT"] != "" {
+				t.Fatal("deprecated controlplane listener override is ignored by native gRPC configs")
+			}
+			if tc.role == helpers.KindControlplane && variables["YANET_GATEWAY_SERVER_HTTP_ENDPOINT"] != "" {
+				t.Fatal("HTTP endpoint env is ambiguous between native and deprecated configuration paths")
 			}
 			if variables["YANET_SERVER_HTTP_ENDPOINT"] != "" {
 				t.Fatal("injected an unsupported generic HTTP runtime key")

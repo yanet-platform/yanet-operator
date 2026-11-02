@@ -80,9 +80,11 @@ func configureRuntimeContainer(deployment *appsv1.Deployment, ctx BuildContext, 
 	var variables []corev1.EnvVar
 	switch component.Kind {
 	case helpers.KindControlplane:
+		// Native gRPC sections ignore the deprecated server.endpoint key.
+		// HTTP binding stays in the file: its native and deprecated endpoint
+		// paths fold onto the same xcfg environment variable and are rejected.
 		variables = []corev1.EnvVar{
-			{Name: "YANET_GATEWAY_SERVER_ENDPOINT", Value: bind(grpcPort)},
-			{Name: "YANET_GATEWAY_SERVER_HTTP_ENDPOINT", Value: bind(httpPort)},
+			{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: bind(grpcPort)},
 		}
 	case helpers.KindBirdAdapter:
 		variables = []corev1.EnvVar{
