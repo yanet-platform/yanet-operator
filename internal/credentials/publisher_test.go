@@ -214,9 +214,9 @@ func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {
 	})
 	project(t, source, "first", cert, key)
 	account := credentials.GatewayAccount{Username: identityURI, Permissions: []string{"/example.v1.Service/Read"}}
-	first, err := credentials.Publish(source, destination, trust, identity, clock, account)
-	if err != nil {
-		t.Fatal(err)
+	first, publishErr := credentials.Publish(source, destination, trust, identity, clock, account)
+	if publishErr != nil {
+		t.Fatal(publishErr)
 	}
 	for _, name := range []string{"identities.yaml", "permissions.yaml"} {
 		data, err := os.ReadFile(filepath.Join(destination, "current", name))
@@ -244,17 +244,17 @@ func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {
 	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
 		t.Fatal("new gateway accepted the old account policy")
 	}
-	second, err := credentials.Publish(source, destination, trust, identity, clock, account)
-	if err != nil || second == first {
-		t.Fatalf("policy-only update reused its generation: %s %v", second, err)
+	second, publishErr := credentials.Publish(source, destination, trust, identity, clock, account)
+	if publishErr != nil || second == first {
+		t.Fatalf("policy-only update reused its generation: %s %v", second, publishErr)
 	}
 	emptyPolicy := make([]credentials.GatewayAccount, 0)
 	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy...); err == nil {
 		t.Fatal("revoking the last account accepted the old nonempty policy")
 	}
-	third, err := credentials.Publish(source, destination, trust, identity, clock, emptyPolicy...)
-	if err != nil || third == second {
-		t.Fatalf("last account revocation reused its generation: %s %v", third, err)
+	third, publishErr := credentials.Publish(source, destination, trust, identity, clock, emptyPolicy...)
+	if publishErr != nil || third == second {
+		t.Fatalf("last account revocation reused its generation: %s %v", third, publishErr)
 	}
 	for name, expected := range map[string]string{"identities.yaml": "identities: []\n", "permissions.yaml": "permissions:\n    users: []\n"} {
 		data, err := os.ReadFile(filepath.Join(destination, "current", name))

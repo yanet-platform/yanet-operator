@@ -120,7 +120,7 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			Username:    api.CertificateURI(ctx.Certificates.TrustDomain, ctx.Namespace, string(ctx.OwnerRef.UID), ctx.NodeUID, profile.Name),
 			Permissions: profile.GatewayPermissions,
 		}
-		encoded, _ := json.Marshal(account) // Only strings and string slices; encoding cannot fail.
+		encoded, _ := json.Marshal(account) //nolint:errcheck // Strings and string slices cannot fail JSON encoding.
 		accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
 	}
 	pod := corev1.PodSpec{

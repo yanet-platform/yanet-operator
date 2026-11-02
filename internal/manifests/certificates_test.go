@@ -153,8 +153,8 @@ func TestCertificateGatewayAccountsFollowEffectiveNodeRoles(t *testing.T) {
 	for _, arg := range plan.Delivery.Spec.Template.Spec.Containers[0].Args {
 		if value, ok := strings.CutPrefix(arg, "--gateway-account="); ok {
 			var account map[string]any
-			if err := json.Unmarshal([]byte(value), &account); err != nil {
-				t.Fatal(err)
+			if decodeErr := json.Unmarshal([]byte(value), &account); decodeErr != nil {
+				t.Fatal(decodeErr)
 			}
 			accounts = append(accounts, account)
 		}
