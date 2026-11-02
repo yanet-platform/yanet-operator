@@ -301,6 +301,24 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 	}
 }
 
+func TestRuntimeNetwork_ManagedBirdImportUsesFirstActiveGateway(t *testing.T) {
+	build := certificateBuildContext()
+	build.GatewayEndpoints = []string{"yanet-firewall-controlplane-numa1.default.svc.cluster.local:8080"}
+	build.Certificates.Profiles = append(build.Certificates.Profiles, api.CertificateProfile{Name: "bird", Component: "birdAdapter", Container: api.BirdAdapterContainerName, MountPath: "/etc/yanet2/pki/bird", Usage: "client"})
+	component := &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}}
+	deployments, err := RenderDeployments(build, component, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variables := envValues(deployments[0].Spec.Template.Spec.Containers[0].Env)
+	if variables["YANET_ROUTE_OPERATOR_ENDPOINT"] != "yanet-firewall-controlplane-numa1.default.svc.cluster.local:8080" {
+		t.Fatalf("authenticated import bypasses the active gateway: %v", variables)
+	}
+	if !RequiresCertificateDelivery(deployments[0]) {
+		t.Fatal("import lost its managed client credentials")
+	}
+}
+
 func TestRuntimeNetwork_ManagedGatewayUsesTLSOnReservedPort(t *testing.T) {
 	build := certificateBuildContext()
 	component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}}

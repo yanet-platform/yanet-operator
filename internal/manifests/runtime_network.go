@@ -98,9 +98,20 @@ func configureRuntimeContainer(deployment *appsv1.Deployment, ctx BuildContext, 
 			}
 		}
 	case helpers.KindBirdAdapter:
+		routeEndpoint := serviceEndpoint(ctx, SharedServiceName(ctx.BoxType, "route", nil), ServiceGRPCPort)
+		if ctx.Certificates != nil && len(ctx.GatewayEndpoints) > 0 {
+			for _, profile := range ctx.Certificates.Profiles {
+				if profile.Component == "birdAdapter" && profile.Usage == "client" {
+					// Authenticated imports go through the node-local gateway;
+					// the callback service itself has no TLS listener.
+					routeEndpoint = ctx.GatewayEndpoints[0]
+					break
+				}
+			}
+		}
 		variables = []corev1.EnvVar{
 			{Name: "YANET_LISTEN_ADDR", Value: bind(grpcPort)},
-			{Name: "YANET_ROUTE_OPERATOR_ENDPOINT", Value: serviceEndpoint(ctx, SharedServiceName(ctx.BoxType, "route", nil), ServiceGRPCPort)},
+			{Name: "YANET_ROUTE_OPERATOR_ENDPOINT", Value: routeEndpoint},
 		}
 	default:
 		endpoint := grpcPort

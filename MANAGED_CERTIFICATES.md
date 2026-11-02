@@ -157,6 +157,9 @@ The host file must configure native TLS key pairs, authentication and the HTTP
 listener. Clients must explicitly configure their supported `gateway_tls` or
 `gateways[].tls` fields and bounded reconnect behavior. Callback listeners need
 their own transport/access boundary; mounting certificates does not secure them.
+With a managed BIRD adapter client profile, its route-import endpoint targets
+the first active node-local controlplane gateway rather than the plaintext route
+callback Service. Configure `route_operator_tls` in its host file accordingly.
 
 Do not add anonymous registration to bypass missing credentials. Verify transport
 boundaries, reload/reconnect, issuer failure and API-unavailable cold start on
