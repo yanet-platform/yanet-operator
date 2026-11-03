@@ -3,6 +3,11 @@
 This opt-in integration requires cert-manager's `cert-manager.io/v1` CRDs.
 Signing, approval and renewal remain cert-manager responsibilities. The YANET
 manager creates `Certificate` resources, never signs CSR or reads TLS Secrets.
+The Helm chart can install a pinned cert-manager dependency with
+`cert-manager.enabled=true`; it is disabled by default to preserve existing
+cluster-wide ownership. On a fresh cluster bootstrap that dependency first with
+`manageCertificates=false` and `webhook.enabled=false`, then enable consumers
+after its CRDs/controllers are ready. See the chart installation guide.
 Enable the Helm value `manageCertificates: true` (manager flag
 `--manage-certificates`) only after installing the CRDs. Existing installations
 without `spec.certificates` retain their rendering and lifecycle.

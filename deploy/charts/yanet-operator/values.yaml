@@ -1,8 +1,17 @@
 replicaCount: 2
 
-# Opt-in: cert-manager CRDs/issuer and a policy-constrained approver must exist.
+# Enable after cert-manager CRDs are installed, using the optional dependency or
+# an existing installation. The issuer and constrained approver remain external.
 # This grants Certificate permissions only; the manager never reads TLS Secrets.
 manageCertificates: false
+
+# Cluster-wide dependency: enable only when this release owns cert-manager.
+# Leave disabled when cert-manager is already managed by another release.
+cert-manager:
+  enabled: false
+  crds:
+    enabled: true
+    keep: true
 
 image:
   repository: ghcr-io.mirror.yandex.net/yanet-platform/yanet-operator

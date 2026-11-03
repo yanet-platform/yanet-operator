@@ -112,7 +112,7 @@ jobs:
 
       - name: Update Helm dependencies
         run: |
-          helm dependency update deploy/charts/yanet-operator
+          helm dependency build deploy/charts/yanet-operator
 
       - name: Package Helm chart
         run: |

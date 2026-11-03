@@ -80,13 +80,17 @@ helm-crds: manifests kustomize ## Build CRDs for Helm chart.
 	$(KUSTOMIZE) build config/crd > deploy/charts/yanet-operator/crds/yanet.yaml
 
 .PHONY: helm-lint
-helm-lint: ## Lint and template Helm chart.
+helm-lint: helm-dependencies ## Lint and template Helm chart.
 	helm lint deploy/charts/yanet-operator
 	helm template test deploy/charts/yanet-operator --debug >/dev/null
 
 .PHONY: test-packaging
-test-packaging: kustomize ## Test rendered Helm/Kustomize wiring (Python 3 + PyYAML required).
+test-packaging: helm-dependencies kustomize ## Test rendered Helm/Kustomize wiring (Python 3 + PyYAML required).
 	KUSTOMIZE=$(KUSTOMIZE) python3 deploy/tests/test_packaging.py -v $(PACKAGING_TEST_ARGS)
+
+.PHONY: helm-dependencies
+helm-dependencies: ## Download chart dependencies pinned by Chart.lock.
+	helm dependency build deploy/charts/yanet-operator
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.

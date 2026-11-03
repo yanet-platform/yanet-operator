@@ -40,6 +40,24 @@ def pod(docs):
 
 
 class PackagingTest(unittest.TestCase):
+    def test_bundled_cert_manager(self):
+        docs = chart("cert-manager.enabled=true", "webhook.enabled=false")
+        deployments = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"}
+        self.assertTrue({
+            "test-cert-manager", "test-cert-manager-cainjector", "test-cert-manager-webhook",
+        } <= deployments, deployments)
+        crds = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "CustomResourceDefinition"}
+        self.assertTrue({
+            "certificates.cert-manager.io", "certificaterequests.cert-manager.io",
+            "issuers.cert-manager.io", "clusterissuers.cert-manager.io",
+        } <= crds, crds)
+
+    def test_external_cert_manager(self):
+        docs = chart("cert-manager.enabled=false", "manageCertificates=true")
+        self.assertIn("--manage-certificates", pod(docs)["containers"][0]["args"])
+        self.assertFalse(any(doc["kind"] == "CustomResourceDefinition" for doc in docs))
+        self.assertFalse(any("cert-manager" in doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"))
+
     def test_workload_certificate_opt_in(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):

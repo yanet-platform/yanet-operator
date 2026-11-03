@@ -27,6 +27,7 @@ jobs:
     
     - name: Lint Helm chart
       run: |
+        helm dependency build deploy/charts/yanet-operator
         helm lint deploy/charts/yanet-operator
 
     - name: Template Helm chart
@@ -62,6 +63,7 @@ jobs:
     
     - name: Package Helm chart
       run: |
+        helm dependency build deploy/charts/yanet-operator
         helm package deploy/charts/yanet-operator
     
     - name: Upload chart artifact
@@ -104,7 +106,7 @@ jobs:
 
     - name: Update Helm dependencies
       run: |
-        helm dependency update deploy/charts/yanet-operator
+        helm dependency build deploy/charts/yanet-operator
 
     - name: Install chart (with webhook enabled)
       run: |
