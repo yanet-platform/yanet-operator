@@ -280,7 +280,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		pullPolicy = corev1.PullIfNotPresent
 	}
 
-	servicePlans, certificatePlans, preflightErr := r.preflightResources(
+	servicePlans, certificatePlans, workloadsByNode, preflightErr := r.preflightResources(
 		ctx, &cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
 	)
 	if preflightErr != nil {
@@ -392,11 +392,13 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 				desired.ConfigMaps[n] = struct{}{}
 			}
 
-			deployments, berr := manifests.RenderDeployments(buildCtx, rc, registry)
-			if berr != nil {
-				logger.Error(berr, "build failed", "component", rc.Name)
-				reconcileErrs = append(reconcileErrs, berr)
-				continue
+			// Apply the preflighted objects: certificate planning adds startup
+			// gates and account-policy rollout annotations to these deployments.
+			var deployments []*appsv1.Deployment
+			for _, workload := range workloadsByNode[node.Name] {
+				if workload.component.Kind == rc.Kind && workload.component.Name == rc.Name {
+					deployments = append(deployments, workload.deployment)
+				}
 			}
 			for _, d := range deployments {
 				if ref.Kind == helpers.KindControlplane {
@@ -557,17 +559,18 @@ func (r *YanetReconciler) preflightResources(
 ) (
 	plans map[string]manifests.ServicePlan,
 	certificatePlans map[string]manifests.CertificatePlan,
+	workloadsByNode map[string][]renderedWorkload,
 	preflightErr error,
 ) {
 	plans = make(map[string]manifests.ServicePlan)
 	certificatePlans = make(map[string]manifests.CertificatePlan)
 	if err := yanetv1alpha1.ValidateCertificates(cfg.Certificates, &cfg.Components); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if cfg.Certificates != nil && !r.ManageCertificates {
-		return nil, nil, fmt.Errorf("certificates require --manage-certificates")
+		return nil, nil, nil, fmt.Errorf("certificates require --manage-certificates")
 	}
-	workloadsByNode := make(map[string][]renderedWorkload, len(nodes))
+	workloadsByNode = make(map[string][]renderedWorkload, len(nodes))
 	collided := make(map[string]struct{})
 	var preflightErrs []error
 	addServicePlans := func(buildCtx manifests.BuildContext, component *helpers.ResolvedComponent, location string) {
@@ -614,7 +617,7 @@ func (r *YanetReconciler) preflightResources(
 		var err error
 		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, cfg, &yanet.Spec)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, ref := range enabled {
 			rc, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
@@ -669,12 +672,12 @@ func (r *YanetReconciler) preflightResources(
 		}
 	}
 	if len(preflightErrs) > 0 {
-		return nil, nil, errors.Join(preflightErrs...)
+		return nil, nil, nil, errors.Join(preflightErrs...)
 	}
 	if err := r.validateOperatorPlacementTransition(ctx, yanet, nodes, workloadsByNode); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return plans, certificatePlans, nil
+	return plans, certificatePlans, workloadsByNode, nil
 }
 
 //+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch

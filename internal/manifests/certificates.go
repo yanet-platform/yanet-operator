@@ -107,6 +107,12 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 	}
 	selected := map[string]bool{}
 	for _, d := range workloads {
+		// Disabled roles must not block active consumers on unnecessary issuance
+		// or retain gateway grants. A whole-installation drain still inventories
+		// its credentials for ownership checks and scales delivery to zero.
+		if enabled && d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
+			continue
+		}
 		for _, v := range d.Spec.Template.Spec.Volumes {
 			selected[v.Name] = true
 		}

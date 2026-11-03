@@ -131,6 +131,31 @@ func TestCertificateRoleIsolation(t *testing.T) {
 	}
 }
 
+func TestCertificatePlanExcludesDisabledRole(t *testing.T) {
+	build := certificateBuildContext()
+	build.Certificates.Profiles = append(build.Certificates.Profiles, api.CertificateProfile{
+		Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/yanet2/pki/acl", Usage: "client",
+		GatewayPermissions: []string{"/example.v1.Service/Update"},
+	})
+	cp, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "acl", Enabled: false, Containers: []helpers.ResolvedContainer{{Name: "acl"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := BuildCertificatePlan(build, append(cp, acl...), true)
+	if len(plan.Certificates) != 1 || plan.Delivery == nil || len(plan.Delivery.Spec.Template.Spec.Containers) != 1 {
+		t.Fatal("a disabled role must not require issuance or delivery")
+	}
+	for _, arg := range plan.Delivery.Spec.Template.Spec.Containers[0].Args {
+		if strings.HasPrefix(arg, "--gateway-account=") {
+			t.Fatalf("disabled role retained gateway access: %s", arg)
+		}
+	}
+}
+
 func TestCertificateGatewayAccountsFollowEffectiveNodeRoles(t *testing.T) {
 	build := certificateBuildContext()
 	build.Certificates.Profiles = append(build.Certificates.Profiles,

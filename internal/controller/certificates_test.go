@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,6 +117,28 @@ func TestManagedCertificatesWaitForIssuanceAndDelivery(t *testing.T) {
 	}
 	if !manifests.RequiresCertificateDelivery(&deployments.Items[0]) {
 		t.Fatal("consumer has no persistent credential mount")
+	}
+	consumer := &deployments.Items[0]
+	var gate *corev1.Container
+	for i := range consumer.Spec.Template.Spec.InitContainers {
+		if consumer.Spec.Template.Spec.InitContainers[i].Name == "yanet-credential-gateway-check" {
+			gate = &consumer.Spec.Template.Spec.InitContainers[i]
+		}
+	}
+	if gate == nil {
+		t.Fatal("applied gateway lost the offline credential/account startup gate")
+	}
+	for _, arg := range []string{"--gateway-policy", "--check", "--destination=/persist", "--trust=/persist/current/ca.crt"} {
+		if !slices.Contains(gate.Args, arg) {
+			t.Fatalf("applied gateway gate is missing %q: %v", arg, gate.Args)
+		}
+	}
+	if len(gate.VolumeMounts) != 1 || !gate.VolumeMounts[0].ReadOnly ||
+		gate.VolumeMounts[0].Name != "yanet-credential-gateway" || gate.VolumeMounts[0].MountPath != "/persist" {
+		t.Fatalf("gateway startup gate must use only its read-only durable credentials: %+v", gate.VolumeMounts)
+	}
+	if consumer.Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"] == "" {
+		t.Fatal("applied gateway has no desired-account rollout annotation")
 	}
 	consumerVersion := deployments.Items[0].ResourceVersion
 	// A pending renewal keeps the existing working consumer, including its version.
