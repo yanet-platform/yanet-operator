@@ -71,6 +71,39 @@ DNS SANs (clients have none), role-specific EKU, ECDSA P-256 keys,
 Verify issuer and all clients support these settings before enabling them.
 This is a URI naming contract, not SPIRE/node attestation.
 
+## Native application configuration
+
+The host configuration generator owns the application's native TLS and
+authentication fields. The certificate profiles own issuance, role-specific
+mounts, durable PEM delivery and startup gates. The two sides agree on stable
+`<mountPath>/current` paths; generated configuration contains paths, not private
+key contents.
+
+For example, a route client's native TLS value is:
+
+```yaml
+ca_file: /etc/yanet2/pki/route/current/ca.crt
+key_pairs:
+  - type: file
+    config:
+      cert_file: /etc/yanet2/pki/route/current/tls.crt
+      key_file: /etc/yanet2/pki/route/current/tls.key
+```
+
+Place that value under the component's supported `gateways[].tls`,
+`instances[].gateway_tls` or `route_operator_tls` field, as appropriate. Metrics
+and readiness clients also need their own role-specific native TLS values. A
+gateway server needs native TLS listener and authentication settings, including
+the generated identity and permission files described below.
+
+Endpoint environment overrides are separate from these TLS values. In runtime
+versions where `xcfg` treats provider configuration as an opaque `yaml.Node`,
+variables targeting `key_pairs[].config.cert_file` or `key_file` do not configure
+that payload. Render the complete native TLS configuration in the input file;
+certificate mounting alone does not enable mutual TLS. This workflow requires
+neither an application-configuration renderer in the manager nor a Pod patch to
+rewrite configuration files at startup.
+
 ## Issuance, delivery and loading
 
 For every selected node a separate, node-pinned `credential-delivery` Deployment

@@ -139,6 +139,10 @@ gateways in ascending physical NUMA order; indices are list positions, not NUMA 
 Names, TLS and list membership stay in the config. No runtime-specific gateway
 selection parser is required. See the [environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
 
+For managed certificates, render native TLS/authentication fields in the host
+configuration generator and align their paths with the role mounts. See the
+[native application configuration contract](MANAGED_CERTIFICATES.md#native-application-configuration).
+
 Typed `components.dataplane.networks` couples existing NADs to device resources.
 An installation list replaces the palette, `[]` clears it, and omission/null
 inherits. The operator does not provision NICs or NADs. See the
