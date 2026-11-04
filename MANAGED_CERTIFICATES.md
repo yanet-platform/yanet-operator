@@ -24,8 +24,8 @@ certificates:
   trustBundle: {name: yanet-workload-trust, key: ca.crt}
   hostPath: /var/lib/yanet/credentials
   exporterImage: example.test/yanet-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  duration: 87600h
-  renewBefore: 480h
+  duration: 72h
+  renewBefore: 48h
   profiles:
     - name: gateway
       component: controlplane
@@ -46,9 +46,11 @@ certificates:
         - /controlplane.ynpb.v1.Gateway/Register
 ```
 
-The initial profile requests `87600h` (3650 days, ten 365-day years), with renewal
-starting `480h` (20 days) before expiry. Confirm the issuer policy permits that
-lifetime and the issuing CA chain remains valid for the intended period.
+This example requests a three-day leaf (`72h`) and renewal with two days
+remaining (`48h`), giving approximately daily renewal when the issuer honors the
+requested lifetime. Confirm the actual Certificate status `notBefore`, `notAfter`
+and `renewalTime`; this is not an exact wall-clock schedule. The issuing CA chain
+must remain valid throughout the leaf lifetime.
 
 Each referenced logical component/container must be declared in the palette.
 Profiles are rendered only for selected effective workloads, including enabled
@@ -161,6 +163,11 @@ load/connection fingerprints and remaining expiry require runtime monitoring.
 - A key-pair reload only affects a new TLS handshake. Arrange and verify controlled
   reconnect before expiry for established gRPC connections/streams. Independently
   loaded `ca_file` trust may require rebuilding credentials or restarting clients.
+  For the example above, a native gateway `server.grpc.tls.max_connection_age`
+  of `12h` leaves room for file refresh and reconnect before expiry. gRPC applies
+  age jitter and allows in-flight RPCs to drain; it is not a process restart timer.
+  Verify consumer recovery under load: planned transport rotation must not be
+  mistaken for lost dataplane state or require manual stream recovery.
 - Deliver old+new public trust before switching issuers, then retire old trust
   after every consumer has migrated. Do not derive trust solely from the leaf
   Secret's `ca.crt`. An outage budget is limited by leaf/chain/trust validity;
