@@ -40,6 +40,39 @@ def pod(docs):
 
 
 class PackagingTest(unittest.TestCase):
+    def test_gateway_ssh_trust_and_human_accounts(self):
+        values = {
+            "manageCertificates": True,
+            "yanetconfig": {"spec": {"certificates": {
+                "sshTrustBundle": {"name": "gateway-ssh-trust", "key": "ssh-ca.pub"},
+                "additionalGatewayAccounts": [
+                    {"username": "root", "permissions": ["/*/*"]},
+                    {"username": "alice", "permissions": ["/example.v1.Service/Read"]},
+                ],
+            }}},
+            "extraManifests": {"sshTrust": {
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": "gateway-ssh-trust", "namespace": "custom-system"},
+                "data": {"ssh-ca.pub": "public-ssh-ca-fixture\n"},
+            }},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "values.yaml"
+            source.write_text(yaml.safe_dump(values))
+            docs = render(shlex.split(os.environ.get("HELM", "helm")) + [
+                "template", "test", "deploy/charts/yanet-operator", "--namespace", "custom-system", "-f", str(source),
+            ])
+        certificates = one(docs, "YanetConfig")["spec"]["certificates"]
+        self.assertEqual(certificates["additionalGatewayAccounts"], [
+            {"username": "root", "permissions": ["/*/*"]},
+            {"username": "alice", "permissions": ["/example.v1.Service/Read"]},
+        ])
+        reference = certificates["sshTrustBundle"]
+        trust = next(doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == reference["name"])
+        self.assertEqual(trust["metadata"]["namespace"], "custom-system")
+        self.assertEqual(trust["data"][reference["key"]], "public-ssh-ca-fixture\n")
+        self.assertIn("--manage-certificates", pod(docs)["containers"][0]["args"])
+
     def test_bundled_cert_manager(self):
         docs = chart("cert-manager.enabled=true", "webhook.enabled=false")
         deployments = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"}

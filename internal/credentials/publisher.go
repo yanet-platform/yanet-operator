@@ -77,8 +77,11 @@ func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time
 // separate path lookups across a switch can otherwise observe different pairs.
 // Paths are trusted administrative inputs from the node-bound delivery Pod;
 // certificate contents cannot select paths outside its configured mounts.
-func Publish(source, destination, trustFile string, identity Identity, now time.Time, accounts ...GatewayAccount) (string, error) {
-	files, err := accountFiles(accounts)
+func Publish(source, destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy) (string, error) {
+	if policy != nil && identity.Usage != "server" {
+		return "", fmt.Errorf("gateway policy can only accompany server credentials")
+	}
+	files, err := gatewayFiles(policy)
 	if err != nil {
 		return "", err
 	}
@@ -107,7 +110,7 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 		return "", err
 	}
 	content := append(bytes.Clone(cert), trust...)
-	for _, filename := range []string{"identities.yaml", "permissions.yaml"} {
+	for _, filename := range []string{"identities.yaml", "permissions.yaml", "ssh-ca.pub"} {
 		content = append(content, files[filename]...)
 	}
 	digest := sha256.Sum256(content)
@@ -171,14 +174,26 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 
 // Check validates a single installed generation without the API or Secret cache.
 // As in Publish, destination and trustFile are trusted administrative paths.
-func Check(destination, trustFile string, identity Identity, now time.Time, accounts ...GatewayAccount) error {
-	files, err := accountFiles(accounts)
+func Check(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy) error {
+	if policy != nil && identity.Usage != "server" {
+		return fmt.Errorf("gateway policy can only accompany server credentials")
+	}
+	files, err := gatewayFiles(policy)
 	if err != nil {
 		return err
 	}
 	generation, err := filepath.EvalSymlinks(filepath.Join(destination, "current"))
 	if err != nil {
 		return err
+	}
+	if policy != nil && policy.SSHTrustFile == "" {
+		_, err = os.Stat(filepath.Join(generation, "ssh-ca.pub"))
+		if err == nil {
+			return fmt.Errorf("installed gateway still contains removed SSH CA trust")
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
 	}
 	cert, err := os.ReadFile(filepath.Join(generation, "tls.crt"))
 	if err != nil {

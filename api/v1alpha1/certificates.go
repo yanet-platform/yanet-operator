@@ -21,6 +21,16 @@ type CertificateManagementSpec struct {
 	// TrustBundle is an independently managed public CA bundle in each installation
 	// namespace. The leaf Secret's ca.crt is deliberately not a trust source.
 	TrustBundle corev1.ConfigMapKeySelector `json:"trustBundle"`
+	// SSHTrustBundle supplies OpenSSH CA public keys for gateway SSH certificate
+	// authentication. It is independent of X.509 trust and is persisted only in
+	// server-role current/ssh-ca.pub generations.
+	// +optional
+	SSHTrustBundle *corev1.ConfigMapKeySelector `json:"sshTrustBundle,omitempty"`
+	// AdditionalGatewayAccounts adds explicitly authorized local logins alongside
+	// effective UID-bound workload accounts. No account is implied by CA trust.
+	// +optional
+	// +kubebuilder:validation:MaxItems=32
+	AdditionalGatewayAccounts []GatewayAccount `json:"additionalGatewayAccounts,omitempty"`
 	// HostPath must be a persistent directory, not /run, /tmp or kubelet cache.
 	HostPath string `json:"hostPath"`
 	// ExporterImage is an exact operator image containing /manager credential-sync.
@@ -41,6 +51,14 @@ type CertificateIssuerRef struct {
 	// Group defaults to cert-manager.io.
 	// +optional
 	Group string `json:"group,omitempty"`
+}
+
+// GatewayAccount grants explicit RPC methods to a local authenticated login.
+// SPIFFE workload usernames are reserved for the selected certificate profiles.
+type GatewayAccount struct {
+	Username string `json:"username"`
+	// +kubebuilder:validation:MaxItems=128
+	Permissions []string `json:"permissions"`
 }
 
 // CertificateProfile is one node-bound role, shared by its NUMA instances.
@@ -68,6 +86,12 @@ type CertificateProfile struct {
 }
 
 var gatewayMethodPattern = regexp.MustCompile(`^/[A-Za-z0-9_.*]+/[A-Za-z0-9_*]+$`)
+var gatewayUsernamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.@-]{0,127}$`)
+
+// ValidGatewayUsername identifies a local login, never a workload URI.
+func ValidGatewayUsername(username string) bool {
+	return gatewayUsernamePattern.MatchString(username)
+}
 
 // ValidateGatewayPermissions accepts full gRPC paths with optional '*' globs.
 func ValidateGatewayPermissions(permissions []string) error {
@@ -102,6 +126,24 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 	if len(validation.IsDNS1123Subdomain(c.TrustBundle.Name)) != 0 || c.TrustBundle.Key == "" || len(validation.IsConfigMapKey(c.TrustBundle.Key)) != 0 || (c.TrustBundle.Optional != nil && *c.TrustBundle.Optional) {
 		return fmt.Errorf("certificates.trustBundle requires a valid non-optional ConfigMap name/key")
 	}
+	if trust := c.SSHTrustBundle; trust != nil {
+		if len(validation.IsDNS1123Subdomain(trust.Name)) != 0 || trust.Key == "" || len(validation.IsConfigMapKey(trust.Key)) != 0 || (trust.Optional != nil && *trust.Optional) {
+			return fmt.Errorf("certificates.sshTrustBundle requires a valid non-optional ConfigMap name/key")
+		}
+	}
+	if len(c.AdditionalGatewayAccounts) > 32 {
+		return fmt.Errorf("certificates.additionalGatewayAccounts accepts at most 32 accounts")
+	}
+	accounts := map[string]bool{}
+	for _, account := range c.AdditionalGatewayAccounts {
+		if !ValidGatewayUsername(account.Username) || accounts[account.Username] {
+			return fmt.Errorf("certificates.additionalGatewayAccounts requires unique local usernames")
+		}
+		if err := ValidateGatewayPermissions(account.Permissions); err != nil {
+			return fmt.Errorf("gateway account %q: %w", account.Username, err)
+		}
+		accounts[account.Username] = true
+	}
 	if !persistentPath(c.HostPath) || c.HostPath == "/" {
 		return fmt.Errorf("certificates.hostPath must be a clean persistent absolute directory")
 	}
@@ -126,7 +168,9 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 			return fmt.Errorf("credential-delivery is reserved when certificates are enabled")
 		}
 	}
+	hasServer := false
 	for _, p := range c.Profiles {
+		hasServer = hasServer || p.Usage == "server"
 		if len(p.Name) > 40 || len(validation.IsDNS1123Label(p.Name)) != 0 || names[p.Name] {
 			return fmt.Errorf("certificate profile names must be unique DNS labels up to 40 characters")
 		}
@@ -175,6 +219,9 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 		if !valid {
 			return fmt.Errorf("certificate profile %q references an undeclared component/container", p.Name)
 		}
+	}
+	if !hasServer && (c.SSHTrustBundle != nil || len(c.AdditionalGatewayAccounts) > 0) {
+		return fmt.Errorf("gateway SSH trust and additional accounts require a server certificate profile")
 	}
 	return nil
 }

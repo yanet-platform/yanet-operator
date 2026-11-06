@@ -234,3 +234,81 @@ func TestCertificateGatewayAccountsFollowEffectiveNodeRoles(t *testing.T) {
 		t.Fatal("last account revocation must deliver an explicit empty policy")
 	}
 }
+
+func TestCertificateGatewaySSHTrustAndHumanPolicy(t *testing.T) {
+	build := certificateBuildContext()
+	build.Certificates.SSHTrustBundle = &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-authorities"}, Key: "secure.pub"}
+	build.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{
+		{Username: "root", Permissions: []string{"/*/*"}},
+		{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}},
+	}
+	build.Certificates.Profiles = append(build.Certificates.Profiles, api.CertificateProfile{
+		Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/yanet2/pki/acl", Usage: "client", GatewayPermissions: []string{"/example.v1.Service/Update"},
+	})
+	cp, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Numa: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: "acl", Enabled: true, Containers: []helpers.ResolvedContainer{{Name: "acl"}}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := BuildCertificatePlan(build, append(cp, acl...), true)
+	found := false
+	for _, volume := range plan.Delivery.Spec.Template.Spec.Volumes {
+		if volume.Name == "ssh-trust" {
+			found = volume.ConfigMap != nil && volume.ConfigMap.Name == "ssh-authorities" && len(volume.ConfigMap.Items) == 1 && volume.ConfigMap.Items[0].Key == "secure.pub" && volume.ConfigMap.Items[0].Path == "ssh-ca.pub"
+		}
+	}
+	if !found {
+		t.Fatal("the delivery Pod did not project the configured public SSH CA bundle")
+	}
+	for _, exporter := range plan.Delivery.Spec.Template.Spec.Containers {
+		var names []string
+		hasSSHTrust := false
+		for _, arg := range exporter.Args {
+			if value, ok := strings.CutPrefix(arg, "--gateway-account="); ok {
+				var account api.GatewayAccount
+				if decodeErr := json.Unmarshal([]byte(value), &account); decodeErr != nil {
+					t.Fatal(decodeErr)
+				}
+				names = append(names, account.Username)
+			}
+			hasSSHTrust = hasSSHTrust || arg == "--ssh-trust=/ssh-trust/ssh-ca.pub"
+		}
+		if exporter.Name == "gateway" {
+			if len(names) != 3 || !strings.HasSuffix(names[0], "/role/acl") || names[1] != "root" || names[2] != "alice" || !hasSSHTrust {
+				t.Fatalf("gateway delivery lost workload/human authentication: %+v", exporter.Args)
+			}
+		} else if len(names) != 0 || hasSSHTrust {
+			t.Fatalf("client acquired gateway policy/trust: %+v", exporter)
+		}
+	}
+	for _, workload := range cp {
+		for _, volume := range workload.Spec.Template.Spec.Volumes {
+			if volume.ConfigMap != nil || volume.Secret != nil {
+				t.Fatal("gateway recovery acquired an API-dependent projection")
+			}
+		}
+		gate := workload.Spec.Template.Spec.InitContainers[0]
+		var sshTrust string
+		for _, arg := range gate.Args {
+			if value, ok := strings.CutPrefix(arg, "--ssh-trust="); ok {
+				sshTrust = value
+			}
+		}
+		if sshTrust != "/persist/current/ssh-ca.pub" || len(gate.VolumeMounts) != 1 || !gate.VolumeMounts[0].ReadOnly {
+			t.Fatalf("gateway startup requires the ConfigMap projection: %+v", gate)
+		}
+	}
+	firstHash := cp[0].Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"]
+	build.Certificates.AdditionalGatewayAccounts = build.Certificates.AdditionalGatewayAccounts[:1]
+	updated, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	BuildCertificatePlan(build, append(updated, acl...), true)
+	if updated[0].Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"] == firstHash {
+		t.Fatal("removing a human account did not update the gateway startup policy")
+	}
+}

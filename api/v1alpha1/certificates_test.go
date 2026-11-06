@@ -66,3 +66,42 @@ func TestCertificateGatewayPermissionPatterns(t *testing.T) {
 		t.Fatal("unbounded permission list accepted")
 	}
 }
+
+func TestAdditionalGatewayAuthenticationConfiguration(t *testing.T) {
+	base := CertificateManagementSpec{
+		IssuerRef: CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test",
+		TrustBundle:               corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"},
+		SSHTrustBundle:            &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-trust"}, Key: "authorities.pub"},
+		AdditionalGatewayAccounts: []GatewayAccount{{Username: "root", Permissions: []string{"/*/*"}}, {Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}},
+		HostPath:                  "/var/lib/yanet/pki", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "72h", RenewBefore: "48h",
+		Profiles: []CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}"}}},
+	}
+	components := ComponentsSpec{}
+	if err := ValidateCertificates(&base, &components); err != nil {
+		t.Fatalf("explicit SSH trust and human accounts: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CertificateManagementSpec)
+	}{
+		{"missing SSH trust name", func(c *CertificateManagementSpec) { c.SSHTrustBundle.Name = "" }},
+		{"missing SSH trust key", func(c *CertificateManagementSpec) { c.SSHTrustBundle.Key = "" }},
+		{"optional SSH trust", func(c *CertificateManagementSpec) { optional := true; c.SSHTrustBundle.Optional = &optional }},
+		{"URI in local accounts", func(c *CertificateManagementSpec) {
+			c.AdditionalGatewayAccounts[0].Username = "spiffe://example.test/role/gateway"
+		}},
+		{"duplicate local account", func(c *CertificateManagementSpec) { c.AdditionalGatewayAccounts[1].Username = "root" }},
+		{"invalid local account", func(c *CertificateManagementSpec) { c.AdditionalGatewayAccounts[0].Username = "bad/name" }},
+		{"invalid permission", func(c *CertificateManagementSpec) { c.AdditionalGatewayAccounts[0].Permissions = []string{"*"} }},
+		{"no server profile", func(c *CertificateManagementSpec) { c.Profiles[0].Usage = "client"; c.Profiles[0].DNSNames = nil }},
+		{"too many accounts", func(c *CertificateManagementSpec) { c.AdditionalGatewayAccounts = make([]GatewayAccount, 33) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := base.DeepCopy()
+			test.mutate(config)
+			if err := ValidateCertificates(config, &components); err == nil {
+				t.Fatal("invalid gateway authentication configuration was accepted")
+			}
+		})
+	}
+}

@@ -129,11 +129,20 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 		encoded, _ := json.Marshal(account) //nolint:errcheck // Strings and string slices cannot fail JSON encoding.
 		accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
 	}
+	for _, account := range ctx.Certificates.AdditionalGatewayAccounts {
+		encoded, _ := json.Marshal(account) //nolint:errcheck // Strings and string slices cannot fail JSON encoding.
+		accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
+	}
 	pod := corev1.PodSpec{
 		AutomountServiceAccountToken: helpers.PtrFalse(),
 		NodeSelector:                 nodeSelector(ctx), Tolerations: runtimeTolerations(), ImagePullSecrets: ctx.PullSecrets,
 		SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr[int64](0), RunAsGroup: ptr[int64](0), RunAsNonRoot: helpers.PtrFalse(), SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 		Volumes:         []corev1.Volume{{Name: "trust", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: ctx.Certificates.TrustBundle.LocalObjectReference, Items: []corev1.KeyToPath{{Key: ctx.Certificates.TrustBundle.Key, Path: "ca.crt"}}}}}},
+	}
+	if trust := ctx.Certificates.SSHTrustBundle; trust != nil {
+		pod.Volumes = append(pod.Volumes, corev1.Volume{Name: "ssh-trust", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: trust.LocalObjectReference, Items: []corev1.KeyToPath{{Key: trust.Key, Path: "ssh-ca.pub"}},
+		}}})
 	}
 	for _, p := range ctx.Certificates.Profiles {
 		if !selected[pemVolumePrefix+p.Name] {
@@ -151,6 +160,9 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 		if p.Usage == "server" {
 			args = append(args, "--gateway-policy")
 			args = append(args, accountArgs...)
+			if ctx.Certificates.SSHTrustBundle != nil {
+				args = append(args, "--ssh-trust=/ssh-trust/ssh-ca.pub")
+			}
 			configureGatewayAccountGate(ctx, workloads, p, args)
 		}
 		group := ctx.Certificates.IssuerRef.Group
@@ -188,6 +200,10 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			VolumeMounts:    []corev1.VolumeMount{{Name: secretVolume, MountPath: "/source", ReadOnly: true}, {Name: "trust", MountPath: "/trust", ReadOnly: true}, {Name: outputVolume, MountPath: "/persist"}},
 			ReadinessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: append(append([]string{"/manager"}, args...), "--check")}}, PeriodSeconds: 10, TimeoutSeconds: 5},
 		})
+		if p.Usage == "server" && ctx.Certificates.SSHTrustBundle != nil {
+			exporter := &pod.Containers[len(pod.Containers)-1]
+			exporter.VolumeMounts = append(exporter.VolumeMounts, corev1.VolumeMount{Name: "ssh-trust", MountPath: "/ssh-trust", ReadOnly: true})
+		}
 	}
 	if len(plan.Certificates) == 0 {
 		return plan
@@ -219,6 +235,9 @@ func configureGatewayAccountGate(ctx BuildContext, workloads []*appsv1.Deploymen
 			workload.Spec.Template.Annotations["yanet.yanet-platform.io/accounts-"+profile.Name] = hex.EncodeToString(digest[:])
 			checkArgs := append([]string{}, args...)
 			checkArgs = append(checkArgs, "--destination=/persist", "--trust=/persist/current/ca.crt", "--check")
+			if ctx.Certificates.SSHTrustBundle != nil {
+				checkArgs = append(checkArgs, "--ssh-trust=/persist/current/ssh-ca.pub")
+			}
 			gate := corev1.Container{
 				Name: "yanet-credential-" + profile.Name + "-check", Image: ctx.Certificates.ExporterImage, ImagePullPolicy: ctx.PullPolicy,
 				Command: []string{"/manager"}, Args: checkArgs,

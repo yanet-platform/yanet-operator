@@ -1,8 +1,10 @@
 package credentials_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
+	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
 
@@ -100,11 +103,11 @@ func TestPublishRenewalAndOfflineValidation(t *testing.T) {
 	identity := credentials.Identity{URI: identityURI, Usage: "client"}
 	cert, key := a.leaf(t, 2, nil)
 	project(t, source, "first", cert, key)
-	first, err := credentials.Publish(source, destination, trust, identity, clock)
+	first, err := credentials.Publish(source, destination, trust, identity, clock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	repeated, err := credentials.Publish(source, destination, trust, identity, clock)
+	repeated, err := credentials.Publish(source, destination, trust, identity, clock, nil)
 	if err != nil || first != repeated {
 		t.Fatalf("unchanged material must be idempotent: %q %q %v", first, repeated, err)
 	}
@@ -116,7 +119,7 @@ func TestPublishRenewalAndOfflineValidation(t *testing.T) {
 	}
 	cert2, key2 := a.leaf(t, 3, nil)
 	project(t, source, "second", cert2, key2)
-	second, err := credentials.Publish(source, destination, trust, identity, clock)
+	second, err := credentials.Publish(source, destination, trust, identity, clock, nil)
 	if err != nil || second == first {
 		t.Fatalf("renewal did not switch generation: %q %v", second, err)
 	}
@@ -124,10 +127,10 @@ func TestPublishRenewalAndOfflineValidation(t *testing.T) {
 	if err := os.RemoveAll(source); err != nil {
 		t.Fatal(err)
 	}
-	if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock); err != nil {
+	if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock, nil); err != nil {
 		t.Fatalf("offline validation: %v", err)
 	}
-	if err := credentials.Check(destination, trust, identity, clock.Add(25*time.Hour)); err == nil {
+	if err := credentials.Check(destination, trust, identity, clock.Add(25*time.Hour), nil); err == nil {
 		t.Fatal("expired offline credentials were accepted")
 	}
 }
@@ -155,7 +158,7 @@ func TestFailedDeliveryPreservesLastGoodGeneration(t *testing.T) {
 			identity := credentials.Identity{URI: identityURI, Usage: "client"}
 			cert, key := a.leaf(t, 10, nil)
 			project(t, source, "good", cert, key)
-			good, err := credentials.Publish(source, destination, trust, identity, clock)
+			good, err := credentials.Publish(source, destination, trust, identity, clock, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,14 +170,14 @@ func TestFailedDeliveryPreservesLastGoodGeneration(t *testing.T) {
 				write(t, trust, unrelated.pem)
 			}
 			project(t, source, "bad", cert, key)
-			if _, publishErr := credentials.Publish(source, destination, trust, identity, clock); publishErr == nil {
+			if _, publishErr := credentials.Publish(source, destination, trust, identity, clock, nil); publishErr == nil {
 				t.Fatal("invalid replacement accepted")
 			}
 			current, err := os.Readlink(filepath.Join(destination, "current"))
 			if err != nil || current != good {
 				t.Fatalf("last good generation changed: %s %v", current, err)
 			}
-			if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock); err != nil {
+			if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock, nil); err != nil {
 				t.Fatalf("last good generation damaged: %v", err)
 			}
 		})
@@ -214,7 +217,8 @@ func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {
 	})
 	project(t, source, "first", cert, key)
 	account := credentials.GatewayAccount{Username: identityURI, Permissions: []string{"/example.v1.Service/Read"}}
-	first, publishErr := credentials.Publish(source, destination, trust, identity, clock, account)
+	policy := &credentials.GatewayPolicy{Accounts: []credentials.GatewayAccount{account}}
+	first, publishErr := credentials.Publish(source, destination, trust, identity, clock, policy)
 	if publishErr != nil {
 		t.Fatal(publishErr)
 	}
@@ -241,18 +245,19 @@ func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {
 		}
 	}
 	account.Permissions = []string{"/example.v1.Service/Watch"}
-	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
+	policy.Accounts[0] = account
+	if err := credentials.Check(destination, trust, identity, clock, policy); err == nil {
 		t.Fatal("new gateway accepted the old account policy")
 	}
-	second, publishErr := credentials.Publish(source, destination, trust, identity, clock, account)
+	second, publishErr := credentials.Publish(source, destination, trust, identity, clock, policy)
 	if publishErr != nil || second == first {
 		t.Fatalf("policy-only update reused its generation: %s %v", second, publishErr)
 	}
-	emptyPolicy := make([]credentials.GatewayAccount, 0)
-	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy...); err == nil {
+	emptyPolicy := &credentials.GatewayPolicy{}
+	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy); err == nil {
 		t.Fatal("revoking the last account accepted the old nonempty policy")
 	}
-	third, publishErr := credentials.Publish(source, destination, trust, identity, clock, emptyPolicy...)
+	third, publishErr := credentials.Publish(source, destination, trust, identity, clock, emptyPolicy)
 	if publishErr != nil || third == second {
 		t.Fatalf("last account revocation reused its generation: %s %v", third, publishErr)
 	}
@@ -262,33 +267,34 @@ func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {
 			t.Fatalf("empty policy %s: %q %v", name, data, err)
 		}
 	}
-	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy...); err != nil {
+	if err := credentials.Check(destination, trust, identity, clock, emptyPolicy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := credentials.Publish(source, destination, trust, identity, clock, account); err != nil {
+	if _, err := credentials.Publish(source, destination, trust, identity, clock, policy); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(source); err != nil {
 		t.Fatal(err)
 	}
-	if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock, account); err != nil {
+	if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock, policy); err != nil {
 		t.Fatalf("offline policy gate: %v", err)
 	}
 	write(t, filepath.Join(destination, "current", "permissions.yaml"), []byte("permissions: {}\n"))
-	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
+	if err := credentials.Check(destination, trust, identity, clock, policy); err == nil {
 		t.Fatal("damaged account policy passed the startup gate")
 	}
 	if err := os.Remove(filepath.Join(destination, "current", "identities.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if err := credentials.Check(destination, trust, identity, clock, account); err == nil {
+	if err := credentials.Check(destination, trust, identity, clock, policy); err == nil {
 		t.Fatal("missing identities passed the startup gate")
 	}
 }
 
 func TestGatewayAccountCommandRejectsInvalidPolicyBeforeDelivery(t *testing.T) {
 	for _, account := range []string{
-		`{"username":"not-a-spiffe-identity","permissions":["/example.v1.Service/Read"]}`,
+		`{"username":"not/a/local/identity","permissions":["/example.v1.Service/Read"]}`,
+		`{"username":"","permissions":["/example.v1.Service/Read"]}`,
 		`{"username":"` + identityURI + `","permissions":["*"]}`,
 		`{"username":"` + identityURI + `","permission":["/example.v1.Service/Read"]}`,
 		`{"username":"` + identityURI + `","permissions":[]} {}`,
@@ -305,5 +311,155 @@ func TestGatewayAccountCommandRejectsInvalidPolicyBeforeDelivery(t *testing.T) {
 				t.Fatalf("invalid policy touched persistent state: %v", err)
 			}
 		})
+	}
+}
+
+func TestPublishHumanGatewayAccountsAndRevocation(t *testing.T) {
+	a := newAuthority(t)
+	source, destination := t.TempDir(), t.TempDir()
+	trust := filepath.Join(t.TempDir(), "ca.crt")
+	write(t, trust, a.pem)
+	identity := credentials.Identity{URI: identityURI, Usage: "server", DNSNames: []string{"gateway.example.test"}}
+	cert, key := a.leaf(t, 40, func(c *x509.Certificate) {
+		c.DNSNames = identity.DNSNames
+		c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	})
+	project(t, source, "first", cert, key)
+	accounts := []credentials.GatewayAccount{
+		{Username: identityURI, Permissions: []string{"/example.v1.Service/Update"}},
+		{Username: "root", Permissions: []string{"/*/*"}},
+		{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}},
+	}
+	gatewayPolicy := &credentials.GatewayPolicy{Accounts: accounts}
+	first, err := credentials.Publish(source, destination, trust, identity, clock, gatewayPolicy)
+	if err != nil {
+		t.Fatalf("deliver human accounts alongside the workload account: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(destination, "current", "permissions.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		Permissions struct {
+			Users []credentials.GatewayAccount `yaml:"users"`
+		} `yaml:"permissions"`
+	}
+	if err = yaml.Unmarshal(data, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if len(policy.Permissions.Users) != 3 || policy.Permissions.Users[0].Username != identityURI ||
+		policy.Permissions.Users[1].Username != "root" || policy.Permissions.Users[1].Permissions[0] != "/*/*" ||
+		policy.Permissions.Users[2].Username != "alice" || policy.Permissions.Users[2].Permissions[0] != "/example.v1.Service/Read" {
+		t.Fatalf("human and workload grants were not preserved: %s", data)
+	}
+	gatewayPolicy.Accounts = accounts[:2]
+	if err = credentials.Check(destination, trust, identity, clock, gatewayPolicy); err == nil {
+		t.Fatal("the startup gate accepted a policy that still authorizes the removed human")
+	}
+	second, err := credentials.Publish(source, destination, trust, identity, clock, gatewayPolicy)
+	if err != nil || second == first {
+		t.Fatalf("human revocation did not replace the generation: %s %v", second, err)
+	}
+	if err := credentials.Check(destination, trust, identity, clock, gatewayPolicy); err != nil {
+		t.Fatalf("the updated human policy did not pass the startup gate: %v", err)
+	}
+}
+
+func sshAuthority(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := ssh.NewPublicKey(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ssh.MarshalAuthorizedKey(public)
+}
+
+func TestPublishSSHTrustRotationAndOfflineRecovery(t *testing.T) {
+	a := newAuthority(t)
+	source, destination := t.TempDir(), t.TempDir()
+	trust, sshTrust := filepath.Join(t.TempDir(), "ca.crt"), filepath.Join(t.TempDir(), "ssh-ca.pub")
+	write(t, trust, a.pem)
+	firstCA, nextCA := sshAuthority(t), sshAuthority(t)
+	write(t, sshTrust, firstCA)
+	identity := credentials.Identity{URI: identityURI, Usage: "server", DNSNames: []string{"gateway.example.test"}}
+	cert, key := a.leaf(t, 50, func(c *x509.Certificate) {
+		c.DNSNames = identity.DNSNames
+		c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	})
+	project(t, source, "first", cert, key)
+	policy := &credentials.GatewayPolicy{Accounts: []credentials.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}}, SSHTrustFile: sshTrust}
+	first, err := credentials.Publish(source, destination, trust, identity, clock, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := os.ReadFile(filepath.Join(destination, "current", "ssh-ca.pub"))
+	if err != nil || !bytes.Equal(stored, firstCA) {
+		t.Fatalf("SSH trust was not delivered exactly: %q %v", stored, err)
+	}
+	unsupported, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsupportedKey, err := ssh.NewPublicKey(unsupported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range [][]byte{nil, a.pem, []byte("invalid-key\n"), ssh.MarshalAuthorizedKey(unsupportedKey), append([]byte("cert-authority "), firstCA...), append(append([]byte{}, nextCA...), []byte("invalid-key\n")...)} {
+		write(t, sshTrust, invalid)
+		if _, publishErr := credentials.Publish(source, destination, trust, identity, clock, policy); publishErr == nil {
+			t.Fatalf("invalid SSH trust replaced the persisted generation: %q", invalid)
+		}
+		current, readErr := os.Readlink(filepath.Join(destination, "current"))
+		if readErr != nil || current != first {
+			t.Fatalf("invalid SSH trust damaged last-good credentials: %s %v", current, readErr)
+		}
+	}
+	overlap := append(append([]byte{}, firstCA...), nextCA...)
+	write(t, sshTrust, overlap)
+	if err = credentials.Check(destination, trust, identity, clock, policy); err == nil {
+		t.Fatal("readiness accepted SSH trust that was not yet delivered")
+	}
+	second, err := credentials.Publish(source, destination, trust, identity, clock, policy)
+	if err != nil || second == first {
+		t.Fatalf("SSH CA-only rotation reused its generation: %s %v", second, err)
+	}
+	stored, err = os.ReadFile(filepath.Join(destination, "current", "ssh-ca.pub"))
+	if err != nil || !bytes.Equal(stored, overlap) {
+		t.Fatalf("SSH CA overlap was not retained: %q %v", stored, err)
+	}
+	withoutSSH := &credentials.GatewayPolicy{Accounts: policy.Accounts}
+	if err = credentials.Check(destination, trust, identity, clock, withoutSSH); err == nil {
+		t.Fatal("the startup gate accepted removed SSH trust from an older generation")
+	}
+	third, err := credentials.Publish(source, destination, trust, identity, clock, withoutSSH)
+	if err != nil || third == second {
+		t.Fatalf("SSH trust removal reused its generation: %s %v", third, err)
+	}
+	if _, err := os.Stat(filepath.Join(destination, "current", "ssh-ca.pub")); !os.IsNotExist(err) {
+		t.Fatalf("removed SSH trust remains in the current generation: %v", err)
+	}
+	if err := credentials.Check(destination, trust, identity, clock, withoutSSH); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := credentials.Publish(source, destination, trust, identity, clock, policy); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(sshTrust); err != nil {
+		t.Fatal(err)
+	}
+	policy.SSHTrustFile = filepath.Join(destination, "current", "ssh-ca.pub")
+	if err := credentials.Check(destination, filepath.Join(destination, "current", "ca.crt"), identity, clock, policy); err != nil {
+		t.Fatalf("offline SSH trust and account validation: %v", err)
+	}
+	write(t, policy.SSHTrustFile, []byte("invalid-key\n"))
+	if err := credentials.Check(destination, trust, identity, clock, policy); err == nil {
+		t.Fatal("offline startup accepted damaged SSH trust")
 	}
 }

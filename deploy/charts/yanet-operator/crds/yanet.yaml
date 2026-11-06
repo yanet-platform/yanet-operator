@@ -160,6 +160,28 @@ spec:
                   Requires the manager's --manage-certificates flag and cert-manager CRDs.
                   Omitted leaves existing workloads and installations unchanged.
                 properties:
+                  additionalGatewayAccounts:
+                    description: |-
+                      AdditionalGatewayAccounts adds explicitly authorized local logins alongside
+                      effective UID-bound workload accounts. No account is implied by CA trust.
+                    items:
+                      description: |-
+                        GatewayAccount grants explicit RPC methods to a local authenticated login.
+                        SPIFFE workload usernames are reserved for the selected certificate profiles.
+                      properties:
+                        permissions:
+                          items:
+                            type: string
+                          maxItems: 128
+                          type: array
+                        username:
+                          type: string
+                      required:
+                      - permissions
+                      - username
+                      type: object
+                    maxItems: 32
+                    type: array
                   duration:
                     description: Duration and RenewBefore are explicit Go durations
                       accepted by cert-manager.
@@ -242,6 +264,32 @@ spec:
                     type: array
                   renewBefore:
                     type: string
+                  sshTrustBundle:
+                    description: |-
+                      SSHTrustBundle supplies OpenSSH CA public keys for gateway SSH certificate
+                      authentication. It is independent of X.509 trust and is persisted only in
+                      server-role current/ssh-ca.pub generations.
+                    properties:
+                      key:
+                        description: The key to select.
+                        type: string
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                      optional:
+                        description: Specify whether the ConfigMap or its key must
+                          be defined
+                        type: boolean
+                    required:
+                    - key
+                    type: object
+                    x-kubernetes-map-type: atomic
                   trustBundle:
                     description: |-
                       TrustBundle is an independently managed public CA bundle in each installation

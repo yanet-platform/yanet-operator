@@ -22,6 +22,13 @@ certificates:
   issuerRef: {name: yanet-workloads, kind: Issuer}
   trustDomain: yanet.example.test
   trustBundle: {name: yanet-workload-trust, key: ca.crt}
+  # Optional, independent OpenSSH CA public keys; never X.509 PEM or private keys.
+  sshTrustBundle: {name: yanet-gateway-ssh-trust, key: ssh-ca.pub}
+  additionalGatewayAccounts:
+    - username: root
+      permissions: ['/*/*']
+    - username: alice
+      permissions: ['/controlplane.ynpb.v1.AuthService/IntrospectToken']
   hostPath: /var/lib/yanet/credentials
   exporterImage: example.test/yanet-operator@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   duration: 72h
@@ -195,6 +202,47 @@ a new durable generation and change the gateway Pod template; a read-only
 `credential-sync --check` init container rejects stale policy before startup.
 It uses only cached public trust and the role directory, so the gate also works
 without the API. Normal leaf rotation does not change the Pod template.
+
+### Human SSH certificate authentication
+
+`certificates.sshTrustBundle` optionally references a non-optional ConfigMap key
+in each installation namespace. It contains bare OpenSSH ECDSA P-256 CA public
+keys, one per line; blank lines and comments are allowed. Use the chart's
+`extraManifests` to supply this ConfigMap, or manage it independently. It is
+separate from the X.509 `trustBundle` and must not be added to `ca.crt`.
+
+Only server-role exporters receive this projection. They validate the complete
+bundle and persist `current/ssh-ca.pub` atomically with the server credentials
+and policy. Invalid or unavailable replacement trust preserves the previous
+generation. CA-only changes create a new generation without rotating the leaf.
+Gateway startup checks use the persisted file, so API-unavailable recovery does
+not need a ConfigMap projection. Configure the native gateway alongside x509:
+
+```yaml
+authenticators:
+  - type: sshcert
+    config:
+      ca_sources: [/etc/yanet2/pki/gateway/current/ssh-ca.pub]
+      refresh_interval: 5m
+```
+
+`certificates.additionalGatewayAccounts` is an optional list of at most 32
+explicit local accounts, default empty. Each record has `username` and
+`permissions`; usernames are unique, at most 128 characters and match
+`[A-Za-z_][A-Za-z0-9_.@-]*`. Workload SPIFFE usernames are reserved for the
+effective certificate profiles. Local accounts are merged with those workload
+accounts rather than replacing them. The example grants root all RPCs and alice
+only introspection; supply a reviewed explicit read-only RPC allowlist for an
+operational reader. Issuance or trusted CA membership alone grants no access.
+
+The native SSH authenticator derives the login from the certificate's first
+principal. These are gateway accounts, not operating-system or Kubernetes roles.
+They also apply to another enabled authenticator that resolves the same login.
+Removing or changing a human account changes the durable policy and gateway Pod
+template. Existing file identity/permission providers load at startup; refreshing
+CA trust does not reload account permissions. Disabling SSH authentication must
+also remove its native authenticator configuration. Revocation/KRL distribution
+is a separate native-authenticator policy, not implied by CA delivery.
 
 For a managed controlplane server profile the reserved gRPC port is assigned to
 `gateway.server.grpc.tls.endpoint` and the plaintext gRPC listener is disabled.

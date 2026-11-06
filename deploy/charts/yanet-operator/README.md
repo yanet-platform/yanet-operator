@@ -26,6 +26,15 @@ the default is `false` for clusters with an existing installation. Its CRDs are
 enabled and retained on uninstall. The dependency does not create a workload
 issuer, CA private key, public trust bundle or approval policy.
 
+For gateway SSH certificate authentication, supply an OpenSSH public CA ConfigMap
+through `extraManifests` and reference it with
+`yanetconfig.spec.certificates.sshTrustBundle: {name: gateway-ssh-trust, key: ssh-ca.pub}`.
+Declare local users and explicit RPC grants in
+`yanetconfig.spec.certificates.additionalGatewayAccounts`. These are merged with
+UID-bound workload accounts and delivered persistently, including the SSH trust,
+without adding ConfigMap dependencies to runtime recovery Pods. See the managed
+certificate guide for the schema, native authenticator and restart contract.
+
 On a fresh cluster, bootstrap the dependency before enabling its consumers:
 
 ```bash

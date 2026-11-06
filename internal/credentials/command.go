@@ -47,6 +47,7 @@ func Run(ctx context.Context, args []string) error {
 	flags.Var(&names, "dns", "Exact expected DNS SAN, repeatable")
 	var accounts gatewayAccounts
 	gatewayPolicy := flags.Bool("gateway-policy", false, "Deliver gateway identity and permission files, including an empty policy")
+	sshTrust := flags.String("ssh-trust", "", "OpenSSH CA public key bundle for gateway authentication")
 	flags.Var(&accounts, "gateway-account", "Public gateway account JSON with username and permissions, repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -55,7 +56,7 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("an expected URI and no positional arguments are required")
 	}
 	identity := Identity{URI: *uri, Usage: *usage, DNSNames: names}
-	if (*gatewayPolicy || len(accounts) > 0) && *usage != "server" {
+	if (*gatewayPolicy || len(accounts) > 0 || *sshTrust != "") && *usage != "server" {
 		return fmt.Errorf("gateway accounts can only accompany server credentials")
 	}
 	if *gatewayPolicy && accounts == nil {
@@ -64,14 +65,18 @@ func Run(ctx context.Context, args []string) error {
 	if _, err := accountFiles(accounts); err != nil {
 		return err
 	}
+	var policy *GatewayPolicy
+	if *gatewayPolicy || accounts != nil || *sshTrust != "" {
+		policy = &GatewayPolicy{Accounts: accounts, SSHTrustFile: *sshTrust}
+	}
 	if *check {
-		return Check(*destination, *trust, identity, time.Now(), accounts...)
+		return Check(*destination, *trust, identity, time.Now(), policy)
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	lastGeneration := ""
 	for {
-		generation, err := Publish(*source, *destination, *trust, identity, time.Now(), accounts...)
+		generation, err := Publish(*source, *destination, *trust, identity, time.Now(), policy)
 		if err != nil {
 			slog.Error("credential delivery failed; keeping the previous generation", "error", err)
 		} else if generation != lastGeneration {
