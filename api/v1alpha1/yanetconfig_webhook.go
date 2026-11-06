@@ -92,6 +92,9 @@ func validateYanetConfigIdentity(cfg *YanetConfig) error {
 // On the first error the function bails out — the caller (admission)
 // rejects the request with a single message.
 func validateYanetConfig(spec *YanetConfigSpec) error {
+	if err := ValidateCertificates(spec.Certificates, &spec.Components); err != nil {
+		return err
+	}
 	if spec.UpdateWindow < 0 {
 		return fmt.Errorf("spec.updateWindow must be >= 0, got %d", spec.UpdateWindow)
 	}

@@ -80,13 +80,17 @@ helm-crds: manifests kustomize ## Build CRDs for Helm chart.
 	$(KUSTOMIZE) build config/crd > deploy/charts/yanet-operator/crds/yanet.yaml
 
 .PHONY: helm-lint
-helm-lint: ## Lint and template Helm chart.
+helm-lint: helm-dependencies ## Lint and template Helm chart.
 	helm lint deploy/charts/yanet-operator
 	helm template test deploy/charts/yanet-operator --debug >/dev/null
 
 .PHONY: test-packaging
-test-packaging: kustomize ## Test rendered Helm/Kustomize wiring (Python 3 + PyYAML required).
+test-packaging: helm-dependencies kustomize ## Test rendered Helm/Kustomize wiring (Python 3 + PyYAML required).
 	KUSTOMIZE=$(KUSTOMIZE) python3 deploy/tests/test_packaging.py -v $(PACKAGING_TEST_ARGS)
+
+.PHONY: helm-dependencies
+helm-dependencies: ## Download chart dependencies pinned by Chart.lock.
+	helm dependency build deploy/charts/yanet-operator
 
 .PHONY: fmt
 fmt: ## Run go fmt against code.
@@ -123,7 +127,7 @@ test-docker-race: ## Run tests with race detector in Docker container.
 .PHONY: test-docker-unit
 test-docker-unit: ## Run unit tests in Docker container.
 	$(call docker-go,go mod download && \
-		go test -v ./api/... ./internal/helpers/... ./internal/manifests/... -coverprofile cover-unit.out)
+		go test -v ./api/... ./internal/helpers/... ./internal/manifests/... ./internal/credentials/... -coverprofile cover-unit.out)
 
 .PHONY: test-docker-integration
 test-docker-integration: ## Run integration tests in Docker container.

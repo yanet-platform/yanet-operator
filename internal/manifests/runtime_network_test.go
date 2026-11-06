@@ -243,7 +243,7 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 		listeners *[]api.OperatorListener
 		want      map[string]string
 	}{
-		{helpers.KindControlplane, "", nil, map[string]string{"YANET_GATEWAY_SERVER_ENDPOINT": "[::]:8080", "YANET_GATEWAY_SERVER_HTTP_ENDPOINT": "[::]:8081"}},
+		{helpers.KindControlplane, "", nil, map[string]string{"YANET_GATEWAY_SERVER_GRPC_ENDPOINT": "[::]:8080"}},
 		{helpers.KindBirdAdapter, "", nil, map[string]string{"YANET_LISTEN_ADDR": "[::]:8080", "YANET_ROUTE_OPERATOR_ENDPOINT": "yanet-firewall-route.yanet.svc.cluster.local:8080"}},
 		{helpers.KindOperator, "route", nil, map[string]string{"YANET_SERVER_ENDPOINT": "[::]:8080", "YANET_SERVER_ADVERTISE_ENDPOINT": "yanet-firewall-route.yanet.svc.cluster.local:8080"}},
 		{helpers.KindOperator, "http", &[]api.OperatorListener{"http"}, map[string]string{"YANET_SERVER_ENDPOINT": "[::]:8081"}},
@@ -288,10 +288,51 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 			if tc.role == helpers.KindControlplane && deployments[0].Labels[LabelNuma] != "1" {
 				t.Fatal("physical NUMA index was compacted")
 			}
+			if tc.role == helpers.KindControlplane && variables["YANET_GATEWAY_SERVER_ENDPOINT"] != "" {
+				t.Fatal("deprecated controlplane listener override is ignored by native gRPC configs")
+			}
+			if tc.role == helpers.KindControlplane && variables["YANET_GATEWAY_SERVER_HTTP_ENDPOINT"] != "" {
+				t.Fatal("HTTP endpoint env is ambiguous between native and deprecated configuration paths")
+			}
 			if variables["YANET_SERVER_HTTP_ENDPOINT"] != "" {
 				t.Fatal("injected an unsupported generic HTTP runtime key")
 			}
 		})
+	}
+}
+
+func TestRuntimeNetwork_ManagedBirdImportUsesFirstActiveGateway(t *testing.T) {
+	build := certificateBuildContext()
+	build.GatewayEndpoints = []string{"yanet-firewall-controlplane-numa1.default.svc.cluster.local:8080"}
+	build.Certificates.Profiles = append(build.Certificates.Profiles, api.CertificateProfile{Name: "bird", Component: "birdAdapter", Container: api.BirdAdapterContainerName, MountPath: "/etc/yanet2/pki/bird", Usage: "client"})
+	component := &helpers.ResolvedComponent{Kind: helpers.KindBirdAdapter, Name: "birdAdapter", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}}
+	deployments, err := RenderDeployments(build, component, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variables := envValues(deployments[0].Spec.Template.Spec.Containers[0].Env)
+	if variables["YANET_ROUTE_OPERATOR_ENDPOINT"] != "yanet-firewall-controlplane-numa1.default.svc.cluster.local:8080" {
+		t.Fatalf("authenticated import bypasses the active gateway: %v", variables)
+	}
+	if !RequiresCertificateDelivery(deployments[0]) {
+		t.Fatal("import lost its managed client credentials")
+	}
+}
+
+func TestRuntimeNetwork_ManagedGatewayUsesTLSOnReservedPort(t *testing.T) {
+	build := certificateBuildContext()
+	component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}}
+	deployments, err := RenderDeployments(build, component, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variables := envValues(deployments[0].Spec.Template.Spec.Containers[0].Env)
+	plaintext, present := variables["YANET_GATEWAY_SERVER_GRPC_ENDPOINT"]
+	if !present || plaintext != "" || variables["YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT"] != "[::]:8080" {
+		t.Fatalf("TLS and plaintext listener binds conflict: %v", variables)
+	}
+	if _, present := variables["YANET_GATEWAY_SERVER_HTTP_ENDPOINT"]; present {
+		t.Fatal("ambiguous HTTP environment override returned")
 	}
 }
 

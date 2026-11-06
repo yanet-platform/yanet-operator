@@ -33,6 +33,9 @@ spec:
         - name: {{ .Chart.Name }}
           args:
           - --leader-elect
+          {{- if .Values.manageCertificates }}
+          - --manage-certificates
+          {{- end }}
           - --webhook-enabled={{ .Values.webhook.enabled }}
           - --webhook-port={{ .Values.webhook.port }}
           command:

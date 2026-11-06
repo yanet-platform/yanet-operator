@@ -45,6 +45,8 @@ type YanetReconciler struct {
 	// GlobalConfig is the in-memory v1alpha1 YanetConfig snapshot
 	// maintained by YanetConfigReconciler.
 	GlobalConfig *yanetv1alpha1.MutexYanetConfigSpec
+	// ManageCertificates opts into watching the optional cert-manager v1 API.
+	ManageCertificates bool
 
 	// lock guards lastUpdateTS / lastUpdateHost for the updateWindow throttle.
 	lock           sync.Mutex
@@ -87,6 +89,7 @@ func (r *YanetReconciler) checkUpdateRequeue(logger logr.Logger, updateWindow ti
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
+//+kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile fetches the installation and reconciles its desired workloads.
 func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -127,7 +130,7 @@ func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 //   - corev1.Pod (mapped by manifests.LabelYanet to enqueue the
 //     owning Yanet when a managed Pod changes phase or loses its label)
 func (r *YanetReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&yanetv1alpha1.Yanet{}).
 		Watches(&yanetv1alpha1.YanetConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigToYanets)).
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToYanets)).
@@ -135,8 +138,11 @@ func (r *YanetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// update. A new-object-only predicate would drop label-removal events.
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToYanet)).
 		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.ConfigMap{}).
-		Complete(r)
+		Owns(&corev1.ConfigMap{})
+	if r.ManageCertificates {
+		builder = builder.Owns(newCertificate())
+	}
+	return builder.Complete(r)
 }
 
 // mapConfigToYanets enqueues all Yanet CRs whenever the

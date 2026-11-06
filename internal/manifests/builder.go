@@ -57,6 +57,10 @@ type BuildContext struct {
 	// the builder falls back to YanetSpec.NodeSelector and skips
 	// the kubernetes.io/hostname constraint.
 	NodeName string
+	// NodeUID prevents a replacement node inheriting a previous node's identity.
+	NodeUID string
+	// Certificates is opt-in; consumers get persistent HostPaths, never Secrets.
+	Certificates *yanetv1alpha1.CertificateManagementSpec
 	// NodeAllocatable supplies hugepage pools for automatic dataplane sizing.
 	// It is a node snapshot, not currently unallocated scheduler capacity.
 	NodeAllocatable corev1.ResourceList

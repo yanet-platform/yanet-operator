@@ -83,6 +83,9 @@ func RenderDeployments(ctx BuildContext, component *helpers.ResolvedComponent, r
 		if err := ConfigureRuntimeNetwork(deployment, ctx, component); err != nil {
 			return nil, err
 		}
+		if err := ConfigureCertificates(deployment, ctx); err != nil {
+			return nil, err
+		}
 		if err := ValidateComposedPod(deployment); err != nil {
 			return nil, err
 		}

@@ -280,7 +280,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		pullPolicy = corev1.PullIfNotPresent
 	}
 
-	servicePlans, preflightErr := r.preflightResources(
+	servicePlans, certificatePlans, workloadsByNode, preflightErr := r.preflightResources(
 		ctx, &cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
 	)
 	if preflightErr != nil {
@@ -298,6 +298,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	desired := newDesiredSet()
 	missingOperators := map[string]struct{}{}
 	syncWaiting := false
+	certificatesIssued, credentialsDelivered := true, true
 	var earliestRequeue time.Duration
 
 	// per-node × per-component reconcile loop ------------------
@@ -312,6 +313,8 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			Namespace:       yanet.Namespace,
 			BoxType:         yanet.Spec.BoxType,
 			NodeName:        node.Name,
+			NodeUID:         string(node.UID),
+			Certificates:    cfg.Spec.Certificates,
 			NodeAllocatable: node.Status.Allocatable,
 			PullPolicy:      pullPolicy,
 			PullSecrets:     cfg.Spec.Images.PullSecrets,
@@ -320,6 +323,43 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, &cfg.Spec, &yanet.Spec)
 		if err != nil {
 			return ctrl.Result{}, err
+		}
+		certificatePlan := certificatePlans[node.Name]
+		credentialsReady, certErr := r.applyCertificates(ctx, yanet, certificatePlan, autoSync)
+		certificatesIssued = certificatesIssued && credentialsReady && certErr == nil
+		if certErr != nil {
+			credentialsDelivered = false
+			reconcileErrs = append(reconcileErrs, certErr)
+			ns.Deployments["credential-delivery"] = "error"
+		}
+		for _, certificate := range certificatePlan.Certificates {
+			desired.Certificates[certificate.GetName()] = struct{}{}
+		}
+		if delivery := certificatePlan.Delivery; delivery != nil && certErr == nil {
+			desired.Deployments[delivery.Name] = struct{}{}
+			state, requeue, applyErr := r.applyDeployment(ctx, delivery, autoSync, updateWindow, node.Name, logger)
+			if applyErr != nil {
+				reconcileErrs = append(reconcileErrs, applyErr)
+			}
+			ready, readyErr := r.certificateDeliveryReady(ctx, delivery)
+			credentialsDelivered = credentialsDelivered && ready && readyErr == nil && state == "synced" && applyErr == nil
+			if readyErr != nil {
+				reconcileErrs = append(reconcileErrs, readyErr)
+			}
+			credentialsReady = credentialsReady && ready && state == "synced" && certErr == nil && applyErr == nil
+			if state == "synced" && !credentialsReady && installationEnabled {
+				state = "sync-waiting"
+			}
+			ns.Deployments[delivery.Name] = state
+			if state == "sync-waiting" {
+				syncWaiting = true
+				if requeue == 0 {
+					requeue = 5 * time.Second
+				}
+			}
+			if requeue > 0 && (earliestRequeue == 0 || requeue < earliestRequeue) {
+				earliestRequeue = requeue
+			}
 		}
 
 		for _, ref := range enabled {
@@ -352,17 +392,34 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 				desired.ConfigMaps[n] = struct{}{}
 			}
 
-			deployments, berr := manifests.RenderDeployments(buildCtx, rc, registry)
-			if berr != nil {
-				logger.Error(berr, "build failed", "component", rc.Name)
-				reconcileErrs = append(reconcileErrs, berr)
-				continue
+			// Apply the preflighted objects: certificate planning adds startup
+			// gates and account-policy rollout annotations to these deployments.
+			var deployments []*appsv1.Deployment
+			for _, workload := range workloadsByNode[node.Name] {
+				if workload.component.Kind == rc.Kind && workload.component.Name == rc.Name {
+					deployments = append(deployments, workload.deployment)
+				}
 			}
 			for _, d := range deployments {
 				if ref.Kind == helpers.KindControlplane {
 					ns.NumaCount++
 				}
 				normalizeDeploymentReplicas(d, rc.Enabled, installationEnabled)
+				if manifests.RequiresCertificateDelivery(d) && !credentialsReady && d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
+					// Preserve an existing workload while issuance/delivery is pending.
+					// Scale-to-zero and cleanup never wait for a certificate.
+					state := "sync-waiting"
+					if !autoSync {
+						state = "out-of-sync (credentials)"
+					}
+					ns.Deployments[d.Name] = state
+					desired.Deployments[d.Name] = struct{}{}
+					syncWaiting = autoSync || syncWaiting
+					if earliestRequeue == 0 || earliestRequeue > 5*time.Second {
+						earliestRequeue = 5 * time.Second
+					}
+					continue
+				}
 				state, requeue, applyErr := r.applyDeployment(ctx, d, autoSync, updateWindow, node.Name, logger)
 				if configDrift && state == "synced" {
 					state = "out-of-sync (inline config)"
@@ -403,6 +460,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		// Preserve the last observation when the API could not be read.
 		pods = yanet.Status.Pods
 	}
+	setCertificateConditions(yanet, cfg.Spec.Certificates != nil, certificatesIssued, credentialsDelivered)
 	if len(reconcileErrs) > 0 {
 		reconcileErr := errors.Join(reconcileErrs...)
 		yanet.Status.NodesStatus = nodesStatus
@@ -459,6 +517,9 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		sort.Strings(pruned.RetainedConfigMaps)
 		setConditionsDegraded(yanet, "OrphansRetained", fmt.Sprintf("ConfigMaps retained with autoSync=false: %v", pruned.RetainedConfigMaps))
 	}
+	if len(pruned.RetainedCertificates) > 0 {
+		setConditionsDegraded(yanet, "OrphansRetained", fmt.Sprintf("Certificates retained with autoSync=false: %v", pruned.RetainedCertificates))
+	}
 
 	// metrics: deployments out-of-sync counter
 	outOfSyncCount := len(yanet.Status.Sync.OutOfSync) + len(yanet.Status.Sync.Error)
@@ -497,10 +558,19 @@ func (r *YanetReconciler) preflightResources(
 	registry manifests.PatchRegistry,
 ) (
 	plans map[string]manifests.ServicePlan,
+	certificatePlans map[string]manifests.CertificatePlan,
+	workloadsByNode map[string][]renderedWorkload,
 	preflightErr error,
 ) {
 	plans = make(map[string]manifests.ServicePlan)
-	workloadsByNode := make(map[string][]renderedWorkload, len(nodes))
+	certificatePlans = make(map[string]manifests.CertificatePlan)
+	if err := yanetv1alpha1.ValidateCertificates(cfg.Certificates, &cfg.Components); err != nil {
+		return nil, nil, nil, err
+	}
+	if cfg.Certificates != nil && !r.ManageCertificates {
+		return nil, nil, nil, fmt.Errorf("certificates require --manage-certificates")
+	}
+	workloadsByNode = make(map[string][]renderedWorkload, len(nodes))
 	collided := make(map[string]struct{})
 	var preflightErrs []error
 	addServicePlans := func(buildCtx manifests.BuildContext, component *helpers.ResolvedComponent, location string) {
@@ -537,6 +607,8 @@ func (r *YanetReconciler) preflightResources(
 			Namespace:       yanet.Namespace,
 			BoxType:         yanet.Spec.BoxType,
 			NodeName:        node.Name,
+			NodeUID:         string(node.UID),
+			Certificates:    cfg.Certificates,
 			PullPolicy:      pullPolicy,
 			PullSecrets:     cfg.Images.PullSecrets,
 			OwnerRef:        owner,
@@ -545,7 +617,7 @@ func (r *YanetReconciler) preflightResources(
 		var err error
 		buildCtx, err = manifests.WithRuntimeNetwork(buildCtx, cfg, &yanet.Spec)
 		if err != nil {
-			return nil, err
+			return nil, nil, nil, err
 		}
 		for _, ref := range enabled {
 			rc, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
@@ -577,6 +649,11 @@ func (r *YanetReconciler) preflightResources(
 			addServicePlans(buildCtx, rc, "on node "+node.Name)
 		}
 		workloadsByNode[node.Name] = workloads
+		var deployments []*appsv1.Deployment
+		for _, workload := range workloads {
+			deployments = append(deployments, workload.deployment)
+		}
+		certificatePlans[node.Name] = manifests.BuildCertificatePlan(buildCtx, deployments, installationEnabled)
 	}
 	if len(nodes) == 0 {
 		buildCtx := manifests.BuildContext{
@@ -595,12 +672,12 @@ func (r *YanetReconciler) preflightResources(
 		}
 	}
 	if len(preflightErrs) > 0 {
-		return nil, errors.Join(preflightErrs...)
+		return nil, nil, nil, errors.Join(preflightErrs...)
 	}
 	if err := r.validateOperatorPlacementTransition(ctx, yanet, nodes, workloadsByNode); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	return plans, nil
+	return plans, certificatePlans, workloadsByNode, nil
 }
 
 //+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch

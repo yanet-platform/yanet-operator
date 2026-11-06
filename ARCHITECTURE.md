@@ -160,6 +160,16 @@ not the NUMA ID: a config containing only `numa1` uses
 `YANET_GATEWAYS_0_ENDPOINT` pointing to the `controlplane-numa1` Service.
 Only endpoints are overridden; list membership, names and TLS remain in the host
 config. The operator neither reads nor rewrites application configuration.
+Controlplane gRPC uses `YANET_GATEWAY_SERVER_GRPC_ENDPOINT`, matching the native
+`gateway.server.grpc.endpoint` section. Its HTTP listener must be configured in
+the host file on `[::]:8081`: `YANET_GATEWAY_SERVER_HTTP_ENDPOINT` is ambiguous
+between `gateway.server.http.endpoint` and deprecated `gateway.server.http_endpoint`
+and the runtime loader rejects it. The operator does not inject that variable.
+With a managed controlplane server certificate profile, the same reserved gRPC
+port is assigned through `YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT` and the plaintext
+gRPC endpoint is cleared. Native key-pair/authentication configuration stays in
+the host file. UID-bound gateway account policy and its offline startup gate are
+described in [MANAGED_CERTIFICATES.md](MANAGED_CERTIFICATES.md).
 Other YAML schemas, such as an ACL's nested `operator.instances`, require explicit
 schema-specific env in palette patches through the same runtime loader.
 
