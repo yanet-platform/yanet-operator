@@ -104,6 +104,76 @@ func TestCertificateMountConflictsFailRendering(t *testing.T) {
 	}
 }
 
+func TestCertificateMountPathsAreContainerScoped(t *testing.T) {
+	build := certificateBuildContext()
+	build.Certificates.Profiles = []api.CertificateProfile{
+		{Name: "left", Component: "clients", Container: "left", MountPath: "/etc/pki", Usage: "client"},
+		{Name: "right", Component: "clients", Container: "right", MountPath: "/etc/pki", Usage: "client"},
+	}
+	component := &helpers.ResolvedComponent{
+		Kind: helpers.KindOperator, Name: "clients", Enabled: true,
+		Containers: []helpers.ResolvedContainer{{Name: "left"}, {Name: "right"}},
+	}
+	workloads, err := RenderDeployments(build, component, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workloads) != 1 {
+		t.Fatalf("expected one multi-container workload, got %d", len(workloads))
+	}
+	pod := workloads[0].Spec.Template.Spec
+	for _, container := range pod.Containers {
+		mounts := 0
+		for _, mount := range container.VolumeMounts {
+			if !strings.HasPrefix(mount.Name, "yanet-credential-") {
+				continue
+			}
+			mounts++
+			if mount.Name != "yanet-credential-"+container.Name || mount.MountPath != "/etc/pki" || !mount.ReadOnly {
+				t.Fatalf("container received an incorrect role mount: %s %+v", container.Name, mount)
+			}
+		}
+		if mounts != 1 {
+			t.Fatalf("container %s has %d role mounts, want 1", container.Name, mounts)
+		}
+	}
+	paths := map[string]bool{}
+	for _, volume := range pod.Volumes {
+		if strings.HasPrefix(volume.Name, "yanet-credential-") {
+			if volume.HostPath == nil || paths[volume.HostPath.Path] {
+				t.Fatalf("roles share a credential source: %+v", volume)
+			}
+			paths[volume.HostPath.Path] = true
+		}
+	}
+	if len(paths) != 2 {
+		t.Fatalf("expected two independent credential sources, got %v", paths)
+	}
+}
+
+func TestCertificatePatchedMountNamespaceConflicts(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		patch     string
+		wantError bool
+	}{
+		{name: "target container path", wantError: true, patch: `{"spec":{"template":{"spec":{"volumes":[{"name":"other","emptyDir":{}}],"containers":[{"name":"controlplane","volumeMounts":[{"name":"other","mountPath":"/etc/yanet2/pki/gateway"}]}]}}}}`},
+		{name: "other init container path", patch: `{"spec":{"template":{"spec":{"volumes":[{"name":"other","emptyDir":{}}],"initContainers":[{"name":"setup","image":"example.test/setup:v1","volumeMounts":[{"name":"other","mountPath":"/etc/yanet2/pki/gateway"}]}]}}}}`},
+		{name: "other init container reserved volume", wantError: true, patch: `{"spec":{"template":{"spec":{"initContainers":[{"name":"setup","image":"example.test/setup:v1","volumeMounts":[{"name":"yanet-credential-gateway","mountPath":"/unrelated"}]}]}}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build := certificateBuildContext()
+			component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Patches: []string{"mounts"}}
+			patch := api.NamedPatch{Name: "mounts"}
+			patch.Patch.Raw = []byte(tc.patch)
+			_, err := RenderDeployments(build, component, NewPatchRegistry([]api.NamedPatch{patch}))
+			if (err != nil) != tc.wantError {
+				t.Fatalf("rendering error = %v, wantError = %t", err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestCertificateRoleIsolation(t *testing.T) {
 	build := certificateBuildContext()
 	build.Certificates.Profiles = append(build.Certificates.Profiles, api.CertificateProfile{Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/yanet2/pki/acl", Usage: "client"})

@@ -74,7 +74,8 @@ func ConfigureCertificates(d *appsv1.Deployment, ctx BuildContext) error {
 		for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
 			for _, container := range containers {
 				for _, mount := range container.VolumeMounts {
-					if mount.Name == volumeName || mount.MountPath == p.MountPath {
+					// Volume names are Pod-wide; mount paths belong to each container.
+					if mount.Name == volumeName || (container.Name == containerName && mount.MountPath == p.MountPath) {
 						return fmt.Errorf("patch conflicts with certificate profile %q mount", p.Name)
 					}
 				}
