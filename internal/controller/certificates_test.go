@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -16,9 +17,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func certificateEnvironment(t *testing.T) (*YanetReconciler, *api.Yanet, *corev1.Node) {
@@ -239,5 +242,105 @@ func TestManagedCertificatesNodeReleaseCleansIssuance(t *testing.T) {
 	reconcileCertificates(t, r, y)
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(certificate), newCertificate()); !apierrors.IsNotFound(err) {
 		t.Fatalf("released node kept issuing new credentials: %v", err)
+	}
+}
+
+func TestManagedCertificatesWaitingReason(t *testing.T) {
+	r, y, _ := certificateEnvironment(t)
+	reconcileCertificates(t, r, y)
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(y), y); err != nil {
+		t.Fatal(err)
+	}
+	condition := apimeta.FindStatusCondition(y.Status.Conditions, "Progressing")
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "WaitingForCredentials" {
+		t.Fatalf("credential prerequisites must not report an update-window delay: %+v", condition)
+	}
+	if apimeta.IsStatusConditionTrue(y.Status.Conditions, "Ready") {
+		t.Fatal("pending credentials reported a ready installation")
+	}
+}
+
+func TestManagedCertificatesDeploymentConflicts(t *testing.T) {
+	for _, mixedFailure := range []bool{false, true} {
+		name := "conflict-only"
+		if mixedFailure {
+			name = "conflict-and-forbidden"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			r, y, _ := certificateEnvironment(t)
+			reconcileCertificates(t, r, y)
+			list := &appsv1.DeploymentList{}
+			if err := r.List(ctx, list, client.MatchingLabels{manifests.LabelComponent: "credential-delivery"}); err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Items) != 1 {
+				t.Fatalf("expected delivery deployment, got %d", len(list.Items))
+			}
+			delivery := list.Items[0].DeepCopy()
+			two := int32(2)
+			delivery.Spec.Replicas = &two
+			if err := r.Update(ctx, delivery); err != nil {
+				t.Fatal(err)
+			}
+			inject := true
+			conflicts := 0
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					options := &client.UpdateOptions{}
+					for _, option := range opts {
+						option.ApplyToUpdate(options)
+					}
+					if inject && len(options.DryRun) > 0 {
+						if _, ok := obj.(*appsv1.Deployment); ok {
+							conflicts++
+							return apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, obj.GetName(), errors.New("resource version changed"))
+						}
+					}
+					return cl.Update(ctx, obj, opts...)
+				},
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if inject && mixedFailure {
+						if _, ok := list.(*corev1.PodList); ok {
+							return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "", errors.New("access denied"))
+						}
+					}
+					return cl.List(ctx, list, opts...)
+				},
+			})
+			result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
+			if conflicts == 0 {
+				t.Fatal("test did not exercise a deployment dry-run conflict")
+			}
+			if mixedFailure {
+				if err == nil || !strings.Contains(err.Error(), "access denied") {
+					t.Fatalf("a concurrent conflict hid the real API failure: %v", err)
+				}
+				return
+			}
+			if err != nil || result.RequeueAfter <= 0 {
+				t.Fatalf("expected a quiet scheduled retry, got %+v, %v", result, err)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(y), y); err != nil {
+				t.Fatal(err)
+			}
+			if apimeta.IsStatusConditionTrue(y.Status.Conditions, "Degraded") {
+				t.Fatalf("ordinary resource-version contention degraded the installation: %+v", y.Status.Conditions)
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(delivery), delivery); err != nil {
+				t.Fatal(err)
+			}
+			if *delivery.Spec.Replicas != 2 {
+				t.Fatal("conflicting dry-run persisted a deployment change")
+			}
+			inject = false
+			reconcileCertificates(t, r, y)
+			if err := r.Get(ctx, client.ObjectKeyFromObject(delivery), delivery); err != nil {
+				t.Fatal(err)
+			}
+			if *delivery.Spec.Replicas != 1 {
+				t.Fatal("reconcile did not recover after contention ended")
+			}
+		})
 	}
 }

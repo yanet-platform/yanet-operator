@@ -36,7 +36,7 @@ import (
 // Conditions:
 //   - Available: True when there is no Error and no OutOfSync.
 //   - Progressing: True when SyncWaiting is non-empty (the
-//     UpdateWindow throttle is delaying a node).
+//     UpdateWindow throttle or credential prerequisites are delaying a node).
 //   - Degraded: True when Error is non-empty or operators are
 //     declared but missing.
 //   - Ready: aggregate (Available && !Degraded && !Progressing).
@@ -81,6 +81,27 @@ func computeConditions(yanet *yanetv1alpha1.Yanet, missingOperators map[string]s
 		prog.Status = metav1.ConditionTrue
 		prog.Reason = "WaitingForUpdateWindow"
 		prog.Message = fmt.Sprintf("Waiting for UpdateWindow: %v", sync.SyncWaiting)
+		var credentials, window []string
+		for _, node := range yanet.Status.NodesStatus {
+			for name, state := range node.Deployments {
+				switch state {
+				case syncWaitingCredentials:
+					credentials = append(credentials, name)
+				case "sync-waiting":
+					window = append(window, name)
+				}
+			}
+		}
+		if len(credentials) > 0 {
+			sort.Strings(credentials)
+			prog.Reason = "WaitingForCredentials"
+			prog.Message = fmt.Sprintf("Waiting for certificate issuance or durable delivery: %v", credentials)
+			if len(window) > 0 {
+				sort.Strings(window)
+				prog.Reason = "WaitingForPrerequisites"
+				prog.Message += fmt.Sprintf("; waiting for UpdateWindow: %v", window)
+			}
+		}
 	}
 
 	// Degraded ---------------------------------------------------

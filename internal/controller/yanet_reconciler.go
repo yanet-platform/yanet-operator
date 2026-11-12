@@ -44,6 +44,28 @@ import (
 
 const yanetFinalizer = "yanet.yanet-platform.io/finalizer"
 
+const syncWaitingCredentials = "sync-waiting (credentials)"
+
+// A joined error is retryable contention only when every leaf is a conflict.
+// Checking IsConflict on the join itself can hide a different API failure.
+func onlyConflicts(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			if !onlyConflicts(child) {
+				return false
+			}
+		}
+		return len(joined.Unwrap()) > 0
+	}
+	if wrapped := errors.Unwrap(err); wrapped != nil {
+		return onlyConflicts(wrapped)
+	}
+	return apierrors.IsConflict(err)
+}
+
 // updateStatus fetches the latest version of the Yanet CR and
 // applies the given mutator to its in-memory copy, then writes Status
 // via Status().Update wrapped in retry.RetryOnConflict to handle the
@@ -348,10 +370,10 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			}
 			credentialsReady = credentialsReady && ready && state == "synced" && certErr == nil && applyErr == nil
 			if state == "synced" && !credentialsReady && installationEnabled {
-				state = "sync-waiting"
+				state = syncWaitingCredentials
 			}
 			ns.Deployments[delivery.Name] = state
-			if state == "sync-waiting" {
+			if state == "sync-waiting" || state == syncWaitingCredentials {
 				syncWaiting = true
 				if requeue == 0 {
 					requeue = 5 * time.Second
@@ -408,7 +430,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 				if manifests.RequiresCertificateDelivery(d) && !credentialsReady && d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
 					// Preserve an existing workload while issuance/delivery is pending.
 					// Scale-to-zero and cleanup never wait for a certificate.
-					state := "sync-waiting"
+					state := syncWaitingCredentials
 					if !autoSync {
 						state = "out-of-sync (credentials)"
 					}
@@ -463,6 +485,11 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	setCertificateConditions(yanet, cfg.Spec.Certificates != nil, certificatesIssued, credentialsDelivered)
 	if len(reconcileErrs) > 0 {
 		reconcileErr := errors.Join(reconcileErrs...)
+		if onlyConflicts(reconcileErr) {
+			// A stale API/cache observation is not an installation failure.
+			logger.V(1).Info("Resource version changed while applying workloads; retrying")
+			return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
+		}
 		yanet.Status.NodesStatus = nodesStatus
 		yanet.Status.Services = serviceNames
 		yanet.Status.Sync = aggregateSyncStatus(nodesStatus)
@@ -1064,7 +1091,9 @@ func (r *YanetReconciler) applyDeployment(
 		return nil
 	})
 	if updErr != nil {
-		logger.Error(updErr, "Update failed", "deployment", desired.Name)
+		if !apierrors.IsConflict(updErr) {
+			logger.Error(updErr, "Update failed", "deployment", desired.Name)
+		}
 		return "error", 0, fmt.Errorf("update Deployment %s/%s: %w", desired.Namespace, desired.Name, updErr)
 	}
 	if updated {
@@ -1153,7 +1182,7 @@ func aggregateSyncStatus(byNode map[string]yanetv1alpha1.NodeStatus) yanetv1alph
 			switch state {
 			case "synced":
 				out.Synced = append(out.Synced, name)
-			case "sync-waiting":
+			case "sync-waiting", syncWaitingCredentials:
 				out.SyncWaiting = append(out.SyncWaiting, name)
 			case "error":
 				out.Error = append(out.Error, name)
