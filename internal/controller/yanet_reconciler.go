@@ -159,6 +159,18 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	if !yanet.DeletionTimestamp.IsZero() {
 		return r.handleYanetDeletion(ctx, yanet, logger)
 	}
+	installationEnabled := helpers.BoolValue(yanet.Spec.Enabled, true)
+	autoSync := helpers.BoolValue(yanet.Spec.AutoSync, false)
+	if configLoaded && !installationEnabled && autoSync {
+		if _, err := helpers.FindBoxType(&cfgSpec, yanet.Spec.BoxType); err != nil {
+			drainErr := r.drainExistingDeployments(ctx, yanet)
+			statusErr := r.updateStatus(ctx, yanet, func(fresh *yanetv1alpha1.Yanet) {
+				setConditionsDegraded(fresh, "BoxTypeNotFound", err.Error())
+				setCertificateConditionsUnknown(fresh, cfgSpec.Certificates != nil, "BoxTypeNotFound", err.Error())
+			})
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(drainErr, statusErr)
+		}
+	}
 	if !controllerutil.ContainsFinalizer(yanet, yanetFinalizer) {
 		controllerutil.AddFinalizer(yanet, yanetFinalizer)
 		if err := r.checkGlobalStop(); err != nil {
@@ -181,9 +193,6 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	// the CR is disabled. To fully freeze the operator's view of a
 	// CR — keep existing Deployments untouched, including any hand
 	// edits — use spec.autoSync=false instead.
-	installationEnabled := helpers.BoolValue(yanet.Spec.Enabled, true)
-	autoSync := helpers.BoolValue(yanet.Spec.AutoSync, false)
-
 	if !configLoaded {
 		logger.Info("YanetConfig snapshot is empty; requeue")
 		if r.Recorder != nil && r.checkGlobalStop() == nil {
@@ -212,6 +221,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		}
 		if uerr := r.updateStatus(ctx, yanet, func(fresh *yanetv1alpha1.Yanet) {
 			setConditionsDegraded(fresh, "BoxTypeNotFound", err.Error())
+			setCertificateConditionsUnknown(fresh, cfg.Spec.Certificates != nil, "BoxTypeNotFound", err.Error())
 		}); uerr != nil {
 			logger.Info("status update failed (continuing)", "error", uerr)
 		}
@@ -266,22 +276,6 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	if len(nodes) == 0 {
 		logger.Info("no nodes matched spec.nodeSelector; nothing to do")
 	}
-	if conflictErr := r.validateExclusiveNodes(ctx, yanet, nodes); conflictErr != nil {
-		logger.Error(conflictErr, "node selection conflict")
-		if r.Recorder != nil && r.checkGlobalStop() == nil {
-			r.Recorder.Eventf(yanet, nil, corev1.EventTypeWarning, "NodeSelectionConflict", "Reconcile", "%v", conflictErr)
-		}
-		statusErr := r.updateStatus(ctx, yanet, func(fresh *yanetv1alpha1.Yanet) {
-			setConditionsDegraded(fresh, "NodeSelectionConflict", conflictErr.Error())
-		})
-		var cleanupErr error
-		var nodeConflict *nodeSelectionConflict
-		if autoSync && errors.As(conflictErr, &nodeConflict) {
-			cleanupErr = r.pruneConflictingDeployments(ctx, yanet, nodeConflict.cleanupNodeNames, logger)
-		}
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(statusErr, cleanupErr)
-	}
-
 	registry := manifests.NewPatchRegistry(cfg.Spec.Patches)
 	owner := metav1.OwnerReference{
 		APIVersion:         yanet.APIVersion,
@@ -305,8 +299,33 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	servicePlans, certificatePlans, workloadsByNode, preflightErr := r.preflightResources(
 		ctx, &cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
 	)
+	var policyErr error
+	var frozen credentialFreeze
+	if preflightErr == nil {
+		if conflictErr := r.validateExclusiveNodes(ctx, yanet, nodes); conflictErr != nil {
+			logger.Error(conflictErr, "node selection conflict")
+			if r.Recorder != nil && r.checkGlobalStop() == nil {
+				r.Recorder.Eventf(yanet, nil, corev1.EventTypeWarning, "NodeSelectionConflict", "Reconcile", "%v", conflictErr)
+			}
+			statusErr := r.updateStatus(ctx, yanet, func(fresh *yanetv1alpha1.Yanet) {
+				setConditionsDegraded(fresh, "NodeSelectionConflict", conflictErr.Error())
+				setCertificateConditionsUnknown(fresh, cfg.Spec.Certificates != nil, "NodeSelectionConflict", conflictErr.Error())
+			})
+			var cleanupErr error
+			var nodeConflict *nodeSelectionConflict
+			if autoSync && errors.As(conflictErr, &nodeConflict) {
+				cleanupErr = r.pruneConflictingDeployments(ctx, yanet, nodeConflict, logger)
+			}
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(statusErr, cleanupErr)
+		}
+	}
 	if preflightErr == nil && installationEnabled {
 		preflightErr = r.preparePolicyHandoff(ctx, yanet, &cfg.Spec, certificatePlans, workloadsByNode, nodes, autoSync)
+		var unavailable *sshPolicyUnavailableError
+		if errors.As(preflightErr, &unavailable) {
+			policyErr = preflightErr
+			frozen, preflightErr = r.planCredentialFreeze(ctx, yanet, &cfg.Spec, certificatePlans, workloadsByNode, nodes)
+		}
 	}
 	if preflightErr != nil {
 		logger.Error(preflightErr, "resource preflight failed")
@@ -315,16 +334,27 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		}
 		statusErr := r.updateStatus(ctx, yanet, func(fresh *yanetv1alpha1.Yanet) {
 			setConditionsDegraded(fresh, "ResourcePreflightFailed", preflightErr.Error())
+			setCertificateConditionsUnknown(fresh, cfg.Spec.Certificates != nil, "ResourcePreflightFailed", preflightErr.Error())
 		})
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(preflightErr, statusErr)
 	}
 	var reconcileErrs []error
 	nodesStatus := make(map[string]yanetv1alpha1.NodeStatus, len(nodes))
 	desired := newDesiredSet()
+	for name := range frozen.deployments {
+		desired.Deployments[name] = struct{}{}
+	}
+	for name := range frozen.configMaps {
+		desired.ConfigMaps[name] = struct{}{}
+	}
+	for name := range frozen.secrets {
+		desired.Certificates[name] = struct{}{}
+	}
 	missingOperators := map[string]struct{}{}
 	syncWaiting := false
 	certificatesIssued, credentialsDelivered := true, true
 	var earliestRequeue time.Duration
+	certificateObservationFailed := false
 
 	// per-node × per-component reconcile loop ------------------
 	for i := range nodes {
@@ -350,9 +380,15 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			return ctrl.Result{}, err
 		}
 		certificatePlan := certificatePlans[node.Name]
-		credentialsReady, certErr := r.applyCertificates(ctx, yanet, certificatePlan, autoSync)
+		blocked := frozen.nodes[node.Name]
+		var credentialsReady bool
+		var certErr error
+		if !blocked {
+			credentialsReady, certErr = r.applyCertificates(ctx, yanet, certificatePlan, autoSync)
+		}
 		certificatesIssued = certificatesIssued && credentialsReady && certErr == nil
 		if certErr != nil {
+			certificateObservationFailed = true
 			credentialsDelivered = false
 			reconcileErrs = append(reconcileErrs, certErr)
 			ns.Deployments["credential-delivery"] = "error"
@@ -430,24 +466,29 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			}
 			rc.Enabled = rc.Enabled && installationEnabled
 
-			// ConfigMaps for inline configs (must land before the
-			// Deployment to avoid CreateContainerConfigError).
-			cmNames, configDrift, cmErr := r.applyInlineConfigMaps(ctx, yanet, buildCtx, rc, autoSync)
-			if cmErr != nil {
-				logger.Error(cmErr, "configmap apply failed", "component", rc.Name)
-				reconcileErrs = append(reconcileErrs, cmErr)
-				continue
-			}
-			for _, n := range cmNames {
-				desired.ConfigMaps[n] = struct{}{}
-			}
-
 			// Apply the preflighted objects: certificate planning adds startup
 			// gates and account-policy rollout annotations to these deployments.
 			var deployments []*appsv1.Deployment
+			applyConfig := false
 			for _, workload := range workloadsByNode[node.Name] {
 				if workload.component.Kind == rc.Kind && workload.component.Name == rc.Name {
 					deployments = append(deployments, workload.deployment)
+					desired.Deployments[workload.deployment.Name] = struct{}{}
+					applyConfig = applyConfig || !frozen.deployments[workload.deployment.Name]
+				}
+			}
+			// Record desired names even when an apply fails or the workload is
+			// frozen. Pruning must never use the set of successful writes.
+			for name := range manifests.InlineConfigMaps(buildCtx, rc) {
+				desired.ConfigMaps[name] = struct{}{}
+			}
+			var configDrift bool
+			if applyConfig || policyErr == nil {
+				var cmErr error
+				_, configDrift, cmErr = r.applyInlineConfigMaps(ctx, yanet, buildCtx, rc, autoSync)
+				if cmErr != nil {
+					reconcileErrs = append(reconcileErrs, cmErr)
+					continue
 				}
 			}
 			for _, d := range deployments {
@@ -455,6 +496,21 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 					ns.NumaCount++
 				}
 				normalizeDeploymentReplicas(d, rc.Enabled, installationEnabled)
+				if frozen.deployments[d.Name] {
+					state := syncWaitingCredentials
+					if !autoSync {
+						state = "out-of-sync (credentials)"
+					}
+					if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
+						var drainErr error
+						state, drainErr = r.drainCredentialWorkload(ctx, d, autoSync)
+						if drainErr != nil {
+							reconcileErrs = append(reconcileErrs, drainErr)
+						}
+					}
+					ns.Deployments[d.Name] = state
+					continue
+				}
 				if !installationEnabled && manifests.RequiresCertificateDelivery(d) {
 					// A drain must not replace a supported policy gate with a new
 					// unallocated (or legacy-format) template while scaling to zero.
@@ -523,8 +579,12 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	}
 	setCertificateConditions(yanet, cfg.Spec.Certificates != nil, certificatesIssued, credentialsDelivered)
 	if len(reconcileErrs) > 0 {
+		if policyErr != nil {
+			setCertificateConditionsUnknown(yanet, true, "SSHPolicyUnavailable", policyErr.Error())
+			reconcileErrs = append(reconcileErrs, policyErr)
+		}
 		reconcileErr := errors.Join(reconcileErrs...)
-		if onlyConflicts(reconcileErr) {
+		if !certificateObservationFailed && onlyConflicts(reconcileErr) {
 			// A stale API/cache observation is not an installation failure.
 			logger.V(1).Info("Resource version changed while applying workloads; retrying")
 			return ctrl.Result{RequeueAfter: 100 * time.Millisecond}, nil
@@ -543,6 +603,9 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 
 	// 8. Orphan cleanup ----------------------------------------
 	pruned, err := r.pruneOrphans(ctx, yanet, desired, autoSync, logger)
+	if err != nil {
+		err = fmt.Errorf("prune orphans: %w", err)
+	}
 	for _, deployment := range pruned.RetainedDeployments {
 		nodeName := deployment.Labels[manifests.LabelNode]
 		ns := nodesStatus[nodeName]
@@ -558,19 +621,22 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		r.Recorder.Eventf(yanet, nil, corev1.EventTypeNormal, "OrphanPruned", "Cleanup",
 			"Requested deletion of %d orphan resources no longer in desired set", pruned.Deleted)
 	}
+	if policyErr != nil {
+		setCertificateConditionsUnknown(yanet, true, "SSHPolicyUnavailable", policyErr.Error())
+		err = errors.Join(policyErr, err)
+	}
 	if err != nil {
-		logger.Error(err, "prune orphans failed")
-		pruneErr := fmt.Errorf("prune orphans: %w", err)
+		logger.Error(err, "reconcile incomplete after orphan cleanup")
 		yanet.Status.NodesStatus = nodesStatus
 		yanet.Status.Services = serviceNames
 		yanet.Status.Sync = aggregateSyncStatus(nodesStatus)
 		yanet.Status.Pods = pods
-		setConditionsDegraded(yanet, "ReconcileFailed", pruneErr.Error())
+		setConditionsDegraded(yanet, "ReconcileFailed", err.Error())
 		desiredStatus := yanet.Status
 		statusErr := r.updateStatus(ctx, yanet, func(fresh *yanetv1alpha1.Yanet) {
 			fresh.Status = desiredStatus
 		})
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(pruneErr, statusErr)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, errors.Join(err, statusErr)
 	}
 
 	// 9. Status -------------------------------------------------
@@ -637,6 +703,7 @@ func (r *YanetReconciler) preflightResources(
 		return nil, nil, nil, fmt.Errorf("certificates require --manage-certificates")
 	}
 	workloadsByNode = make(map[string][]renderedWorkload, len(nodes))
+	deploymentNames := make(map[client.ObjectKey]string)
 	collided := make(map[string]struct{})
 	var preflightErrs []error
 	addServicePlans := func(buildCtx manifests.BuildContext, component *helpers.ResolvedComponent, location string) {
@@ -726,6 +793,12 @@ func (r *YanetReconciler) preflightResources(
 			deployments = append(deployments, delivery)
 		}
 		for _, deployment := range deployments {
+			key := client.ObjectKeyFromObject(deployment)
+			if other, exists := deploymentNames[key]; exists {
+				preflightErrs = append(preflightErrs, fmt.Errorf("duplicate Deployment %s generated on nodes %s and %s", key, other, node.Name))
+			} else {
+				deploymentNames[key] = node.Name
+			}
 			if err := manifests.ValidateComposedPod(deployment); err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("validate final deployment %s: %w", deployment.Name, err))
 			}
@@ -758,13 +831,31 @@ func (r *YanetReconciler) preflightResources(
 
 //+kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 
-func podMayUseNode(pod *corev1.PodSpec, node *corev1.Node) bool {
+func podMayUseNode(pod *corev1.PodSpec, node *corev1.Node, nodeHint string) bool {
 	if pod.NodeName != "" {
 		return pod.NodeName == node.Name
 	}
-	// Ignoring affinity is conservative: do not guess that an unbound workload
-	// cannot use the node. Managed workloads have an exact operator-owned pin.
-	return labels.SelectorFromSet(pod.NodeSelector).Matches(labels.Set(node.Labels))
+	// Trust required name affinity only when every viable term has the same
+	// exact pin. User hostname constraints and template labels cannot move it.
+	if pod.Affinity != nil && pod.Affinity.NodeAffinity != nil {
+		if required := pod.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution; required != nil {
+			for _, term := range required.NodeSelectorTerms {
+				if len(term.MatchFields) == 0 && len(term.MatchExpressions) == 0 {
+					continue
+				}
+				for _, field := range term.MatchFields {
+					if field.Key == "metadata.name" && field.Operator == corev1.NodeSelectorOpIn && len(field.Values) == 1 &&
+						manifests.HasExactNodePin(pod, field.Values[0]) {
+						return field.Values[0] == node.Name
+					}
+				}
+				break // A common exact pin would be present in this term.
+			}
+		}
+	}
+	// An ambiguous/missing pin is still a potential producer. A template label
+	// may supply supporting legacy evidence, but is not a scheduling constraint.
+	return nodeHint == node.Name || labels.SelectorFromSet(pod.NodeSelector).Matches(labels.Set(node.Labels))
 }
 
 func normalizeDeploymentReplicas(deployment *appsv1.Deployment, componentEnabled, installationEnabled bool) {
@@ -875,12 +966,142 @@ func (r *YanetReconciler) listNodesForYanet(ctx context.Context, yanet *yanetv1a
 	return nodes.Items, nil
 }
 
+func (r *YanetReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
+// deploymentClaimNode requires agreement of the immutable workload selector
+// and placement. Mutable Deployment labels are not evidence of release.
+// Empty means ambiguous: retain occupancy but don't delete by node identity.
+func deploymentClaimNode(d *appsv1.Deployment) string {
+	if d.Spec.Selector == nil {
+		return ""
+	}
+	name := d.Spec.Selector.MatchLabels[manifests.LabelNode]
+	if name == "" {
+		return ""
+	}
+	pod := &d.Spec.Template.Spec
+	if pod.NodeName != "" {
+		if pod.NodeName == name {
+			return name
+		}
+		return ""
+	}
+	if manifests.HasExactNodePin(pod, name) || pod.NodeSelector[corev1.LabelHostname] == name {
+		return name
+	}
+	return ""
+}
+
+func deploymentClaimsNode(d *appsv1.Deployment, node *corev1.Node) bool {
+	name := deploymentClaimNode(d)
+	if name == "" || name == node.Name {
+		return true
+	}
+	if d.Spec.Template.Spec.NodeName == name || manifests.HasExactNodePin(&d.Spec.Template.Spec, name) {
+		return false
+	}
+	// A legacy hostname selector can also reach a differently named Node.
+	// Do not infer that a label change already terminated any bound Pod.
+	return podMayUseNode(&d.Spec.Template.Spec, node, "") &&
+		d.Spec.Template.Spec.NodeSelector[corev1.LabelHostname] == node.Labels[corev1.LabelHostname] &&
+		node.Labels[corev1.LabelHostname] != ""
+}
+
+type deploymentClaimKey struct {
+	name string
+	uid  types.UID
+}
+
+type boundPodOccupancy struct {
+	occupied, running bool
+}
+
+type deploymentProducerClaims struct {
+	bound   map[string]boundPodOccupancy
+	pending []*corev1.PodSpec
+}
+
+// Placement constraints can restrict an unbound producer, but cannot vacate
+// a bound Pod. Do not use template labels as placement or ownership evidence.
+func producerMayReachNode(pod *corev1.PodSpec, node *corev1.Node) bool {
+	if pod.NodeName != "" {
+		return pod.NodeName == node.Name
+	}
+	return podMayUseNode(pod, node, "") && labels.SelectorFromSet(pod.NodeSelector).Matches(labels.Set(node.Labels))
+}
+
+// Index verified child producers independently of the current Deployment
+// template. The caller checks that the Deployment belongs to the Yanet.
+func listDeploymentProducerClaims(ctx context.Context, reader client.Reader, namespace string) (map[deploymentClaimKey]*deploymentProducerClaims, error) {
+	sets := &appsv1.ReplicaSetList{}
+	if err := reader.List(ctx, sets, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list replica sets for node exclusivity in %q: %w", namespace, err)
+	}
+	type setOwner struct {
+		uid    types.UID
+		claims *deploymentProducerClaims
+	}
+	byName := make(map[string]setOwner, len(sets.Items))
+	claims := make(map[deploymentClaimKey]*deploymentProducerClaims)
+	for i := range sets.Items {
+		set := &sets.Items[i]
+		owner := metav1.GetControllerOfNoCopy(set)
+		if set.Namespace != namespace || set.UID == "" || owner == nil || owner.APIVersion != appsv1.SchemeGroupVersion.String() || owner.Kind != "Deployment" || owner.UID == "" {
+			continue
+		}
+		key := deploymentClaimKey{name: owner.Name, uid: owner.UID}
+		if claims[key] == nil {
+			claims[key] = &deploymentProducerClaims{bound: make(map[string]boundPodOccupancy)}
+		}
+		byName[set.Name] = setOwner{uid: set.UID, claims: claims[key]}
+		if replicaSetMayProduce(set) {
+			claims[key].pending = append(claims[key].pending, &set.Spec.Template.Spec)
+		}
+	}
+	if len(byName) == 0 {
+		return claims, nil
+	}
+	// Read Pods after producer state so a scale-down observed here does not
+	// hide a Pod created before the scale-down. These lists are not atomic.
+	pods := &corev1.PodList{}
+	if err := reader.List(ctx, pods, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list pods for node exclusivity in %q: %w", namespace, err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		owner := metav1.GetControllerOfNoCopy(pod)
+		if pod.Namespace != namespace || owner == nil || owner.APIVersion != appsv1.SchemeGroupVersion.String() || owner.Kind != "ReplicaSet" || owner.UID == "" {
+			continue
+		}
+		set, found := byName[owner.Name]
+		if !found || set.uid != owner.UID {
+			continue
+		}
+		terminal := pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
+		node := pod.Spec.NodeName
+		if node == "" {
+			if !terminal {
+				set.claims.pending = append(set.claims.pending, &pod.Spec)
+			}
+		} else if !terminal || !pod.DeletionTimestamp.IsZero() {
+			set.claims.bound[node] = boundPodOccupancy{occupied: true, running: pod.DeletionTimestamp.IsZero() || set.claims.bound[node].running}
+		}
+	}
+	return claims, nil
+}
+
 // validateExclusiveNodes enforces the host-resource invariant that one node
 // belongs to at most one Yanet. Services may be shared by box type, but two
 // installations cannot safely share DPDK devices, hugepages, or BIRD sockets.
 type nodeSelectionConflict struct {
 	messages         []string
 	cleanupNodeNames map[string]struct{}
+	cleanupProducers map[client.ObjectKey]metav1.Preconditions
 }
 
 func (e *nodeSelectionConflict) Error() string {
@@ -896,27 +1117,77 @@ func (r *YanetReconciler) validateExclusiveNodes(
 		return nil
 	}
 	installations := &yanetv1alpha1.YanetList{}
-	if err := r.Client.List(ctx, installations); err != nil {
+	if err := r.liveReader().List(ctx, installations); err != nil {
 		return fmt.Errorf("list Yanet objects for node exclusivity: %w", err)
 	}
 	deployments := &appsv1.DeploymentList{}
-	if err := r.Client.List(ctx, deployments); err != nil {
+	if err := r.liveReader().List(ctx, deployments); err != nil {
 		return fmt.Errorf("list Deployments for node exclusivity: %w", err)
 	}
-	hasWorkload := func(installation *yanetv1alpha1.Yanet, nodeName string) bool {
+	// Old ReplicaSets and pending Pods can outlive the current template.
+	// Read one inventory per namespace, only for verified installation workloads.
+	producersByNamespace := make(map[string]map[deploymentClaimKey]*deploymentProducerClaims)
+	type occupancy struct {
+		templateClaim, bound, pending, draining bool
+		legacyProducers                         []*appsv1.Deployment
+	}
+	workloadsOnNode := func(installation *yanetv1alpha1.Yanet, node *corev1.Node) (occupancy, error) {
+		var result occupancy
 		for deploymentIndex := range deployments.Items {
 			deployment := &deployments.Items[deploymentIndex]
-			if deployment.Namespace != installation.Namespace || deployment.Labels[manifests.LabelNode] != nodeName {
+			if !controlledByYanet(deployment, installation) {
 				continue
 			}
-			if controlledByYanet(deployment, installation) {
-				return true
+			templateClaim := deploymentClaimsNode(deployment, node)
+			logicalNode := deploymentClaimNode(deployment)
+			result.templateClaim = result.templateClaim || templateClaim
+			result.draining = result.draining || (templateClaim && !deployment.DeletionTimestamp.IsZero())
+			// A live legacy template can reach this other Node before its first ReplicaSet exists.
+			if templateClaim && logicalNode != "" && logicalNode != node.Name && !deploymentReplicasAreZero(deployment) {
+				result.pending = true
+			}
+			if installation.UID == "" || deployment.UID == "" {
+				continue
+			}
+			producers, loaded := producersByNamespace[deployment.Namespace]
+			if !loaded {
+				var err error
+				producers, err = listDeploymentProducerClaims(ctx, r.liveReader(), deployment.Namespace)
+				if err != nil {
+					return result, err
+				}
+				producersByNamespace[deployment.Namespace] = producers
+			}
+			seen := producers[deploymentClaimKey{name: deployment.Name, uid: deployment.UID}]
+			if seen == nil {
+				continue
+			}
+			for _, pod := range seen.pending {
+				if producerMayReachNode(pod, node) {
+					result.pending = true
+					break
+				}
+			}
+			binding := seen.bound[node.Name]
+			if !binding.occupied {
+				continue
+			}
+			result.bound = true
+			// Potential placement is a reason to wait, not to delete a workload
+			// on a different Node. Only this verified binding authorizes cleanup.
+			pod := &deployment.Spec.Template.Spec
+			if (binding.running || templateClaim) &&
+				deployment.DeletionTimestamp.IsZero() && !deploymentReplicasAreZero(deployment) &&
+				logicalNode != "" && logicalNode != node.Name && pod.NodeName == "" &&
+				pod.NodeSelector[corev1.LabelHostname] == logicalNode && !manifests.HasExactNodePin(pod, logicalNode) {
+				result.legacyProducers = append(result.legacyProducers, deployment)
 			}
 		}
-		return false
+		return result, nil
 	}
 	var conflicts []string
 	cleanupNodes := make(map[string]struct{})
+	cleanupProducers := make(map[client.ObjectKey]metav1.Preconditions)
 	for i := range installations.Items {
 		other := &installations.Items[i]
 		if other.Namespace == yanet.Namespace && other.Name == yanet.Name {
@@ -924,21 +1195,29 @@ func (r *YanetReconciler) validateExclusiveNodes(
 		}
 		for nodeIndex := range nodes {
 			node := &nodes[nodeIndex]
-			otherHasWorkload := hasWorkload(other, node.Name)
+			otherOccupancy, err := workloadsOnNode(other, node)
+			if err != nil {
+				return err
+			}
 			// A selector update does not terminate the existing Pods. The
 			// incumbent retains its claim until its old workloads are removed.
-			if !otherHasWorkload && !labels.SelectorFromSet(other.Spec.NodeSelector).Matches(labels.Set(node.Labels)) {
+			otherClaims := otherOccupancy.templateClaim || otherOccupancy.bound
+			if !otherClaims && !otherOccupancy.pending && !labels.SelectorFromSet(other.Spec.NodeSelector).Matches(labels.Set(node.Labels)) {
 				continue
 			}
-			currentHasWorkload := hasWorkload(yanet, node.Name)
-			currentWins := currentHasWorkload && !otherHasWorkload
-			if currentHasWorkload == otherHasWorkload {
+			currentOccupancy, err := workloadsOnNode(yanet, node)
+			if err != nil {
+				return err
+			}
+			currentClaims := currentOccupancy.templateClaim || currentOccupancy.bound
+			currentWins := currentClaims && !otherClaims
+			if currentClaims == otherClaims {
 				currentWins = yanetPrecedes(yanet, other)
 			}
-			// A deleting installation remains authoritative until its object
-			// and finalizer are gone, so its host-resource users cannot overlap a
-			// replacement while cleanup is still in progress.
-			if currentWins && other.DeletionTimestamp.IsZero() {
+			// Winning adjudication does not release the other owner's host
+			// resources. Wait for verified Pods and relevant foreground deletion,
+			// including when the competing template also matches directly.
+			if currentWins && other.DeletionTimestamp.IsZero() && !otherOccupancy.bound && !otherOccupancy.pending && !otherOccupancy.draining {
 				continue
 			}
 			conflicts = append(conflicts, fmt.Sprintf(
@@ -947,8 +1226,11 @@ func (r *YanetReconciler) validateExclusiveNodes(
 				other.Namespace,
 				other.Name,
 			))
-			if currentHasWorkload && !currentWins {
+			if currentClaims && !currentWins {
 				cleanupNodes[node.Name] = struct{}{}
+				for _, d := range currentOccupancy.legacyProducers {
+					cleanupProducers[client.ObjectKeyFromObject(d)] = metav1.Preconditions{UID: &d.UID, ResourceVersion: &d.ResourceVersion}
+				}
 			}
 		}
 	}
@@ -964,12 +1246,18 @@ func (r *YanetReconciler) validateExclusiveNodes(
 	}
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
-		if _, keep := selected[deployment.Labels[manifests.LabelNode]]; !keep && controlledByYanet(deployment, yanet) {
-			cleanupNodes[deployment.Labels[manifests.LabelNode]] = struct{}{}
+		if !controlledByYanet(deployment, yanet) {
+			continue
+		}
+		name := deploymentClaimNode(deployment)
+		if name != "" {
+			if _, keep := selected[name]; !keep {
+				cleanupNodes[name] = struct{}{}
+			}
 		}
 	}
 	sort.Strings(conflicts)
-	return &nodeSelectionConflict{messages: conflicts, cleanupNodeNames: cleanupNodes}
+	return &nodeSelectionConflict{messages: conflicts, cleanupNodeNames: cleanupNodes, cleanupProducers: cleanupProducers}
 }
 
 func yanetPrecedes(left, right *yanetv1alpha1.Yanet) bool {

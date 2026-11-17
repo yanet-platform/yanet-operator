@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -267,26 +268,45 @@ func TestManagedCertificatesReadyPolicyOnlyChange(t *testing.T) {
 }
 
 func TestManagedCertificatesFinalPodPreflightBeforeWrites(t *testing.T) {
-	r, y, _ := certificateEnvironment(t)
-	r.GlobalConfig.Config.Patches = []api.NamedPatch{{Name: "gate-name", Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"template":{"spec":{"containers":[{"name":"yanet-credential-gateway-check","image":"example.test/sidecar:v1"}]}}}}`)}}}
-	r.GlobalConfig.Config.BoxTypes[0].Components.Controlplane.Patches = []string{"gate-name"}
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
-	if err == nil || (!strings.Contains(err.Error(), "yanet-credential-gateway-check") && !strings.Contains(err.Error(), "startup gate")) {
-		t.Fatalf("expected final Pod name conflict: %v", err)
-	}
-	if len(listCertificates(t, r)) != 0 {
-		t.Fatal("preflight issued certificates before rejecting final consumer")
-	}
-	for _, list := range []client.ObjectList{&appsv1.DeploymentList{}, &corev1.ConfigMapList{}} {
-		if err := r.List(context.Background(), list); err != nil {
-			t.Fatal(err)
-		}
-		objects, err := apimeta.ExtractList(list)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(objects) != 0 {
-			t.Fatalf("preflight wrote %T before rejecting final consumer", list)
-		}
+	for _, tc := range []struct{ name, patch, want string }{
+		{"gate-name", `{"spec":{"template":{"spec":{"containers":[{"name":"yanet-credential-gateway-check","image":"example.test/sidecar:v1"}]}}}}`, "startup gate"},
+		{"mount-path", `{"spec":{"template":{"spec":{"containers":[{"name":"controlplane","volumeMounts":[{"name":"extra","mountPath":"/fixture"},{"name":"other","mountPath":"/fixture"},{"$patch":"replace"}]}],"volumes":[{"name":"extra","emptyDir":{}},{"name":"other","emptyDir":{}}]}}}}`, `duplicate volumeMount mountPath "/fixture"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, y, _ := certificateEnvironment(t)
+			cfg := &r.GlobalConfig.Config
+			cfg.Patches = []api.NamedPatch{{Name: tc.name, Patch: runtime.RawExtension{Raw: []byte(tc.patch)}}}
+			cfg.BoxTypes[0].Components.Controlplane.Patches = []string{tc.name}
+			if _, err := (&api.YanetConfigCustomValidator{}).ValidateCreate(ctx, &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: *cfg}); err != nil {
+				t.Fatalf("palette must pass admission before final composition: %v", err)
+			}
+			publishCertificateConfig(t, r)
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected final Pod conflict containing %q: %v", tc.want, err)
+			}
+			if len(listCertificates(t, r)) != 0 {
+				t.Fatal("preflight issued certificates before rejecting final consumer")
+			}
+			for _, list := range []client.ObjectList{&appsv1.DeploymentList{}, &corev1.ConfigMapList{}} {
+				if err := r.List(ctx, list); err != nil {
+					t.Fatal(err)
+				}
+				objects, err := apimeta.ExtractList(list)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(objects) != 0 {
+					t.Fatalf("preflight wrote %T before rejecting final consumer", list)
+				}
+			}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(y), y); err != nil {
+				t.Fatal(err)
+			}
+			if y.Annotations[policyStateAnnotation] != "" {
+				t.Fatal("preflight allocated credential policy before rejecting final consumer")
+			}
+		})
 	}
 }

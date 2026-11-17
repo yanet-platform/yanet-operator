@@ -53,9 +53,8 @@ func TestRestoreWorkloadIdentityRejectsPatchedReservedLabels(t *testing.T) {
 			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-					labelYanet: "edge", labelComponent: "route", labelBoxType: "release",
+					labelYanet: "edge", labelComponent: "route", labelBoxType: "release", labelNode: "node-1",
 				}},
-				Spec: corev1.PodSpec{NodeSelector: map[string]string{"kubernetes.io/hostname": "node-1"}},
 			},
 		},
 	}
@@ -68,7 +67,7 @@ func TestRestoreWorkloadIdentityRejectsPatchedReservedLabels(t *testing.T) {
 	deployment.Spec.Template.Labels[labelComponent] = "other"
 	deployment.Spec.Template.Labels["foreign"] = "kept"
 	deployment.Spec.Template.Spec.NodeName = "node-2"
-	deployment.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] = "node-2"
+	deployment.Spec.Template.Labels[labelNode] = "node-2"
 	deployment.Spec.Strategy.Type = appsv1.RollingUpdateDeploymentStrategyType
 
 	RestoreWorkloadIdentity(deployment, identity)
@@ -87,10 +86,10 @@ func TestRestoreWorkloadIdentityRejectsPatchedReservedLabels(t *testing.T) {
 		deployment.Spec.Template.Labels["foreign"] != "kept" {
 		t.Fatalf("Pod labels were not restored safely: %v", deployment.Spec.Template.Labels)
 	}
-	if deployment.Spec.Template.Spec.NodeName != "" ||
-		deployment.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] != "node-1" {
-		t.Fatalf("Pod placement was not restored: %#v", deployment.Spec.Template.Spec)
+	if deployment.Spec.Template.Labels[labelNode] != "node-1" {
+		t.Fatalf("Pod Node label was not restored: %v", deployment.Spec.Template.Labels)
 	}
+	assertExactNodePin(t, &deployment.Spec.Template.Spec, "node-1")
 	if deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
 		t.Fatalf("Deployment strategy was not restored: %#v", deployment.Spec.Strategy)
 	}

@@ -13,8 +13,6 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // Identity is the exact issuer request a delivered leaf must satisfy.
@@ -27,6 +25,9 @@ type Identity struct {
 // Validate checks the pair, the entire chain, validity, SANs and role EKU against
 // independently supplied trust. It never trusts ca.crt from the leaf Secret.
 func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time) error {
+	if err := scanCertificatePEM(certPEM, true, nil); err != nil {
+		return fmt.Errorf("certificate chain: %w", err)
+	}
 	pair, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		return fmt.Errorf("invalid certificate/key pair: %w", err)
@@ -54,9 +55,9 @@ func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time
 	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != usage || len(leaf.UnknownExtKeyUsage) != 0 {
 		return fmt.Errorf("leaf must have exactly the requested role EKU")
 	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(trustPEM) {
-		return fmt.Errorf("trust bundle contains no PEM certificates")
+	roots, trustErr := trustRoots(trustPEM)
+	if trustErr != nil {
+		return trustErr
 	}
 	intermediates := x509.NewCertPool()
 	for _, der := range pair.Certificate[1:] {
@@ -74,12 +75,17 @@ func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time
 }
 
 // Publish reads one kubelet Secret projection generation, validates it, fsyncs
-// immutable files and atomically switches current. A failed delivery leaves the
-// last generation intact. Consumers must resolve current once per pair load;
+// immutable files and atomically switches current. An error after the switch
+// means durability is unconfirmed, not that the switch was undone. Consumers
+// must resolve current once per pair load;
 // separate path lookups across a switch can otherwise observe different pairs.
 // Paths are trusted administrative inputs from the node-bound delivery Pod;
 // certificate contents cannot select paths outside its configured mounts.
 func Publish(source, destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy) (string, error) {
+	return publish(source, destination, trustFile, identity, now, policy, nil)
+}
+
+func publish(source, destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy, durable *durableCurrent) (string, error) {
 	if policy != nil && identity.Usage != "server" {
 		return "", fmt.Errorf("gateway policy can only accompany server credentials")
 	}
@@ -138,63 +144,32 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 		return "", rootErr
 	}
 	defer func() { _ = destinationRoot.Close() }()
-	lock, lockErr := destinationRoot.OpenFile(".publish-lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lock, lockErr := lockPublication(destinationRoot, os.O_CREATE|os.O_RDWR)
 	if lockErr != nil {
 		return "", lockErr
 	}
 	// Closing the descriptor releases flock on every return path.
 	defer func() { _ = lock.Close() }()
-	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return "", fmt.Errorf("credential writer is already publishing: %w", err)
-	}
 	if err := authorizePublication(destination, policy, files); err != nil {
 		return "", err
 	}
-	final := filepath.Join(destination, name)
-	_, statErr := os.Stat(final) // #nosec G703 -- The only content-derived path component is a SHA-256 hex digest.
+	previous, linkErr := destinationRoot.Readlink("current")
+	if linkErr != nil && !os.IsNotExist(linkErr) {
+		return "", linkErr
+	}
+	_, statErr := destinationRoot.Lstat(name)
 	if os.IsNotExist(statErr) {
-		temp, tempErr := os.MkdirTemp(destination, ".generation-")
-		if tempErr != nil {
-			return "", tempErr
-		}
-		defer func() { _ = os.RemoveAll(temp) }()
-		for filename, data := range files {
-			if err := writeSynced(filepath.Join(temp, filename), data); err != nil {
-				return "", err
-			}
-		}
-		if err := syncDirectory(temp); err != nil {
-			return "", err
-		}
-		if err := os.Rename(temp, final); err != nil { // #nosec G703 -- Both paths are under the trusted destination; name is a SHA-256 hex digest.
+		if err := stageGeneration(destinationRoot, name, previous, files, durable); err != nil {
 			return "", err
 		}
 	} else if statErr != nil {
 		return "", statErr
 	} else {
-		for filename, expected := range files {
-			stored, err := os.ReadFile(filepath.Join(final, filename)) // #nosec G304 G703 -- SHA-256 hex directory and fixed PEM basenames under the trusted destination.
-			if err != nil {
-				return "", err
-			}
-			if !bytes.Equal(stored, expected) {
-				return "", fmt.Errorf("stored generation is damaged: %s", filename)
-			}
+		if err := verifyGeneration(destinationRoot, name, files); err != nil {
+			return "", err
 		}
 	}
-	// A crashed writer can leave its temporary symlink, but not an incomplete
-	// published generation. One node-bound Deployment is the sole writer here.
-	link := filepath.Join(destination, ".current-next")
-	if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-		return "", err
-	}
-	if err := os.Symlink(name, link); err != nil {
-		return "", err
-	}
-	if err := os.Rename(link, filepath.Join(destination, "current")); err != nil {
-		return "", err
-	}
-	if err := syncDirectory(destination); err != nil {
+	if err := switchCurrent(destinationRoot, previous, name, durable); err != nil {
 		return "", err
 	}
 	return name, nil
@@ -204,6 +179,30 @@ func Publish(source, destination, trustFile string, identity Identity, now time.
 // As in Publish, destination and trustFile are trusted administrative paths.
 func Check(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy) error {
 	return checkInstalled(destination, trustFile, identity, now, policy, false)
+}
+
+// The writer syncs files and the generation directory before switching current.
+// A readiness probe can complete a switch's durability if the writer's final
+// sync failed. Hold the same per-role lock from before resolving current until
+// after syncing its parent, so a concurrent writer cannot change the target.
+func checkWriterReadiness(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy, exactRevision bool) error {
+	root, err := os.OpenRoot(destination)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	lock, err := lockPublication(root, os.O_RDONLY)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }()
+	if checkErr := checkInstalled(destination, trustFile, identity, now, policy, exactRevision); checkErr != nil {
+		return checkErr
+	}
+	if syncErr := syncRoot(root); syncErr != nil {
+		return fmt.Errorf("confirm credential delivery durability: %w", syncErr)
+	}
+	return nil
 }
 
 func checkInstalled(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy, exactRevision bool) error {

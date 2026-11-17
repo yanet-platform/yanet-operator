@@ -40,7 +40,7 @@ ENVTEST_K8S_VERSION = 1.35.0
 CONTAINER_TOOL ?= docker
 
 # GO_VERSION defines the Go version used in Docker containers
-GO_VERSION ?= 1.26.2
+GO_VERSION ?= 1.26.11
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 SHELL = /usr/bin/env bash -o pipefail

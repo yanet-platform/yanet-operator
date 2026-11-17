@@ -7,8 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +58,7 @@ func acknowledgePolicyCheckpoints(t *testing.T, r *YanetReconciler, y *api.Yanet
 	if y.Annotations == nil {
 		y.Annotations = map[string]string{}
 	}
-	y.Annotations[policyAckAnnotation] = string(y.UID) + "/1"
+	y.Annotations[policyAckAnnotation] = string(y.UID) + "/" + strconv.FormatUint(readPolicyState(t, r, y).Sequence, 10)
 	if err := r.Update(context.Background(), y); err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +425,7 @@ func TestManagedPolicyPauseDoesNotAllocateOrApply(t *testing.T) {
 			r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}}
 			publishCertificateConfig(t, r)
 			reconcileCertificates(t, r, y)
-			if after := readPolicyState(t, r, y); after != before {
+			if after := readPolicyState(t, r, y); !reflect.DeepEqual(after, before) {
 				t.Fatalf("paused reconcile mutated policy allocation: %+v -> %+v", before, after)
 			}
 			for i := range deployments.Items {
@@ -518,5 +521,195 @@ func TestManagedPolicyVersionsProjectedSSHBinaryData(t *testing.T) {
 	reconcileCertificates(t, r, y)
 	if readPolicyState(t, r, y).Sequence != 2 {
 		t.Fatal("equivalent ConfigMap representation restarted policy rollout")
+	}
+}
+
+func TestManagedPolicyRejectsInvalidInitialSSHBundle(t *testing.T) {
+	testCtx := context.Background()
+	r, y, _ := certificateEnvironment(t)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "initial-ssh", Namespace: y.Namespace}, Data: map[string]string{"key": ""}}
+	if err := r.Create(testCtx, cm); err != nil {
+		t.Fatal(err)
+	}
+	r.GlobalConfig.Config.Certificates.SSHTrustBundle = &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: cm.Name}, Key: "key"}
+	publishCertificateConfig(t, r)
+	_, reconcileErr := r.Reconcile(testCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
+	if reconcileErr == nil || !strings.Contains(reconcileErr.Error(), "SSH CA bundle contains no public keys") {
+		t.Fatalf("empty initial SSH bundle accepted: %v", reconcileErr)
+	}
+	if err := r.Get(testCtx, client.ObjectKeyFromObject(y), y); err != nil {
+		t.Fatal(err)
+	}
+	if y.Annotations[policyStateAnnotation] != "" {
+		t.Fatal("invalid input committed an initial policy")
+	}
+	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := ssh.NewPublicKey(&private.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm.Data["key"] = string(ssh.MarshalAuthorizedKey(public))
+	if err := r.Update(testCtx, cm); err != nil {
+		t.Fatal(err)
+	}
+	reconcileCertificates(t, r, y)
+	markCertificatesIssued(t, r)
+	reconcileCertificates(t, r, y)
+	writer := certificateWorkload(t, r, "credential-delivery")
+	fixture := newGatewayFileFixture(t, writer)
+	projection := filepath.Join(t.TempDir(), "ssh-ca.pub")
+	if err := os.WriteFile(projection, []byte(cm.Data["key"]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{"--source=" + fixture.source, "--destination=" + fixture.destination, "--trust=" + fixture.trust, "--ssh-trust=" + projection}
+	one, cancel := context.WithCancel(testCtx)
+	cancel()
+	container := writer.Spec.Template.Spec.Containers[0]
+	if err := credentials.Run(one, append(slices.Clone(container.Args[1:]), paths...)); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Run(testCtx, append(slices.Clone(container.ReadinessProbe.Exec.Command[2:]), paths...)); err != nil {
+		t.Fatalf("corrected initial writer was not exact-ready: %v", err)
+	}
+	readyCertificateDeployments(t, r)
+	reconcileCertificates(t, r, y)
+	gate := certificateWorkload(t, r, "controlplane").Spec.Template.Spec.InitContainers[0]
+	if err := credentials.Run(testCtx, append(slices.Clone(gate.Args[1:]), "--destination="+fixture.destination, "--trust="+filepath.Join(fixture.destination, "current", "ca.crt"), "--ssh-trust="+filepath.Join(fixture.destination, "current", "ssh-ca.pub"))); err != nil {
+		t.Fatalf("corrected initial gate did not validate: %v", err)
+	}
+	readyCertificateDeployments(t, r)
+	acknowledgePolicyCheckpoints(t, r, y)
+	if state := readPolicyState(t, r, y); state.Sequence != 1 || !state.Activated {
+		t.Fatalf("corrected first configuration did not complete bootstrap: %+v", state)
+	}
+}
+
+func TestManagedPolicyRemovalRequiresActivation(t *testing.T) {
+	for _, legacy := range []bool{true, false} {
+		t.Run(map[bool]string{true: "legacy", false: "pending"}[legacy], func(t *testing.T) {
+			testCtx := context.Background()
+			r, y, _ := certificateEnvironment(t)
+			startCertificateWorkloads(t, r, y)
+			readPolicyState(t, r, y)
+			before := []*appsv1.Deployment{certificateWorkload(t, r, "credential-delivery"), certificateWorkload(t, r, "controlplane")}
+			if legacy {
+				for _, d := range before {
+					for _, containers := range [][]corev1.Container{d.Spec.Template.Spec.Containers, d.Spec.Template.Spec.InitContainers} {
+						for i := range containers {
+							containers[i].Args = slices.DeleteFunc(containers[i].Args, func(arg string) bool { return strings.HasPrefix(arg, "--policy-") })
+						}
+					}
+					if err := r.Update(testCtx, d); err != nil {
+						t.Fatal(err)
+					}
+				}
+				delete(y.Annotations, policyStateAnnotation)
+			} else {
+				state := readPolicyState(t, r, y)
+				state.Activated = false
+				encoded, err := json.Marshal(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				y.Annotations[policyStateAnnotation] = string(encoded)
+			}
+			delete(y.Annotations, policyAckAnnotation)
+			if err := r.Update(testCtx, y); err != nil {
+				t.Fatal(err)
+			}
+			managed := r.GlobalConfig.Config.Certificates
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)}
+			for _, replacement := range []*api.CertificateManagementSpec{nil, managed.DeepCopy()} {
+				if replacement != nil {
+					replacement.Profiles = []api.CertificateProfile{{Name: "client", Component: "dataplane", Container: "dataplane", MountPath: "/etc/yanet2/pki/client", Usage: "client"}}
+				}
+				r.GlobalConfig.Config.Certificates = replacement
+				publishCertificateConfig(t, r)
+				if _, err := r.Reconcile(testCtx, request); err == nil || !strings.Contains(err.Error(), "removal is blocked") {
+					t.Fatalf("policy removal bypassed bridge: %v", err)
+				}
+				for _, d := range before {
+					got := &appsv1.Deployment{}
+					if err := r.Get(testCtx, client.ObjectKeyFromObject(d), got); err != nil || !reflect.DeepEqual(d.Spec, got.Spec) {
+						t.Fatalf("blocked removal changed %s: %v", d.Name, err)
+					}
+				}
+			}
+			r.GlobalConfig.Config.Certificates = managed
+			publishCertificateConfig(t, r)
+			reconcileCertificates(t, r, y)
+			readyCertificateDeployments(t, r)
+			reconcileCertificates(t, r, y)
+			readyCertificateDeployments(t, r)
+			acknowledgePolicyCheckpoints(t, r, y)
+			if !readPolicyState(t, r, y).Activated {
+				t.Fatal("restored managed gateway could not complete handoff")
+			}
+			r.GlobalConfig.Config.Certificates = nil
+			publishCertificateConfig(t, r)
+			reconcileCertificates(t, r, y)
+			if got := gatewayContainers(certificateWorkload(t, r, "controlplane")); len(got) != 0 {
+				t.Fatal("post-activation opt-out retained the gateway gate")
+			}
+		})
+	}
+}
+
+func TestManagedPolicyNodeTurnoverBeforeAck(t *testing.T) {
+	for _, replace := range []bool{false, true} {
+		t.Run(map[bool]string{true: "same-name-new-UID", false: "departure"}[replace], func(t *testing.T) {
+			testCtx := context.Background()
+			r, y, node := certificateEnvironment(t)
+			other := node.DeepCopy()
+			other.Name, other.UID, other.ResourceVersion = "remaining.example.test", "remaining-uid", ""
+			if err := r.Create(testCtx, other); err != nil {
+				t.Fatal(err)
+			}
+			rollout := func() {
+				t.Helper()
+				reconcileCertificates(t, r, y)
+				markCertificatesIssued(t, r)
+				reconcileCertificates(t, r, y)
+				readyCertificateDeployments(t, r)
+				reconcileCertificates(t, r, y)
+				readyCertificateDeployments(t, r)
+			}
+			rollout()
+			// Keep an ACK for the old inventory without letting reconcile see it
+			// until membership changes.
+			readPolicyState(t, r, y)
+			y.Annotations[policyAckAnnotation] = string(y.UID) + "/1"
+			if err := r.Update(testCtx, y); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(testCtx, node); err != nil {
+				t.Fatal(err)
+			}
+			if replace {
+				replacement := node.DeepCopy()
+				replacement.UID, replacement.ResourceVersion = "replacement-uid", ""
+				if err := r.Create(testCtx, replacement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rollout()
+			if state := readPolicyState(t, r, y); state.Sequence != 2 || state.Activated {
+				t.Fatalf("turnover reused the old attempt/ack: %+v", state)
+			}
+			r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}}
+			publishCertificateConfig(t, r)
+			if _, err := r.Reconcile(testCtx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)}); err == nil || !strings.Contains(err.Error(), "blocked until") {
+				t.Fatalf("turnover allowed new grants for a remaining scope: %v", err)
+			}
+			r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = nil
+			publishCertificateConfig(t, r)
+			acknowledgePolicyCheckpoints(t, r, y)
+			if !readPolicyState(t, r, y).Activated {
+				t.Fatal("current rollout plus refreshed ACK did not activate")
+			}
+		})
 	}
 }

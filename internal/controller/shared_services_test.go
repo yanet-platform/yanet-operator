@@ -384,7 +384,10 @@ func TestValidateExclusiveNodesPrunesDeterministicLoserWhenBothHaveWorkloads(t *
 		Spec: yanetv1alpha1.YanetSpec{NodeSelector: map[string]string{"zone": "a"}},
 	}
 	workload := func(name string, installation *yanetv1alpha1.Yanet) *appsv1.Deployment {
-		return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		return &appsv1.Deployment{Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{manifests.LabelNode: "node-a"}},
+			Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{NodeSelector: map[string]string{corev1.LabelHostname: "node-a"}}},
+		}, ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: installation.Namespace,
 			Labels: map[string]string{
@@ -410,7 +413,7 @@ func TestValidateExclusiveNodesPrunesDeterministicLoserWhenBothHaveWorkloads(t *
 	if !ok {
 		t.Fatalf("deterministic loser must receive node conflict, got %T: %v", err, err)
 	}
-	if err := r.pruneConflictingDeployments(context.Background(), other, conflict.cleanupNodeNames, silentLogger()); err != nil {
+	if err := r.pruneConflictingDeployments(context.Background(), other, conflict, silentLogger()); err != nil {
 		t.Fatalf("prune conflicting loser: %v", err)
 	}
 	if err := r.Client.Get(context.Background(), client.ObjectKeyFromObject(otherWorkload), &appsv1.Deployment{}); !apierrors.IsNotFound(err) {

@@ -69,7 +69,6 @@ type WorkloadIdentity struct {
 	Selector             *metav1.LabelSelector
 	Pod                  map[string]string
 	NodeName             string
-	NodeSelector         map[string]string
 	Strategy             appsv1.DeploymentStrategy
 	ManageNativeSidecars bool
 	NativeSidecars       []corev1.Container
@@ -99,7 +98,6 @@ func CaptureWorkloadIdentity(deployment *appsv1.Deployment) WorkloadIdentity {
 	}
 	identity.Pod = reservedLabels(deployment.Spec.Template.Labels)
 	identity.NodeName = deployment.Spec.Template.Spec.NodeName
-	identity.NodeSelector = copyMap(deployment.Spec.Template.Spec.NodeSelector)
 	identity.Strategy = *deployment.Spec.Strategy.DeepCopy()
 	identity.ManageNativeSidecars = identity.Pod[labelComponent] == string(helpers.KindDataplane)
 	if identity.ManageNativeSidecars {
@@ -130,7 +128,7 @@ func RestoreWorkloadIdentity(deployment *appsv1.Deployment, identity WorkloadIde
 	}
 	deployment.Spec.Template.Labels = mergeIdentityLabels(deployment.Spec.Template.Labels, identity.Pod)
 	deployment.Spec.Template.Spec.NodeName = identity.NodeName
-	deployment.Spec.Template.Spec.NodeSelector = copyMap(identity.NodeSelector)
+	pinPodToNode(&deployment.Spec.Template.Spec, identity.Pod[labelNode])
 	deployment.Spec.Strategy = *identity.Strategy.DeepCopy()
 	if identity.ManageNativeSidecars {
 		restoreNativeSidecars(&deployment.Spec.Template.Spec, identity.NativeSidecars)

@@ -31,6 +31,9 @@ type GatewayPolicy struct {
 	// SSHTrustHash commits a managed revision to projected bytes, or "none".
 	// Empty is supported only for legacy, unversioned exact-policy callers.
 	SSHTrustHash string
+	// bridge preserves installed authorization until checkpoint retirement.
+	// requireCurrent additionally forbids initializing a known legacy path.
+	bridge, requireCurrent bool
 }
 
 func gatewayFiles(policy *GatewayPolicy) (map[string][]byte, error) {
@@ -64,14 +67,15 @@ func gatewayFiles(policy *GatewayPolicy) (map[string][]byte, error) {
 			return nil, fmt.Errorf("projected SSH trust does not match the allocated policy SHA-256")
 		}
 	}
-	if validationErr := validateSSHTrust(data); validationErr != nil {
+	if validationErr := ValidateSSHTrust(data); validationErr != nil {
 		return nil, validationErr
 	}
 	files["ssh-ca.pub"] = data
 	return files, nil
 }
 
-func validateSSHTrust(data []byte) error {
+// ValidateSSHTrust checks the public bundle accepted by the gateway publisher.
+func ValidateSSHTrust(data []byte) error {
 	count := 0
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {

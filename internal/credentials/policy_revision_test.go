@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
 	"golang.org/x/sys/unix"
@@ -163,12 +164,80 @@ func TestMonotonicPolicyHandoff(t *testing.T) {
 	}
 }
 
+func TestRetiredLegacyRoleRebootstrapsOnlyOnEmptyPrivatePath(t *testing.T) {
+	a := newAuthority(t)
+	source, parent := t.TempDir(), t.TempDir()
+	role, archive := filepath.Join(parent, "returned-role"), filepath.Join(parent, "retired")
+	trust := filepath.Join(t.TempDir(), "ca.crt")
+	write(t, trust, a.pem)
+	cert, key := a.leaf(t, 51, func(c *x509.Certificate) { c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth} })
+	project(t, source, "issued", cert, key)
+	identity := credentials.Identity{URI: identityURI, Usage: "server"}
+	legacy := &credentials.GatewayPolicy{Accounts: []credentials.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}}}
+	active := &credentials.GatewayPolicy{Revision: &credentials.PolicyRevision{Epoch: "installation-uid", Sequence: 4}, SSHTrustHash: "none"}
+	if _, err := credentials.Publish(source, role, trust, identity, clock, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := credentials.Publish(source, role, trust, identity, clock, active); err == nil || !strings.Contains(err.Error(), "unchanged-policy bootstrap") {
+		t.Fatalf("legacy role was silently reused without an explicit retirement: %v", err)
+	}
+	// Model the operator-only step after draining all readers and writers and
+	// verifying that this role has never published a versioned generation.
+	if err := os.Rename(role, archive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := credentials.Publish(source, role, trust, identity, clock, active); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Check(role, trust, identity, clock, active); err != nil {
+		t.Fatalf("current policy did not become ready on the new path: %v", err)
+	}
+	if err := credentials.Check(role, trust, identity, clock, legacy); err == nil {
+		t.Fatal("retired authorization was picked up on the new path")
+	}
+	if err := credentials.Check(archive, trust, identity, clock, legacy); err != nil {
+		t.Fatalf("legacy files were not preserved in the private archive: %v", err)
+	}
+}
+
 func TestPolicyCLIRejectsIncompleteRevision(t *testing.T) {
-	for _, args := range [][]string{{"--policy-epoch=installation-uid"}, {"--policy-revision=1"}, {"--policy-revision=0"}, {"--exact-policy-revision"}} {
-		args = append([]string{"--uri=" + identityURI, "--usage=server", "--gateway-policy", "--check"}, args...)
-		if err := credentials.Run(context.Background(), args); err == nil {
-			t.Fatalf("accepted incomplete revision flags: %v", args)
-		}
+	now := time.Now()
+	a := newAuthorityAt(t, now, nil)
+	source, destination := t.TempDir(), t.TempDir()
+	trust := filepath.Join(t.TempDir(), "ca.crt")
+	write(t, trust, a.pem)
+	cert, key := a.leaf(t, 43, func(c *x509.Certificate) {
+		c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		c.NotBefore, c.NotAfter = now.Add(-time.Hour), now.Add(time.Hour)
+	})
+	project(t, source, "issued", cert, key)
+	identity := credentials.Identity{URI: identityURI, Usage: "server"}
+	policy := &credentials.GatewayPolicy{Revision: &credentials.PolicyRevision{Epoch: "installation-uid", Sequence: 1}, SSHTrustHash: "none"}
+	if _, err := credentials.Publish(source, destination, trust, identity, now, policy); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--uri=" + identityURI, "--usage=server", "--gateway-policy", "--check", "--destination=" + destination, "--trust=" + trust}
+	if err := credentials.Run(context.Background(), base); err != nil {
+		t.Fatalf("unversioned CLI control failed: %v", err)
+	}
+	if err := credentials.Run(context.Background(), append(base, "--policy-epoch=installation-uid", "--policy-revision=1", "--ssh-trust-sha256=none", "--exact-policy-revision")); err != nil {
+		t.Fatalf("valid exact revision CLI control failed: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"epoch only", []string{"--policy-epoch=installation-uid", "--ssh-trust-sha256=none"}, "policy epoch and positive revision are required together"},
+		{"revision only", []string{"--policy-revision=1", "--ssh-trust-sha256=none"}, "policy epoch and positive revision are required together"},
+		{"zero revision", []string{"--policy-epoch=installation-uid", "--policy-revision=0", "--ssh-trust-sha256=none"}, "policy epoch and positive revision are required together"},
+		{"exact without revision", []string{"--exact-policy-revision"}, "exact policy revision requires a versioned readiness check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := credentials.Run(context.Background(), append(base, tc.args...)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("wanted %q, got %v", tc.want, err)
+			}
+		})
 	}
 }
 

@@ -2,12 +2,18 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/credentials"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -23,8 +29,156 @@ func newCertificate() *unstructured.Unstructured {
 	return c
 }
 
+type credentialFreeze struct {
+	nodes       map[string]bool
+	deployments map[string]bool
+	configMaps  map[string]struct{}
+	secrets     map[string]bool
+}
+
+// The writer delivers multiple roles in one Pod. A gateway policy failure
+// freezes that writer, its credential consumers and their issuance, but not
+// unrelated deployments on the same node. Compare live as well as desired:
+// switching a consumer to a non-managed template must not bypass the freeze.
+func (r *YanetReconciler) planCredentialFreeze(ctx context.Context, y *api.Yanet, cfg *api.YanetConfigSpec, plans map[string]manifests.CertificatePlan, workloads map[string][]renderedWorkload, nodes []corev1.Node) (credentialFreeze, error) {
+	frozen := credentialFreeze{nodes: map[string]bool{}, deployments: map[string]bool{}, configMaps: map[string]struct{}{}, secrets: map[string]bool{}}
+	reader := r.liveReader()
+	config := &api.YanetConfig{}
+	if err := reader.Get(ctx, client.ObjectKey{Name: api.YanetConfigName}, config); err != nil {
+		return frozen, err
+	}
+	current := &api.Yanet{}
+	if err := reader.Get(ctx, client.ObjectKeyFromObject(y), current); err != nil {
+		return frozen, err
+	}
+	if config.UID == "" || config.Generation < 1 || current.UID == "" || current.UID != y.UID || current.Generation != y.Generation ||
+		!current.DeletionTimestamp.IsZero() || !apiequality.Semantic.DeepEqual(config.Spec, *cfg) || !apiequality.Semantic.DeepEqual(current.Spec, y.Spec) {
+		return frozen, fmt.Errorf("policy source changed before SSH freeze planning")
+	}
+	if cfg.Certificates == nil || cfg.Certificates.SSHTrustBundle == nil {
+		return frozen, fmt.Errorf("SSH policy failure without a configured source")
+	}
+	trust := cfg.Certificates.SSHTrustBundle
+	frozen.configMaps[trust.Name] = struct{}{}
+	cm := &corev1.ConfigMap{}
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: y.Namespace, Name: trust.Name}, cm); err == nil {
+		if value, keyErr := sshPolicySource(cm, trust.Key); keyErr == nil && credentials.ValidateSSHTrust([]byte(value)) == nil {
+			return frozen, fmt.Errorf("SSH policy is available on reread; retry full preflight")
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return frozen, fmt.Errorf("could not verify SSH policy is missing: %w", err)
+	}
+	fresh := &corev1.NodeList{}
+	if err := r.liveReader().List(ctx, fresh, client.MatchingLabels(y.Spec.NodeSelector)); err != nil {
+		return frozen, fmt.Errorf("verify current node selection: %w", err)
+	}
+	selected := make(map[string]*corev1.Node, len(nodes))
+	for i := range nodes {
+		selected[nodes[i].Name] = &nodes[i]
+	}
+	if len(fresh.Items) != len(selected) {
+		return frozen, fmt.Errorf("node selection changed during preflight")
+	}
+	for _, n := range fresh.Items {
+		prev := selected[n.Name]
+		if prev == nil || n.UID != prev.UID || !n.DeletionTimestamp.IsZero() ||
+			!apiequality.Semantic.DeepEqual(n.Labels, prev.Labels) || !apiequality.Semantic.DeepEqual(n.Status.Allocatable, prev.Status.Allocatable) {
+			return frozen, fmt.Errorf("node %s changed during preflight", n.Name)
+		}
+	}
+
+	// Include every desired name in the collision check, even if the workload
+	// is not itself bound to credentials.
+	wanted := make(map[string]string)
+	var rendered []*appsv1.Deployment
+	for node, plan := range plans {
+		if d := plan.Delivery; d != nil {
+			rendered = append(rendered, d)
+			wanted[d.Name] = node
+			frozen.nodes[node] = len(gatewayContainers(d)) > 0
+		}
+		for _, w := range workloads[node] {
+			rendered = append(rendered, w.deployment)
+			wanted[w.deployment.Name] = node
+			frozen.nodes[node] = frozen.nodes[node] || len(gatewayContainers(w.deployment)) > 0
+		}
+	}
+	var state policyState
+	if stored := current.Annotations[policyStateAnnotation]; stored != "" {
+		if err := json.Unmarshal([]byte(stored), &state); err != nil {
+			return frozen, fmt.Errorf("invalid persisted policy state: %w", err)
+		}
+		digest, err := hex.DecodeString(state.Hash)
+		if err != nil || len(digest) != sha256.Size || state.UID != string(y.UID) || state.Sequence == 0 || state.ConfigUID == "" ||
+			state.ConfigGeneration < 1 || state.YanetGeneration < 1 || state.YanetGeneration > y.Generation ||
+			(state.ConfigUID == string(config.UID) && state.ConfigGeneration > config.Generation) {
+			return frozen, fmt.Errorf("invalid or stale persisted policy state")
+		}
+	}
+	if !state.Activated {
+		if _, err := pendingBridgeScopes(ctx, reader, y, rendered, nodes, state); err != nil {
+			return frozen, err
+		}
+	}
+	live := &appsv1.DeploymentList{}
+	if err := r.liveReader().List(ctx, live, client.InNamespace(y.Namespace)); err != nil {
+		return frozen, fmt.Errorf("list live credential workloads: %w", err)
+	}
+	credentialNodes := make(map[string][]*appsv1.Deployment)
+	for i := range live.Items {
+		d := &live.Items[i]
+		node, desired := wanted[d.Name]
+		if !controlledByYanet(d, y) {
+			if desired {
+				return frozen, fmt.Errorf("deployment %s has a different controller owner", client.ObjectKeyFromObject(d))
+			}
+			continue
+		}
+		claim := deploymentClaimNode(d)
+		if claim == "" || (desired && node != claim) {
+			return frozen, fmt.Errorf("cannot establish node placement of live Deployment %s", client.ObjectKeyFromObject(d))
+		}
+		if selected[claim] == nil {
+			continue
+		}
+		// Writer recognition must not depend on its mutable metadata labels.
+		view := *d
+		view.Labels = d.Spec.Selector.MatchLabels
+		gateway := len(gatewayContainers(&view)) > 0
+		if gateway || manifests.RequiresCertificateDelivery(d) || view.Labels[manifests.LabelComponent] == "credential-delivery" {
+			credentialNodes[claim] = append(credentialNodes[claim], d)
+		}
+		frozen.nodes[claim] = frozen.nodes[claim] || gateway
+	}
+	for node, deployments := range credentialNodes {
+		if !frozen.nodes[node] {
+			continue
+		}
+		for _, d := range deployments {
+			frozen.deployments[d.Name] = true
+			collectPodConfigMapRefs(&d.Spec.Template.Spec, frozen.configMaps)
+			collectCredentialSecrets(&d.Spec.Template.Spec, frozen.secrets)
+		}
+	}
+	for node, plan := range plans {
+		if !frozen.nodes[node] {
+			continue
+		}
+		if plan.Delivery != nil {
+			frozen.deployments[plan.Delivery.Name] = true
+		}
+		for _, w := range workloads[node] {
+			if manifests.RequiresCertificateDelivery(w.deployment) || len(gatewayContainers(w.deployment)) > 0 {
+				frozen.deployments[w.deployment.Name] = true
+			}
+		}
+	}
+	return frozen, nil
+}
+
 func (r *YanetReconciler) applyCertificates(ctx context.Context, yanet *api.Yanet, plan manifests.CertificatePlan, autoSync bool) (bool, error) {
 	ready := true
+	var errs []error
 	for _, desired := range plan.Certificates {
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			existing := newCertificate()
@@ -88,10 +242,25 @@ func (r *YanetReconciler) applyCertificates(ctx context.Context, yanet *api.Yane
 			return nil
 		})
 		if err != nil {
-			return false, fmt.Errorf("reconcile Certificate %s: %w", desired.GetName(), err)
+			if errors.Is(err, errGlobalStop) || ctx.Err() != nil {
+				return false, errors.Join(append(errs, err)...)
+			}
+			errs = append(errs, fmt.Errorf("reconcile Certificate %s: %w", desired.GetName(), err))
 		}
 	}
-	return ready, nil
+	return ready && len(errs) == 0, errors.Join(errs...)
+}
+
+func setCertificateConditionsUnknown(y *api.Yanet, enabled bool, reason, message string) {
+	for _, name := range []string{"CertificatesIssued", "CredentialsDelivered"} {
+		if !enabled {
+			apimeta.RemoveStatusCondition(&y.Status.Conditions, name)
+			continue
+		}
+		apimeta.SetStatusCondition(&y.Status.Conditions, metav1.Condition{
+			Type: name, Status: metav1.ConditionUnknown, ObservedGeneration: y.Generation, Reason: reason, Message: message,
+		})
+	}
 }
 
 // cert-manager admission may serialize metav1.Duration canonically and omit

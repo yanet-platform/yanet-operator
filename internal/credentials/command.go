@@ -42,8 +42,10 @@ func Run(ctx context.Context, args []string) error {
 	trust := flags.String("trust", "/trust/ca.crt", "Independent public trust bundle")
 	uri := flags.String("uri", "", "Exact expected URI SAN")
 	usage := flags.String("usage", "client", "Expected client or server EKU")
-	check := flags.Bool("check", false, "Validate the installed generation and exit")
+	check := flags.Bool("check", false, "Validate the installed generation and exit; read-only unless --writer-readiness is set")
+	writerReadiness := flags.Bool("writer-readiness", false, "With --check, also confirm the installed generation is durable under the publication lock")
 	exactRevision := flags.Bool("exact-policy-revision", false, "Require the writer's exact managed revision for readiness")
+	deferReadiness := flags.Bool("defer-policy-readiness", false, "Keep a provisional writer unready until the original policy is verified")
 	var names dnsNames
 	flags.Var(&names, "dns", "Exact expected DNS SAN, repeatable")
 	var accounts gatewayAccounts
@@ -52,6 +54,7 @@ func Run(ctx context.Context, args []string) error {
 	revision := flags.Uint64("policy-revision", 0, "Minimum managed policy revision")
 	sshTrust := flags.String("ssh-trust", "", "OpenSSH CA public key bundle for gateway authentication")
 	sshHash := flags.String("ssh-trust-sha256", "", "Allocated SSH bundle SHA-256, or none for removed trust")
+	bridge := flags.String("policy-bridge", "", "Writer-only bootstrap mode: initial or legacy")
 	flags.Var(&accounts, "gateway-account", "Public gateway account JSON with username and permissions, repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -98,16 +101,37 @@ func Run(ctx context.Context, args []string) error {
 	if *exactRevision && (!*check || !versioned) {
 		return fmt.Errorf("exact policy revision requires a versioned readiness check")
 	}
+	if *deferReadiness {
+		if !*exactRevision {
+			return fmt.Errorf("deferred policy readiness requires an exact policy readiness check")
+		}
+		return fmt.Errorf("policy readiness deferred until legacy policy continuity is verified")
+	}
+	if *writerReadiness && !*check {
+		return fmt.Errorf("writer readiness requires --check")
+	}
+	if *bridge != "" {
+		if *check || !versioned || (*bridge != "initial" && *bridge != "legacy") {
+			return fmt.Errorf("policy bridge requires a versioned writer and initial or legacy mode")
+		}
+		policy.bridge = true
+		policy.requireCurrent = *bridge == "legacy"
+	}
 	if *check {
+		if *writerReadiness {
+			return checkWriterReadiness(*destination, *trust, identity, time.Now(), policy, *exactRevision)
+		}
 		return checkInstalled(*destination, *trust, identity, time.Now(), policy, *exactRevision)
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	lastGeneration := ""
+	var durable durableCurrent
+	defer durable.forget()
 	for {
-		generation, err := Publish(*source, *destination, *trust, identity, time.Now(), policy)
+		generation, err := publish(*source, *destination, *trust, identity, time.Now(), policy, &durable)
 		if err != nil {
-			slog.Error("credential delivery failed; keeping the previous generation", "error", err)
+			slog.Error("credential delivery failed", "error", err)
 		} else if generation != lastGeneration {
 			slog.Info("credential generation delivered", "generation", generation)
 			lastGeneration = generation

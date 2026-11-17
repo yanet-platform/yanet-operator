@@ -13,12 +13,202 @@ import (
 	"testing"
 
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
+	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	"golang.org/x/crypto/ssh"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+func TestManagedSSHBridgeRecoversWithNewNode(t *testing.T) {
+	testCtx := context.Background()
+	r, y, oldNode := certificateEnvironment(t)
+	key := func() []byte {
+		t.Helper()
+		private, keyErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if keyErr != nil {
+			t.Fatal(keyErr)
+		}
+		public, publicErr := ssh.NewPublicKey(&private.PublicKey)
+		if publicErr != nil {
+			t.Fatal(publicErr)
+		}
+		return ssh.MarshalAuthorizedKey(public)
+	}
+	oldSSH, wrongSSH := key(), key()
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "ssh-policy", Namespace: y.Namespace}, BinaryData: map[string][]byte{"ssh-ca.pub": oldSSH}}
+	if createErr := r.Create(testCtx, cm); createErr != nil {
+		t.Fatal(createErr)
+	}
+	r.GlobalConfig.Config.Certificates.SSHTrustBundle = &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: cm.Name}, Key: "ssh-ca.pub"}
+	startCertificateWorkloads(t, r, y)
+
+	legacyWriter := certificateWorkload(t, r, "credential-delivery")
+	legacyGate := certificateWorkload(t, r, "controlplane")
+	for _, d := range []*appsv1.Deployment{legacyWriter, legacyGate} {
+		for _, containers := range [][]corev1.Container{d.Spec.Template.Spec.Containers, d.Spec.Template.Spec.InitContainers} {
+			for i := range containers {
+				containers[i].Args = slices.DeleteFunc(containers[i].Args, func(arg string) bool {
+					return strings.HasPrefix(arg, "--policy-") || strings.HasPrefix(arg, "--ssh-trust-sha256=")
+				})
+			}
+		}
+		if updateErr := r.Update(testCtx, d); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		// The fake API does not advance Deployment generations on spec updates.
+		// Do not let bootstrap inherit readiness from the fixture's previous Pod.
+		d.Status = appsv1.DeploymentStatus{}
+		if statusErr := r.Status().Update(testCtx, d); statusErr != nil {
+			t.Fatal(statusErr)
+		}
+	}
+	readPolicyState(t, r, y)
+	delete(y.Annotations, policyStateAnnotation)
+	delete(y.Annotations, policyAckAnnotation)
+	if updateErr := r.Update(testCtx, y); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+
+	type localRole struct {
+		gatewayFileFixture
+		projection string
+	}
+	role := func(writer *appsv1.Deployment) localRole {
+		return localRole{newGatewayFileFixture(t, writer), filepath.Join(t.TempDir(), "ssh-ca.pub")}
+	}
+	publish := func(local localRole, writer *appsv1.Deployment, bundle []byte) string {
+		t.Helper()
+		if writeErr := os.WriteFile(local.projection, bundle, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+		args := slices.Clone(writer.Spec.Template.Spec.Containers[0].Args[1:])
+		destination := local.destination
+		for _, arg := range args {
+			if subdir, ok := strings.CutPrefix(arg, "--destination=/persist/"); ok {
+				destination = filepath.Join(destination, subdir)
+			}
+		}
+		one, cancel := context.WithCancel(testCtx)
+		cancel()
+		if runErr := credentials.Run(one, append(args, "--source="+local.source, "--destination="+destination, "--trust="+local.trust, "--ssh-trust="+local.projection)); runErr != nil {
+			t.Fatal(runErr)
+		}
+		return destination
+	}
+	assertBundle := func(destination string, want []byte) {
+		t.Helper()
+		got, readErr := os.ReadFile(filepath.Join(destination, "current", "ssh-ca.pub"))
+		if readErr != nil || !bytes.Equal(got, want) {
+			t.Fatalf("%s has the wrong durable SSH policy: %v", destination, readErr)
+		}
+	}
+	probe := func(local localRole, writer *appsv1.Deployment) error {
+		args := slices.Clone(writer.Spec.Template.Spec.Containers[0].ReadinessProbe.Exec.Command[2:])
+		return credentials.Run(testCtx, append(args, "--destination="+local.destination, "--trust="+local.trust, "--ssh-trust="+local.projection))
+	}
+	gate := func(local localRole, d *appsv1.Deployment) error {
+		args := slices.Clone(d.Spec.Template.Spec.InitContainers[0].Args[1:])
+		return credentials.Run(testCtx, append(args, "--destination="+local.destination, "--trust="+filepath.Join(local.destination, "current", "ca.crt"), "--ssh-trust="+filepath.Join(local.destination, "current", "ssh-ca.pub")))
+	}
+	deployment := func(node, component string) *appsv1.Deployment {
+		t.Helper()
+		list := &appsv1.DeploymentList{}
+		if listErr := r.List(testCtx, list, client.MatchingLabels{manifests.LabelNode: node, manifests.LabelComponent: component}); listErr != nil {
+			t.Fatal(listErr)
+		}
+		if len(list.Items) == 0 {
+			return nil
+		}
+		return &list.Items[0]
+	}
+	exactReady := func(writer *appsv1.Deployment) {
+		t.Helper()
+		writer.Status = appsv1.DeploymentStatus{ObservedGeneration: writer.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
+		if statusErr := r.Status().Update(testCtx, writer); statusErr != nil {
+			t.Fatal(statusErr)
+		}
+	}
+
+	oldRole := role(legacyWriter)
+	publish(oldRole, legacyWriter, oldSSH)
+	if gateErr := gate(oldRole, legacyGate); gateErr != nil {
+		t.Fatal(gateErr)
+	}
+	newNode := oldNode.DeepCopy()
+	newNode.Name, newNode.UID, newNode.ResourceVersion = "new.example.test", "new-node-uid", ""
+	if createErr := r.Create(testCtx, newNode); createErr != nil {
+		t.Fatal(createErr)
+	}
+	setBundle := func(bundle []byte) {
+		t.Helper()
+		cm.BinaryData["ssh-ca.pub"] = bundle
+		if updateErr := r.Update(testCtx, cm); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		reconcileCertificates(t, r, y)
+	}
+	setBundle(wrongSSH)
+	markCertificatesIssued(t, r)
+	reconcileCertificates(t, r, y)
+	oldWriter := deployment(oldNode.Name, "credential-delivery")
+	newWriter := deployment(newNode.Name, "credential-delivery")
+	newRole := role(newWriter)
+	publish(oldRole, oldWriter, wrongSSH)
+	assertBundle(oldRole.destination, oldSSH)
+	wrongPath := publish(newRole, newWriter, wrongSSH)
+	assertBundle(wrongPath, wrongSSH)
+	wrongProbe := probe(newRole, newWriter)
+	acknowledgePolicyCheckpoints(t, r, y)
+	if readPolicyState(t, r, y).Activated {
+		t.Fatal("unready wrong policy was activated")
+	}
+	setBundle(oldSSH)
+	oldWriter = deployment(oldNode.Name, "credential-delivery")
+	newWriter = deployment(newNode.Name, "credential-delivery")
+	publish(oldRole, oldWriter, oldSSH)
+	assertBundle(publish(newRole, newWriter, oldSSH), oldSSH) // Red: the initial writer pins B here.
+	if wrongProbe == nil {
+		t.Fatal("unverified B could release a fresh gateway")
+	}
+	if newGateway := deployment(newNode.Name, "controlplane"); newGateway != nil {
+		t.Fatal("fresh gateway was applied before legacy continuity")
+	}
+	if _, statErr := os.Stat(filepath.Join(newRole.destination, "current")); !os.IsNotExist(statErr) {
+		t.Fatalf("unverified bytes reached the runtime path: %v", statErr)
+	}
+	if probeErr := probe(oldRole, oldWriter); probeErr != nil {
+		t.Fatal(probeErr)
+	}
+	exactReady(oldWriter)
+	reconcileCertificates(t, r, y)
+	newWriter = deployment(newNode.Name, "credential-delivery")
+	assertBundle(publish(newRole, newWriter, oldSSH), oldSSH)
+	if probeErr := probe(newRole, newWriter); probeErr != nil {
+		t.Fatalf("new writer did not pass exact readiness after continuity: %v", probeErr)
+	}
+	exactReady(newWriter)
+	reconcileCertificates(t, r, y)
+	for node, local := range map[string]localRole{oldNode.Name: oldRole, newNode.Name: newRole} {
+		d := deployment(node, "controlplane")
+		if d == nil {
+			t.Fatalf("missing corrected gateway for %s", node)
+		}
+		if gateErr := gate(local, d); gateErr != nil {
+			t.Fatalf("corrected gate for %s: %v", node, gateErr)
+		}
+		exactReady(d)
+	}
+	reconcileCertificates(t, r, y)
+	if state := readPolicyState(t, r, y); state.Sequence != 2 || state.Activated {
+		t.Fatalf("old ACK activated the corrected attempt: %+v", state)
+	}
+	acknowledgePolicyCheckpoints(t, r, y)
+	if !readPolicyState(t, r, y).Activated {
+		t.Fatal("corrected rollout and current ACK did not activate")
+	}
+}
 
 func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 	for _, mode := range []string{"fresh", "unchanged-bootstrap"} {
@@ -68,7 +258,6 @@ func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 				if updateErr := r.Update(context.Background(), y); updateErr != nil {
 					t.Fatal(updateErr)
 				}
-				reconcileCertificates(t, r, y)
 			}
 			first := certificateWorkload(t, r, "credential-delivery")
 			oldConsumer := certificateWorkload(t, r, "controlplane")
@@ -110,6 +299,35 @@ func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 				if _, statErr := os.Stat(filepath.Join(fixture.destination, "current", "policy.json")); !os.IsNotExist(statErr) {
 					t.Fatalf("legacy publication unexpectedly has managed metadata: %v", statErr)
 				}
+				legacyGate := append(slices.Clone(oldConsumer.Spec.Template.Spec.InitContainers[0].Args[1:]), "--destination="+fixture.destination, "--trust="+filepath.Join(fixture.destination, "current", "ca.crt"), "--ssh-trust="+filepath.Join(fixture.destination, "current", "ssh-ca.pub"))
+				cm.BinaryData["ssh-ca.pub"] = newSSH
+				if err := r.Update(context.Background(), cm); err != nil {
+					t.Fatal(err)
+				}
+				reconcileCertificates(t, r, y)
+				wrong := certificateWorkload(t, r, "credential-delivery")
+				writeProjection(newSSH)
+				publish(wrong)
+				if err := ready(wrong); err == nil {
+					t.Fatal("wrong initial SSH policy passed exact readiness on legacy storage")
+				}
+				if got, err := os.ReadFile(filepath.Join(fixture.destination, "current", "ssh-ca.pub")); err != nil || !bytes.Equal(got, oldSSH) {
+					t.Fatalf("wrong attempt changed durable SSH trust: %v", err)
+				}
+				cm.BinaryData["ssh-ca.pub"] = oldSSH
+				if err := r.Update(context.Background(), cm); err != nil {
+					t.Fatal(err)
+				}
+				writeProjection(oldSSH)
+				reconcileCertificates(t, r, y)
+				first = certificateWorkload(t, r, "credential-delivery")
+				if readPolicyState(t, r, y).Sequence != 2 {
+					t.Fatal("corrected SSH policy did not get a new provisional revision")
+				}
+				publish(first)
+				if err := credentials.Run(context.Background(), legacyGate); err != nil {
+					t.Fatalf("legacy checkpoint lost the unchanged policy during bridge: %v", err)
+				}
 			}
 			publish(first)
 			if readyErr := ready(first); readyErr != nil {
@@ -118,9 +336,15 @@ func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 			if mode == "unchanged-bootstrap" {
 				readyCertificateDeployments(t, r)
 				reconcileCertificates(t, r, y)
+				oldConsumer = certificateWorkload(t, r, "controlplane")
+				gate := append(slices.Clone(oldConsumer.Spec.Template.Spec.InitContainers[0].Args[1:]), "--destination="+fixture.destination, "--trust="+filepath.Join(fixture.destination, "current", "ca.crt"), "--ssh-trust="+filepath.Join(fixture.destination, "current", "ssh-ca.pub"))
+				if err := credentials.Run(context.Background(), gate); err != nil {
+					t.Fatalf("corrected bridge gate did not validate: %v", err)
+				}
 				readyCertificateDeployments(t, r)
 				acknowledgePolicyCheckpoints(t, r, y)
 			}
+			bridgeRevision := readPolicyState(t, r, y).Sequence
 			initial, linkErr := os.Readlink(filepath.Join(fixture.destination, "current"))
 			if linkErr != nil {
 				t.Fatal(linkErr)
@@ -144,7 +368,7 @@ func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 					t.Fatal("stale projection occupied the new revision")
 				}
 				reconcileCertificates(t, r, y)
-				if readPolicyState(t, r, y).Sequence != 2 {
+				if readPolicyState(t, r, y).Sequence != bridgeRevision+1 {
 					t.Fatal("projection retry churned the allocated revision")
 				}
 			}
@@ -170,7 +394,7 @@ func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 			}
 			readyCertificateDeployments(t, r)
 			reconcileCertificates(t, r, y)
-			if readPolicyState(t, r, y).Sequence != 2 {
+			if readPolicyState(t, r, y).Sequence != bridgeRevision+1 {
 				t.Fatal("successful delivery allocated an unnecessary revision")
 			}
 			// Revocation removes the input projection from the rendered writer. A retained
@@ -190,7 +414,7 @@ func TestManagedSSHProjectionIsBoundToAllocatedRevision(t *testing.T) {
 			if gateErr := credentials.Run(context.Background(), oldArgs); gateErr != nil {
 				t.Fatalf("old checkpoint could not recover after SSH removal: %v", gateErr)
 			}
-			if readPolicyState(t, r, y).Sequence != 3 {
+			if readPolicyState(t, r, y).Sequence != bridgeRevision+2 {
 				t.Fatal("SSH removal did not allocate exactly one new revision")
 			}
 			// Even with its own historical bytes available again, a stale writer cannot

@@ -138,10 +138,11 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 	}
 	pod := corev1.PodSpec{
 		AutomountServiceAccountToken: helpers.PtrFalse(),
-		NodeSelector:                 nodeSelector(ctx), Tolerations: runtimeTolerations(), ImagePullSecrets: ctx.PullSecrets,
+		Tolerations:                  runtimeTolerations(), ImagePullSecrets: ctx.PullSecrets,
 		SecurityContext: &corev1.PodSecurityContext{RunAsUser: ptr[int64](0), RunAsGroup: ptr[int64](0), RunAsNonRoot: helpers.PtrFalse(), SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}},
 		Volumes:         []corev1.Volume{{Name: "trust", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: ctx.Certificates.TrustBundle.LocalObjectReference, Items: []corev1.KeyToPath{{Key: ctx.Certificates.TrustBundle.Key, Path: "ca.crt"}}}}}},
 	}
+	pinPodToNode(&pod, ctx.NodeName)
 	if trust := ctx.Certificates.SSHTrustBundle; trust != nil {
 		pod.Volumes = append(pod.Volumes, corev1.Volume{Name: "ssh-trust", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: trust.LocalObjectReference, Items: []corev1.KeyToPath{{Key: trust.Key, Path: "ssh-ca.pub"}},
@@ -204,7 +205,7 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			Command: []string{"/manager"}, Args: args,
 			SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: helpers.PtrFalse(), ReadOnlyRootFilesystem: helpers.PtrTrue(), Capabilities: &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}},
 			VolumeMounts:    []corev1.VolumeMount{{Name: secretVolume, MountPath: "/source", ReadOnly: true}, {Name: "trust", MountPath: "/trust", ReadOnly: true}, {Name: outputVolume, MountPath: "/persist"}},
-			ReadinessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: append(append([]string{"/manager"}, args...), "--check")}}, PeriodSeconds: 10, TimeoutSeconds: 5},
+			ReadinessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: append(append([]string{"/manager"}, args...), "--check", "--writer-readiness")}}, PeriodSeconds: 10, TimeoutSeconds: 5},
 		})
 		if p.Usage == "server" && ctx.Certificates.SSHTrustBundle != nil {
 			exporter := &pod.Containers[len(pod.Containers)-1]

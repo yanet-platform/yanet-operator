@@ -99,7 +99,7 @@ func readPolicy(generation string) (*installedPolicy, error) {
 		if sshErr != nil {
 			return nil, sshErr
 		}
-		if validationErr := validateSSHTrust(sshData); validationErr != nil {
+		if validationErr := ValidateSSHTrust(sshData); validationErr != nil {
 			return nil, validationErr
 		}
 		hash := sha256.Sum256(sshData)
@@ -136,8 +136,17 @@ func compareRevision(installed, requested PolicyRevision) error {
 }
 
 func authorizePublication(destination string, policy *GatewayPolicy, files map[string][]byte) error {
-	generation, resolveErr := filepath.EvalSymlinks(filepath.Join(destination, "current"))
+	current := filepath.Join(destination, "current")
+	generation, resolveErr := filepath.EvalSymlinks(current)
 	if os.IsNotExist(resolveErr) {
+		// A broken current link is not an empty destination or permission to
+		// reinitialize its ordering fence.
+		if _, err := os.Lstat(current); !os.IsNotExist(err) {
+			return resolveErr
+		}
+		if policy != nil && policy.requireCurrent {
+			return fmt.Errorf("legacy policy bridge requires a durable current generation")
+		}
 		return nil
 	}
 	if resolveErr != nil {
@@ -173,22 +182,10 @@ func authorizePublication(destination string, policy *GatewayPolicy, files map[s
 		if policy == nil || policy.Revision == nil {
 			return nil
 		}
-		if policy.Revision.Sequence != 1 {
+		if policy.Revision.Sequence != 1 && !policy.bridge {
 			return fmt.Errorf("missing installed policy revision; unchanged-policy bootstrap is required")
 		}
-		for _, name := range []string{"identities.yaml", "permissions.yaml", "ssh-ca.pub"} {
-			stored, readErr := root.ReadFile(name)
-			if os.IsNotExist(readErr) && files[name] == nil {
-				continue
-			}
-			if readErr != nil {
-				return readErr
-			}
-			if !bytes.Equal(stored, files[name]) {
-				return fmt.Errorf("bootstrap cannot change installed policy: %s", name)
-			}
-		}
-		return nil
+		return unchangedAuthorization(root, files)
 	}
 	if metadataErr != nil {
 		return metadataErr
@@ -213,6 +210,25 @@ func authorizePublication(destination string, policy *GatewayPolicy, files map[s
 		}
 		if !bytes.Equal(stored, files[policyFilename]) {
 			return fmt.Errorf("equal policy revisions have different authorization sets")
+		}
+	}
+	if policy.bridge {
+		return unchangedAuthorization(root, files)
+	}
+	return nil
+}
+
+func unchangedAuthorization(root *os.Root, files map[string][]byte) error {
+	for _, name := range []string{"identities.yaml", "permissions.yaml", "ssh-ca.pub"} {
+		stored, err := root.ReadFile(name)
+		if os.IsNotExist(err) && files[name] == nil {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(stored, files[name]) {
+			return fmt.Errorf("bootstrap cannot change installed policy: %s", name)
 		}
 	}
 	return nil

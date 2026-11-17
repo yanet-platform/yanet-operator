@@ -369,7 +369,8 @@ func TestRuntimeNetwork_UnmanagedGatewayPreservesNativeEndpoints(t *testing.T) {
 				env  []corev1.EnvVar
 			}{
 				{name: "opaque host file owns TLS or plaintext"},
-				{name: "explicit plaintext", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: "[::]:9080"}}},
+				{name: "Service-port plaintext migration", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: "[::]:8080"}}},
+				{name: "explicit non-Service plaintext", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: "[::]:9080"}}},
 				{name: "explicit TLS", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", Value: "[::]:8443"}}},
 				{name: "valueFrom endpoints", env: []corev1.EnvVar{
 					{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "native"}, Key: "plaintext"}}},

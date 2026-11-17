@@ -99,8 +99,10 @@ key_pairs:
       key_file: /etc/yanet2/pki/route/current/tls.key
 ```
 
-Place that value under the component's supported `gateways[].tls`,
-`instances[].gateway_tls` or `route_operator_tls` field, as appropriate. Metrics
+For public native YANET2, use `gateways[].tls` for gateway-list clients or
+`route_operator_tls` for BIRD route imports. `instances[].gateway_tls` is not a
+public native field in v0.5.0 or the checked main revision; use that form only for
+a private client whose pinned schema explicitly supports it. Metrics
 and readiness clients also need their own role-specific native TLS values. A
 gateway server needs native TLS listener and authentication settings, including
 the generated identity and permission files described below.
@@ -143,7 +145,12 @@ identity, DNS SANs, EKU, chain and validity, fsyncs complete files/directories a
 atomically switches `current`. Directories are `0700`, files `0600`. Invalid or
 unavailable replacement material leaves the previous generation intact. Its
 readiness probe validates the installed generation, including the delivered
-`ca.crt` and its agreement with the independent trust projection.
+`ca.crt` and its agreement with the independent trust projection. The exporter
+uses `--check --writer-readiness`: it holds the role's publication lock while
+validating `current` and then syncing its parent directory. A busy lock or a
+failed sync returns not ready. A later probe can confirm the same switch after
+storage recovers; it does not roll back `current`. Consumer startup uses plain
+`--check`, which validates the pinned generation without locking or syncing.
 Creating or updating the delivery template waits for Certificate Ready at its
 current generation; an existing writer keeps its previous template and policy
 while issuance is pending. First consumer creation and spec updates also wait for
@@ -189,6 +196,18 @@ load/connection fingerprints and remaining expiry require runtime monitoring.
   Secret's `ca.crt`. An outage budget is limited by leaf/chain/trust validity;
   expired credentials never trigger automatic authentication disablement.
 
+**Repairing a damaged generation.** If only `tls.key` is missing or unusable,
+reissue the leaf through the configured issuer and wait for the writer to
+publish a new generation at the authorized policy revision. Do not replace a
+key inside an immutable directory: policy-only generations may share its inode.
+If policy metadata or authorization files are damaged, stop automatic recovery
+for that role. Quiesce its writers, readers and restoreable checkpoints, retain
+the affected directory, and establish the last authorized epoch, minimum revision
+and policy independently from the controller and trusted backup. Do not delete
+`current` or revert to an older set of permissions to make a gate pass. If the
+revision floor cannot be established, fence and retire the old installation and
+its checkpoints before provisioning a new installation UID and private path.
+
 Before issuance, restrict issuer/approver policy to the permitted URI namespace,
 node/installation/role, DNS SANs, EKU, lifetime and `isCA: false`. Disable any
 built-in auto-approver that would bypass that policy. The operator's ability to
@@ -222,22 +241,33 @@ protocol; it does not retroactively change v3.1.0 images.
 
 The required per-installation transition is:
 
-1. Keep the existing gateway accounts, permissions, effective role membership and
-   SSH CA policy unchanged. Upgrade the operator and exporter image. An attempted
-   policy change against existing legacy workloads is rejected before application.
-   The new writer may add revision-1 metadata to the **same** authorization set;
-   the old exact-policy gate still accepts those files during this bridge.
+1. Keep the existing gateway accounts, permissions, role paths and SSH CA policy
+   unchanged. Upgrade the operator and the digest-pinned exporter image together.
+   The controller compares the account inputs per live role. A known legacy role's
+   writer requires a valid legacy-format `current` or a valid managed publication
+   on its private path and checks the installed authorization files and SSH CA
+   bytes before advancing. A v3.1.0 checkpoint is supported only during this
+   unchanged-policy bridge. If its durable SSH CA is A but the ConfigMap points to
+   B, restore the original **exact bytes** of A in the ConfigMap. Do not restore
+   filesystem snapshots. Invalid public SSH bundles are rejected before allocation.
+   A valid but nonmatching bundle can leave a provisional attempt unready; fixing
+   it allocates a new attempt rather than reusing a possibly published revision.
 2. Wait for all desired revision-aware delivery/gateway Deployments to finish
    updating and become ready at their current generation. Refresh every supported
    offline runtime checkpoint, including every NUMA gateway, with the new gates
    and images. Kubernetes readiness cannot establish that external checkpoints
    were refreshed.
-3. Only after refreshing those checkpoints, acknowledge that installation UID:
+3. Only after refreshing those checkpoints, acknowledge that installation UID
+   and the exact attempt that was verified and checkpointed (normally `1`). Read
+   `sequence` from `policy-state` when starting verification, and confirm the UID,
+   sequence and membership have not changed before submitting the acknowledgment.
+   If they changed, repeat the verification and refresh for the new attempt.
 
    ```bash
    INSTALLATION_UID=$(kubectl -n <namespace> get yanet <name> -o jsonpath='{.metadata.uid}')
+   BRIDGE_REVISION=<sequence-from-the-verified-policy-state>
    kubectl -n <namespace> annotate yanet <name> \
-     yanet.yanet-platform.io/policy-checkpoints-ready="${INSTALLATION_UID}/1" --overwrite
+     yanet.yanet-platform.io/policy-checkpoints-ready="${INSTALLATION_UID}/${BRIDGE_REVISION}" --overwrite
    ```
 
    The controller additionally verifies ownership, desired revision-aware
@@ -252,9 +282,67 @@ The required per-installation transition is:
    recreated Yanet has a new UID, private credential directory and acknowledgment
    scope; copying another installation's state/acknowledgment is rejected.
 
-Policy advancement is blocked until this transition completes, including when
-the new configuration arrives before the rollout/checkpoint acknowledgment.
-Drain and deletion retain their independent lifecycle.
+**Node turnover before acknowledgment.** If a Node leaves the selection or is
+replaced (even under the same name), keep the original authorization on every
+remaining role. The replacement UID uses its own private path; never copy the
+departed Node's `current` or checkpoint onto it. The controller checks the live
+Node selection, allocates a new attempt for changed policy membership and does
+not accept the prior attempt's acknowledgment. When a new scope joins a legacy
+bridge, its writer can stage candidate bytes in a separate private preview
+directory; the gateway cannot start from them. Only exact readiness of the
+original writers verifies the SSH bundle for publication to new runtime paths.
+A different bundle remains provisional until the checkpoint bridge completes.
+The preview does not replace `current`; do not copy preview generations into a
+runtime path or save them as checkpoints. Drain or fence the departed
+host, retire its external checkpoints and writers, and refresh checkpoints for
+the new inventory before acknowledging the new attempt. No activation takes
+place with an empty policy inventory. If all original scopes are permanently
+lost or no intact original authorization can be bridged, fence the missing
+hosts and their credentials through the installation's normal decommissioning
+process, retire every external checkpoint (including removable/backed-up copies
+that could be restored as runtime state), and drain/delete the old Yanet. Then
+bootstrap a new Yanet UID with fresh issuance and checkpoints. Do not edit
+`policy-state` or assert a rollout for missing hardware.
+
+**Removing management is not revocation.** Removing the last managed gateway
+profile or all of `spec.certificates` is blocked while the unchanged-policy bridge
+is pending, including removal directly from v3.1.0. Restore the managed profile
+to finish the bridge first. After activation, retire checkpoints that depend on
+the managed configuration before opting out; Kubernetes pruning does not erase
+HostPath generations or invalidate previously issued credentials. Drain and
+deletion retain their independent lifecycle and are not substitutes for
+external checkpoint retirement or credential revocation.
+
+**Returning legacy-only roles after activation.** A role omitted from the
+bridge can have a leftover v3.1.0 `current`. A later revision refuses to adopt
+that path automatically. Before reselecting the Node:
+
+1. Verify `policy-state.activated` is `true` for this Yanet UID, and that this
+   exact role path was omitted from the bridge and **never** held a managed
+   publication. Inspect the entire role directory (not only `current`) for
+   versioned generations; if there is managed metadata, damaged or ambiguous
+   history, or no trustworthy provenance, stop. This procedure cannot replace a
+   published revision floor.
+2. Keep the Node unselected. Stop and verify exit of all writers and readers of
+   that path, including offline/static workloads. Explicitly retire its old
+   checkpoints and prevent them from being restored. Verify the UID/profile path
+   against the rendered HostPath, not just the Node name.
+3. On that host, as its administrator, archive the whole role directory by
+   renaming it on the same filesystem into a private sibling directory not
+   mounted by any workload. Create a new empty private directory at the original
+   role pathname. For example, for a verified `ROLE` path under
+   `<hostPath>/<namespace>/<yanet>/<yanet-uid>/<node-uid>/<profile>`:
+
+   ```bash
+   ARCHIVE=$(mktemp -d "$(dirname -- "$ROLE")/.retired-legacy.XXXXXXXX") &&
+     mv -T -- "$ROLE" "$ARCHIVE/role" &&
+     install -d -m 0700 -- "$ROLE"
+   ```
+
+   Do not delete generations, copy from the archive, or point `current` at it.
+4. Reselect the Node. Wait for current issuance, exact writer readiness and the
+   revision-aware gateway rollout to succeed before saving fresh checkpoints.
+   Only the current managed policy is published to the new directory.
 
 Within the supported protocol, policy revisions are monotonically allocated on
 the Yanet with optimistic concurrency. The installation UID is the epoch.
@@ -339,9 +427,126 @@ principal. These are gateway accounts, not operating-system or Kubernetes roles.
 They also apply to another enabled authenticator that resolves the same login.
 Removing or changing a human account changes the durable policy and gateway Pod
 template. Existing file identity/permission providers load at startup; refreshing
-CA trust does not reload account permissions. Disabling SSH authentication must
-also remove its native authenticator configuration. Revocation/KRL distribution
-is a separate native-authenticator policy, not implied by CA delivery.
+CA trust does not reload account permissions. Revocation/KRL distribution is a
+separate native-authenticator policy, not implied by CA delivery.
+
+**Changing grants and SSH trust:** an atomic `current` switch does not make
+native authorization reads atomic. The startup gate validates its own snapshot;
+it does not pass that snapshot to the gateway. A still-running gateway can reload
+new SSH CA trust while keeping old grants and use that combination for **new
+RPCs**, not just established calls. Confirm the new grants are safe with the
+existing CA, then deliver the grants with that CA first. Keep that policy stable
+while replacing or restarting every affected
+gateway, verifying the effective grants, draining old processes and refreshing
+supported checkpoints. Only then deliver the new CA trust. Do not use
+`CredentialsDelivered` as evidence that native authorization has changed.
+
+**Rolling back a trust and grants change:** treat rollback as a new policy
+revision. Keep the running revision-aware manager and gates. Verify that the
+previous CA is still authorized for use; never re-enable a retired or compromised
+CA to restore service. For a rollback from new trust/new grants to approved
+old trust/old grants:
+
+1. Establish a restrictive set of grants safe under **both** trust sets. Deploy
+   it with the current CA, drain or replace every affected gateway, and verify
+   effective allow/deny behavior and refreshed checkpoints on every active NUMA
+   instance before switching trust. If no safe intermediate policy exists,
+   drain and fence all affected gateways and their offline restarts first.
+2. Restore the approved CA with those restrictive grants. Verify native trust
+   reload or replace the processes, drain old connections, and verify access
+   through the Service. Refresh each supported checkpoint at this intermediate
+   policy. Verify cold start, permitted and denied RPCs, and the target CA for
+   each affected node/NUMA configuration before restoring target grants. Retire
+   checkpoints that still load the superseded CA. A ConfigMap update does not
+   establish that any running or recoverable gateway has reloaded trust.
+3. Only then publish the approved target grants as a new revision, complete the
+   gateway rollout and refresh supported checkpoints. For a fenced rollback,
+   stage and qualify the complete target configuration before reopening traffic.
+   Never restore a historical `current` symlink, policy-state annotation or
+   obsolete checkpoint to change permissions.
+
+**Disabling SSH authentication** is a separate staged native configuration change:
+
+1. Keep `sshTrustBundle` and the public CA available. Prepare the native config
+   without the `sshcert` authenticator, retaining X.509 and its intended auth mode
+   and permissions. Qualify the updated config with the matched runtime.
+2. Roll out or restart all affected gateways with that config and verify X.509
+   access and the absence of SSH authentication. Replace supported recovery
+   checkpoints with ones that use the updated native config and qualify cold
+   start. Retire checkpoints that can still start with the old native config.
+3. Only then remove `sshTrustBundle` and any obsolete SSH-only grants through
+   the supported policy update path. Verify delivery and restart with the new
+   config. Do not restore an SSH-enabled config without matching CA material.
+
+A revision-aware grant gate can accept a newer policy without `ssh-ca.pub`, but
+does not disable `sshcert` in the native process. A checkpoint that still uses
+the old config can pass that gate and then fail gateway startup, including for
+X.509 clients, when the configured SSH CA file is absent. Do not treat auth
+mechanism addition or removal as a checkpoint-compatible grant update. Rotation
+of a nonempty CA bundle with unchanged authenticator configuration is separate.
+
+### Gateway listener preflight for upgrades from v3.1.0
+
+1. Before rollout, inventory the effective listener for **every active node and
+   NUMA instance**: selected native file and image, final palette/Patch env,
+   transport, and Service target. Without a managed controlplane server profile,
+   the old automatic plaintext bind is no longer injected. If both the native
+   gRPC section and an explicit legacy endpoint are absent, the public native
+   default is `[::1]:8080`; the Service targets the Pod IP on port 8080, not loopback.
+2. For a **plaintext-only** gateway using that Service, prepare an explicit
+   `[::]:8080` in the native file (preferred), or set
+   `YANET_GATEWAY_SERVER_GRPC_ENDPOINT=[::]:8080` in the applicable palette patch.
+   Native env overrides the file; resolve conflicts before rollout. For **external
+   TLS-only**, configure the TLS endpoint on the Service target and leave
+   `grpc.endpoint` absent or empty. Remove any explicit nonempty plaintext env
+   override for that gateway. If using a separate external TLS port, verify its
+   routing explicitly; do not fill the Service port with plaintext as a workaround.
+3. In an isolated environment with the matched image, load the prepared file and
+   complete rendered env. Verify the chosen transport using a read-only RPC to
+   the Pod IP and through the Service, for each topology and address family in use.
+   For TLS, verify the expected CA and server name (using the proper name when
+   dialing the Pod IP) and confirm no extra plaintext gRPC listener. Block rollout
+   if any active instance's effective bind, transport or client access is unverified.
+   Roll out gradually with a tested, transport-preserving rollback configuration.
+
+A direct downgrade to the v3.1.0 renderer is **not** a safe rollback for an
+external TLS-only HostPath gateway on port 8080: that renderer injects a second,
+plaintext bind on the same port. Keep the transport-preserving renderer when
+rolling back application configuration or policy. If a manager downgrade is
+unavoidable, drain the affected gateways and prevent offline restart; first
+qualify the complete old-manager, gate-image and native-config combination,
+including a cold start and the TLS-only Service path. Do not use a pre-protocol
+gate to read an activated policy history. If no compatible combination is
+qualified, keep the affected scope drained rather than opening plaintext.
+
+Plaintext-only listener fragment (merge into the existing per-instance file):
+
+```yaml
+gateway:
+  server:
+    grpc:
+      endpoint: '[::]:8080'
+```
+
+Externally provisioned TLS-only listener fragment (paths only):
+
+```yaml
+gateway:
+  server:
+    grpc:
+      tls:
+        endpoint: '[::]:8080'
+        key_pairs:
+          - type: file
+            config:
+              cert_file: /etc/yanet2/external-tls/tls.crt
+              key_file: /etc/yanet2/external-tls/tls.key
+```
+
+Keep HTTP bind in the file when needed (`gateway.server.http.endpoint` for a
+plaintext HTTP listener). Do not use `YANET_GATEWAY_SERVER_HTTP_ENDPOINT`:
+the loader rejects the ambiguity with the deprecated HTTP key. These listener
+fragments do not configure authentication or change the HTTP transport.
 
 For a managed controlplane server profile the reserved gRPC port is assigned to
 `gateway.server.grpc.tls.endpoint` and the plaintext gRPC listener is disabled.
@@ -349,14 +554,24 @@ Without that profile, the native host file or explicit palette environment owns
 both listener endpoints; configure the selected transport on `[::]:8080`. External
 TLS does not require a managed certificate profile, and no plaintext listener is
 injected merely because that profile is absent.
-The host file must configure native TLS key pairs, authentication and the HTTP
-listener. Clients must explicitly configure their supported `gateway_tls` or
-`gateways[].tls` fields and bounded reconnect behavior. Callback listeners need
+The host file must configure native TLS key pairs, authentication and any HTTP
+listener. Clients must explicitly configure their supported TLS fields listed
+under [Native application configuration](#native-application-configuration) and
+bounded reconnect behavior. Callback listeners need
 their own transport/access boundary; mounting certificates does not secure them.
 With a managed BIRD adapter client profile, its route-import endpoint targets
 the first active node-local controlplane gateway rather than the plaintext route
 callback Service. Configure `route_operator_tls` in its host file accordingly.
 
-Do not add anonymous registration to bypass missing credentials. Verify transport
-boundaries, reload/reconnect, issuer failure and API-unavailable cold start on
-the matched runtime images before a production rollout.
+Do not add anonymous registration to bypass missing credentials. Before rollout:
+
+- Record matched runtime image digests and effective settings by role and NUMA.
+  In isolation, verify native config loading, permitted and denied RPCs,
+  reload/reconnect, and API-unavailable checkpoint cold start with valid and
+  expired material. Independently verify the deployed ACL adapter's provenance,
+  freshness and last-confirmed policy.
+- Verify the deployed cert-manager version and controllers report `Ready=True`
+  with `observedGeneration` matching the Certificate generation after initial
+  issuance and spec changes; test issuer failure and recovery. Separately verify
+  requester and approver RBAC and the issuer's trust-domain, URI, SAN and EKU
+  restrictions. Certificate readiness is not proof of those restrictions.

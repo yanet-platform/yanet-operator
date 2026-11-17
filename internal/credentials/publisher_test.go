@@ -34,12 +34,23 @@ type authority struct {
 
 func newAuthority(t *testing.T) authority {
 	t.Helper()
+	return newAuthorityAt(t, clock, nil)
+}
+
+func newAuthorityAt(t *testing.T, now time.Time, issuer *authority) authority {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	certificate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test CA"}, NotBefore: clock.Add(-time.Hour), NotAfter: clock.Add(365 * 24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
-	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
+	certificate := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test CA"}, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(365 * 24 * time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	if issuer == nil {
+		issuer = &authority{certificate: certificate, key: key}
+	} else {
+		certificate.SerialNumber = big.NewInt(2)
+		certificate.Subject.CommonName = "Test intermediate CA"
+	}
+	der, err := x509.CreateCertificate(rand.Reader, certificate, issuer.certificate, &key.PublicKey, issuer.key)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -44,11 +44,10 @@ func RenderDeployments(ctx BuildContext, component *helpers.ResolvedComponent, r
 	if component.IsColocated() {
 		return nil, nil
 	}
-	// Node names are DNS subdomains, but exact node labels and the hostname
-	// selector must also fit Kubernetes label values. Reject unsupported names
-	// before generating any resources rather than changing the scheduling pin.
+	// Node names are DNS subdomains, but the exact ownership label can only
+	// store a Kubernetes label value. Keep existing selectors/ownership intact.
 	if problems := k8svalidation.IsValidLabelValue(ctx.NodeName); len(problems) > 0 {
-		return nil, fmt.Errorf("unsupported Node name %q: cannot represent exact node labels and hostname selector: %v", ctx.NodeName, problems)
+		return nil, fmt.Errorf("unsupported Node name %q: cannot store the exact name in %s; select Nodes with names of at most 63 characters: %v", ctx.NodeName, LabelNode, problems)
 	}
 	deployments, err := BuildDeployments(ctx, component)
 	if err != nil {
@@ -232,10 +231,15 @@ func ValidateComposedPod(deployment *appsv1.Deployment) error {
 			if problems := k8svalidation.IsDNS1123Label(container.Name); len(problems) > 0 {
 				return fmt.Errorf("invalid container name %q", container.Name)
 			}
+			mountPaths := make(map[string]struct{}, len(container.VolumeMounts))
 			for _, mount := range container.VolumeMounts {
 				if !volumes[mount.Name] {
 					return fmt.Errorf("container %q references missing volume %q", container.Name, mount.Name)
 				}
+				if _, duplicate := mountPaths[mount.MountPath]; duplicate {
+					return fmt.Errorf("container %q has duplicate volumeMount mountPath %q", container.Name, mount.MountPath)
+				}
+				mountPaths[mount.MountPath] = struct{}{}
 			}
 			for _, device := range container.VolumeDevices {
 				if !volumes[device.Name] {

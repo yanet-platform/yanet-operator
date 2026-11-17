@@ -81,6 +81,19 @@ One installation may own a node. The incumbent workload owner wins; before any
 workload exists, the oldest CR wins, with namespace/name as a stable tie-breaker.
 A deleting installation retains its claim until cleanup finishes.
 
+During a handoff, changing a Deployment's node pin does not move its existing
+Pods. The controller checks the owning Deployment, ReplicaSets and Pods, including
+terminating bound Pods and old ReplicaSets that could still start a Pod on the
+target. A legacy hostname shared by two Nodes can therefore delay handoff even
+when neither has a pending Pod. Possible placement alone does not authorize
+deleting a workload on the other Node.
+
+For a planned transfer, keep selection and hostname labels stable while draining
+the old installation. Verify its Deployments and ReplicaSets have observed zero
+replicas, its Pods have terminated, and its offline workloads cannot restart on
+the target. Then give the new installation exclusive selection. The controller's
+API reads do not lock out scheduler activity or concurrent label changes.
+
 Owner references include the API kind/group, controller bit and UID. Matching
 labels or a reused name do not authorize adoption/deletion. Finalizer cleanup
 requests foreground Deployment deletion and waits for its completion before
@@ -168,6 +181,10 @@ explicit listener environment in this mode. Its HTTP listener must be configured
 in the host file on `[::]:8081`: `YANET_GATEWAY_SERVER_HTTP_ENDPOINT` is ambiguous
 between `gateway.server.http.endpoint` and deprecated `gateway.server.http_endpoint`
 and the runtime loader rejects it. The operator does not inject that variable.
+Without a native gRPC section or an explicit legacy endpoint, the public runtime
+defaults to `[::1]:8080`, which does not serve the Service's Pod IP target.
+The [v3.1.0 upgrade preflight](MANAGED_CERTIFICATES.md#gateway-listener-preflight-for-upgrades-from-v310)
+is mandatory before rolling out this ownership change.
 With a managed controlplane server certificate profile, the same reserved gRPC
 port is assigned through `YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT` and the plaintext
 gRPC endpoint is cleared. Native key-pair/authentication configuration stays in

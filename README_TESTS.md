@@ -20,7 +20,7 @@ See [Go Test Comments](https://go.dev/wiki/TestComments) and [AGENTS.md](AGENTS.
 ## Run through Make + Docker
 
 Do not run `go test`, `go build` or `go vet` directly on the host. Make targets
-use the pinned Go 1.26.2 image and install the required envtest assets.
+use the pinned Go 1.26.11 image and install the required envtest assets.
 
 ```bash
 make generate manifests helm-crds

@@ -73,9 +73,24 @@ func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
 				t.Fatalf("publisher gained another role's source: %+v", container)
 			}
 		}
-		if container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil || !strings.HasSuffix(strings.Join(container.ReadinessProbe.Exec.Command, " "), " --check") {
-			t.Fatalf("publisher lost fail-closed installed credential readiness: %+v", container)
+		if container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil || !strings.HasSuffix(strings.Join(container.ReadinessProbe.Exec.Command, " "), " --check --writer-readiness") {
+			t.Fatalf("publisher lost durable installed credential readiness: %+v", container)
 		}
+	}
+	gates := 0
+	for _, workload := range workloads {
+		for _, gate := range workload.Spec.Template.Spec.InitContainers {
+			if gate.Name != "yanet-credential-gateway-check" {
+				continue
+			}
+			gates++
+			if !strings.HasSuffix(strings.Join(gate.Args, " "), " --check --ssh-trust=/persist/current/ssh-ca.pub") {
+				t.Fatalf("startup gate no longer uses the read-only check: %+v", gate)
+			}
+		}
+	}
+	if gates == 0 {
+		t.Fatal("missing gateway startup gate")
 	}
 }
 
@@ -149,9 +164,10 @@ func TestRenderDeploymentsRejectsUnsupportedNodeLabel(t *testing.T) {
 				if err != nil || len(workloads) != 1 {
 					t.Fatalf("supported boundary Node failed: %v", err)
 				}
-				if workloads[0].Labels[LabelNode] != node || workloads[0].Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] != node {
-					t.Fatal("supported Node lost its exact label or scheduling pin")
+				if workloads[0].Labels[LabelNode] != node {
+					t.Fatal("supported Node lost its exact ownership label")
 				}
+				assertExactNodePin(t, &workloads[0].Spec.Template.Spec, node)
 			})
 		}
 	}
