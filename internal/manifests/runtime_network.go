@@ -80,19 +80,21 @@ func configureRuntimeContainer(deployment *appsv1.Deployment, ctx BuildContext, 
 	var variables []corev1.EnvVar
 	switch component.Kind {
 	case helpers.KindControlplane:
-		// Native gRPC sections ignore the deprecated server.endpoint key.
+		// The opaque host config owns native listener transport and endpoints
+		// unless a managed server profile explicitly reserves the TLS port.
+		// Absence of managed credentials does not imply plaintext: externally
+		// provisioned TLS may already bind the reserved gRPC port.
 		// HTTP binding stays in the file: its native and deprecated endpoint
 		// paths fold onto the same xcfg environment variable and are rejected.
-		variables = []corev1.EnvVar{
-			{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: bind(grpcPort)},
-		}
 		if ctx.Certificates != nil {
 			for _, profile := range ctx.Certificates.Profiles {
 				if profile.Component == "controlplane" && profile.Container == "controlplane" && profile.Usage == "server" {
 					// Keep the reserved Service port on the native TLS listener. A
 					// parallel plaintext bind would conflict with that same port.
-					variables[0].Value = ""
-					variables = append(variables, corev1.EnvVar{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", Value: bind(grpcPort)})
+					variables = []corev1.EnvVar{
+						{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: ""},
+						{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", Value: bind(grpcPort)},
+					}
 					break
 				}
 			}
