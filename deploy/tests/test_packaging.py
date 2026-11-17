@@ -39,6 +39,46 @@ def pod(docs):
     return one(docs, "Deployment")["spec"]["template"]["spec"]
 
 
+def bound_rules(docs, account, namespace):
+    """Resolve chart RBAC bindings for a Pod's actual service-account identity."""
+    identity = f"system:serviceaccount:{namespace}:{account}"
+    groups = {"system:serviceaccounts", f"system:serviceaccounts:{namespace}", "system:authenticated"}
+    rules = []
+    for binding in docs:
+        if binding["kind"] not in ("RoleBinding", "ClusterRoleBinding"):
+            continue
+        binding_namespace = binding["metadata"].get("namespace", namespace)
+        matches = any(
+            (subject["kind"] == "ServiceAccount" and subject["name"] == account
+             and subject.get("namespace", binding_namespace) == namespace)
+            or (subject["kind"] == "User" and subject["name"] == identity)
+            or (subject["kind"] == "Group" and subject["name"] in groups)
+            for subject in binding.get("subjects", [])
+        )
+        if not matches:
+            continue
+        reference = binding["roleRef"]
+        roles = [
+            doc for doc in docs
+            if doc["kind"] == reference["kind"] and doc["metadata"]["name"] == reference["name"]
+            and (doc["kind"] == "ClusterRole"
+                 or doc["metadata"].get("namespace", namespace) == binding_namespace)
+        ]
+        assert len(roles) == 1, f"unresolved role reference: {reference}"
+        rules.extend(roles[0].get("rules", []))
+    return rules
+
+
+def secret_rules(rules):
+    return [
+        rule for rule in rules
+        if {"", "*"}.intersection(rule.get("apiGroups", []))
+        and any(resource in ("secrets", "*") or resource.startswith("secrets/")
+                for resource in rule.get("resources", []))
+        and rule.get("verbs")
+    ]
+
+
 class PackagingTest(unittest.TestCase):
     def test_gateway_ssh_trust_and_human_accounts(self):
         values = {
@@ -158,6 +198,63 @@ class PackagingTest(unittest.TestCase):
                 for binding in docs:
                     if binding["kind"] in ("RoleBinding", "ClusterRoleBinding") and "certgen" not in binding["metadata"]["name"]:
                         self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": expected, "namespace": "custom-system"}])
+
+    def test_manager_secret_permissions_are_isolated_from_certgen(self):
+        for provider, webhook_values in [
+            ("disabled", ["webhook.enabled=false"]),
+            ("certgen", []),
+            ("cert-manager", ["webhook.certManager.enabled=true"]),
+        ]:
+            for account_values in [
+                [],
+                ["serviceAccount.name=custom"],
+                ["serviceAccount.name=existing", "serviceAccount.create=false"],
+                ["serviceAccount.name=", "serviceAccount.create=true"],
+                ["serviceAccount.name=", "serviceAccount.create=false"],
+            ]:
+                for managed in (False, True):
+                    with self.subTest(provider=provider, account=account_values, managed=managed):
+                        docs = chart(*webhook_values, *account_values,
+                                     f"manageCertificates={str(managed).lower()}")
+                        namespace = one(docs, "Deployment")["metadata"]["namespace"]
+                        account = pod(docs)["serviceAccountName"]
+                        rules = bound_rules(docs, account, namespace)
+                        self.assertTrue(any("leases" in rule.get("resources", []) for rule in rules))
+                        self.assertEqual(secret_rules(rules), [], f"manager {account} can access Secrets")
+
+                        jobs = [doc for doc in docs if doc["kind"] == "Job"]
+                        if provider != "certgen":
+                            self.assertEqual(jobs, [])
+                            continue
+                        self.assertEqual(len(jobs), 2)
+                        secret_name = next(volume["secret"]["secretName"]
+                                           for volume in pod(docs)["volumes"] if "secret" in volume)
+                        commands = set()
+                        for job in jobs:
+                            job_namespace = job["metadata"]["namespace"]
+                            workload = job["spec"]["template"]["spec"]
+                            certgen_account = workload["serviceAccountName"]
+                            self.assertNotEqual(certgen_account, account)
+                            self.assertEqual(job_namespace, namespace)
+                            self.assertTrue(any(doc["kind"] == "ServiceAccount"
+                                                and doc["metadata"]["name"] == certgen_account
+                                                and doc["metadata"]["namespace"] == namespace
+                                                for doc in docs))
+                            access = secret_rules(bound_rules(docs, certgen_account, namespace))
+                            self.assertEqual(len(access), 1)
+                            self.assertEqual(access[0]["apiGroups"], [""])
+                            self.assertEqual(access[0]["resources"], ["secrets"])
+                            self.assertEqual(set(access[0]["verbs"]), {"get", "create", "patch", "update"})
+                            self.assertTrue(not access[0].get("resourceNames")
+                                            or secret_name in access[0]["resourceNames"])
+                            args = workload["containers"][0]["args"]
+                            commands.add(args[0])
+                            self.assertIn(f"--namespace={namespace}", args)
+                            self.assertIn(f"--secret-name={secret_name}", args)
+                            phase = "pre" if args[0] == "create" else "post"
+                            self.assertEqual(set(job["metadata"]["annotations"]["helm.sh/hook"].split(",")),
+                                             {f"{phase}-install", f"{phase}-upgrade"})
+                        self.assertEqual(commands, {"create", "patch"})
 
     def test_custom_port(self):
         docs = chart("webhook.port=10443")
