@@ -43,11 +43,15 @@ func Run(ctx context.Context, args []string) error {
 	uri := flags.String("uri", "", "Exact expected URI SAN")
 	usage := flags.String("usage", "client", "Expected client or server EKU")
 	check := flags.Bool("check", false, "Validate the installed generation and exit")
+	exactRevision := flags.Bool("exact-policy-revision", false, "Require the writer's exact managed revision for readiness")
 	var names dnsNames
 	flags.Var(&names, "dns", "Exact expected DNS SAN, repeatable")
 	var accounts gatewayAccounts
 	gatewayPolicy := flags.Bool("gateway-policy", false, "Deliver gateway identity and permission files, including an empty policy")
+	epoch := flags.String("policy-epoch", "", "Installation UID for monotonic managed policy")
+	revision := flags.Uint64("policy-revision", 0, "Minimum managed policy revision")
 	sshTrust := flags.String("ssh-trust", "", "OpenSSH CA public key bundle for gateway authentication")
+	sshHash := flags.String("ssh-trust-sha256", "", "Allocated SSH bundle SHA-256, or none for removed trust")
 	flags.Var(&accounts, "gateway-account", "Public gateway account JSON with username and permissions, repeatable")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -69,8 +73,33 @@ func Run(ctx context.Context, args []string) error {
 	if *gatewayPolicy || accounts != nil || *sshTrust != "" {
 		policy = &GatewayPolicy{Accounts: accounts, SSHTrustFile: *sshTrust}
 	}
+	versioned := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "policy-epoch" || f.Name == "policy-revision" {
+			versioned = true
+		}
+	})
+	if versioned {
+		if policy == nil {
+			return fmt.Errorf("policy revision requires gateway policy")
+		}
+		policy.Revision = &PolicyRevision{Epoch: *epoch, Sequence: *revision}
+		policy.SSHTrustHash = *sshHash
+		if policy.SSHTrustHash == "" {
+			return fmt.Errorf("managed policy requires --ssh-trust-sha256")
+		}
+		if err := validateRevision(policy.Revision); err != nil {
+			return err
+		}
+	}
+	if !versioned && *sshHash != "" {
+		return fmt.Errorf("SSH trust commitment requires a versioned policy")
+	}
+	if *exactRevision && (!*check || !versioned) {
+		return fmt.Errorf("exact policy revision requires a versioned readiness check")
+	}
 	if *check {
-		return Check(*destination, *trust, identity, time.Now(), policy)
+		return checkInstalled(*destination, *trust, identity, time.Now(), policy, *exactRevision)
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

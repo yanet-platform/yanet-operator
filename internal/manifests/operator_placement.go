@@ -44,6 +44,12 @@ func RenderDeployments(ctx BuildContext, component *helpers.ResolvedComponent, r
 	if component.IsColocated() {
 		return nil, nil
 	}
+	// Node names are DNS subdomains, but exact node labels and the hostname
+	// selector must also fit Kubernetes label values. Reject unsupported names
+	// before generating any resources rather than changing the scheduling pin.
+	if problems := k8svalidation.IsValidLabelValue(ctx.NodeName); len(problems) > 0 {
+		return nil, fmt.Errorf("unsupported Node name %q: cannot represent exact node labels and hostname selector: %v", ctx.NodeName, problems)
+	}
 	deployments, err := BuildDeployments(ctx, component)
 	if err != nil {
 		return nil, err

@@ -22,6 +22,8 @@ before replacing an existing installation; no compatibility conversion is provid
 - Ownership-aware cleanup and guarded role/network transitions.
 - Opt-in cert-manager issuance with role-scoped persistent credential delivery;
   see [managed certificates](MANAGED_CERTIFICATES.md) for prerequisites and limits.
+  Upgrades from published v3.1.0 require the guide's unchanged-policy gate rollout
+  and explicit checkpoint acknowledgment before authorization policy can change.
 
 ## Installation
 
@@ -115,6 +117,9 @@ spec:
 the palette freezes reconciliation, including finalizer cleanup, without draining Pods.
 Each node has one installation owner; an existing workload owner takes precedence
 over a new overlapping selector.
+Node names must fit Kubernetes label values (at most 63 characters), since workload
+labels and the exact hostname selector contain the node name. Unsupported names
+fail resource preflight before workloads or certificates are written.
 
 ## Runtime contract
 
@@ -129,9 +134,13 @@ environment after patches. Inline ConfigMap data stays opaque and receives no
 automatic environment. Optional `config.mountPath` selects the container directory
 (default `/etc/yanet2`); inline data is mounted as `<mountPath>/config`.
 Only `{numa}` in controlplane arguments is substituted; all other arguments are literal.
-Controlplane configs use the native `gateway.server.grpc` section. Configure their
-HTTP bind in the file on `[::]:8081`; the corresponding environment variable is
-ambiguous with the deprecated HTTP key and is not injected.
+Controlplane configs use the native `gateway.server.grpc` section. Without a managed
+controlplane server certificate profile, configure either `grpc.endpoint` or
+`grpc.tls.endpoint` on `[::]:8080` in the host file or explicit palette environment.
+The operator preserves that transport choice and does not infer plaintext from
+the absence of managed certificates. Configure the HTTP bind in the file on
+`[::]:8081`; the corresponding environment variable is ambiguous with the
+deprecated HTTP key and is not injected.
 
 Gateway endpoints use standard `xcfg.WithEnv()` variables
 `YANET_GATEWAYS_<index>_ENDPOINT`. Host configs already define the correct active

@@ -123,12 +123,17 @@ The root exporter drops capabilities and uses a read-only root filesystem.
 Persistent files are root-owned; consumers currently need UID 0 to read them.
 The delivery Deployment uses `Recreate`, preventing overlapping writers during
 policy changes.
+Leaf Secret projections are optional at the Pod-volume boundary so a missing
+role's Secret does not prevent other exporters from starting. Each exporter still
+validates its own material before publication and stays unready without a valid
+installed generation. Independent public trust ConfigMaps remain required.
 
 The filesystem layout is:
 
 ```text
 <hostPath>/<namespace>/<Yanet name>/<Yanet UID>/<Node UID>/<profile>/
   <generation digest>/{tls.crt,tls.key,ca.crt}
+  <server generation digest>/{identities.yaml,permissions.yaml,policy.json}
   current -> <generation digest>
 ```
 
@@ -137,10 +142,14 @@ The exporter pins one kubelet `..data` generation, validates key/cert match,
 identity, DNS SANs, EKU, chain and validity, fsyncs complete files/directories and
 atomically switches `current`. Directories are `0700`, files `0600`. Invalid or
 unavailable replacement material leaves the previous generation intact. Its
-readiness probe validates the installed generation, not just Secret existence.
-First consumer creation and spec updates wait for both Certificate Ready at its
-current generation and a current, ready delivery Deployment. Explicit drain and
-cleanup do not wait. Existing consumers are preserved during an issuance outage.
+readiness probe validates the installed generation, including the delivered
+`ca.crt` and its agreement with the independent trust projection.
+Creating or updating the delivery template waits for Certificate Ready at its
+current generation; an existing writer keeps its previous template and policy
+while issuance is pending. First consumer creation and spec updates also wait for
+a current, ready delivery Deployment. Explicit drain and cleanup do not wait for
+issuance. Certificate errors do not prevent scaling an existing owned delivery
+Deployment to zero. Existing consumers are preserved during an issuance outage.
 
 `autoSync: false` does not create/update/delete Certificates or delivery workloads;
 `stop: true` also freezes status/finalizer writes. cert-manager continues renewing
@@ -203,6 +212,96 @@ a new durable generation and change the gateway Pod template; a read-only
 It uses only cached public trust and the role directory, so the gate also works
 without the API. Normal leaf rotation does not change the Pod template.
 
+### Policy handoff and upgrade from v3.1.0
+
+v3.1.0 was published on 2026-11-17. Its exact-policy startup gates are not
+forward-compatible with a different account policy. Upgrading only the manager
+does not change the digest-pinned gate images or saved checkpoints. This change
+requires an operator and `certificates.exporterImage` containing the revision-aware
+protocol; it does not retroactively change v3.1.0 images.
+
+The required per-installation transition is:
+
+1. Keep the existing gateway accounts, permissions, effective role membership and
+   SSH CA policy unchanged. Upgrade the operator and exporter image. An attempted
+   policy change against existing legacy workloads is rejected before application.
+   The new writer may add revision-1 metadata to the **same** authorization set;
+   the old exact-policy gate still accepts those files during this bridge.
+2. Wait for all desired revision-aware delivery/gateway Deployments to finish
+   updating and become ready at their current generation. Refresh every supported
+   offline runtime checkpoint, including every NUMA gateway, with the new gates
+   and images. Kubernetes readiness cannot establish that external checkpoints
+   were refreshed.
+3. Only after refreshing those checkpoints, acknowledge that installation UID:
+
+   ```bash
+   INSTALLATION_UID=$(kubectl -n <namespace> get yanet <name> -o jsonpath='{.metadata.uid}')
+   kubectl -n <namespace> annotate yanet <name> \
+     yanet.yanet-platform.io/policy-checkpoints-ready="${INSTALLATION_UID}/1" --overwrite
+   ```
+
+   The controller additionally verifies ownership, desired revision-aware
+   templates and current-generation readiness. An early acknowledgment cannot
+   bypass that observation. Inspect the controller-owned
+   `yanet.yanet-platform.io/policy-state` annotation: `activated` must be `true`
+   before changing policy. Do not edit, delete or restore an older policy-state
+   annotation. Fresh installations use the same ready/checkpoint acknowledgment
+   path before their first policy change; they have no legacy bridge to perform.
+4. After activation, pre-protocol checkpoints are **not supported**. Retire them
+   rather than restoring old grants to make their exact-policy gates pass. A
+   recreated Yanet has a new UID, private credential directory and acknowledgment
+   scope; copying another installation's state/acknowledgment is rejected.
+
+Policy advancement is blocked until this transition completes, including when
+the new configuration arrives before the rollout/checkpoint acknowledgment.
+Drain and deletion retain their independent lifecycle.
+
+Within the supported protocol, policy revisions are monotonically allocated on
+the Yanet with optimistic concurrency. The installation UID is the epoch.
+Authoritative config/Yanet UID, generation and spec reads fence stale or
+incomparable sources, including config recreation; resourceVersions are never
+interpreted as numbers. A→B→A→B has four distinct revisions. Leaf/issuer renewal
+alone does not allocate a new policy revision or restart gateways.
+
+The allocator also commits to the exact SSH ConfigMap bytes through
+`--ssh-trust-sha256` on writers, readiness checks and gateway gates (`none` when
+SSH trust is absent). A lagging kubelet projection cannot occupy the new revision:
+delivery stays unready and retains the previous generation until the expected
+bytes arrive, then retries the same allocated revision. A retained older gate
+validates the installed newer policy's SSH commitment rather than requiring its
+historical CA. External referenced SSH ConfigMap create/update/delete events
+enqueue installations in that ConfigMap's namespace; unrelated ConfigMaps do not
+trigger an installation inventory.
+
+`policy.json`, authorization files, optional SSH trust and PEMs are published in
+one immutable generation. A gateway gate accepts only its own epoch and at least
+its requested revision. At an equal revision the policy must match exactly; at a
+newer revision it validates and loads the **current** policy, not its historical
+grants. Retained older supported templates therefore recover after a writer
+advances, even if delivery status stalls or the consumer Update is forbidden.
+New templates cannot start on an older publication. Removed accounts/SSH trust
+never fall back to historical files. Exporter readiness requires its exact
+desired revision, rather than adopting another publication as successful delivery.
+This compatibility concerns authorization changes within the same role's URI,
+DNS SAN and EKU identity. It does not relax those checks: replacing an installation
+or Node UID, or changing the role/trust-domain/SAN contract, requires its own
+consumer/checkpoint identity migration and remains fail closed.
+
+Writers serialize their check-and-switch with a local nonblocking lock and reject
+older revisions, conflicting equal revisions, epoch mismatches and damaged
+installed policy metadata. The lock is released on failed writes; a failed switch
+does not select an incomplete generation. These are trusted administrative paths,
+not a defense against a root administrator replacing the complete credential
+directory and its history. Restoring arbitrary historical filesystem snapshots
+or editing controller-owned revision state is not a supported rollback.
+Unversioned CLI/API callers retain exact-policy checking and cannot overwrite a
+versioned publication.
+
+The native gateway still reads authorization at startup. This protocol prevents
+revoked grants from returning on **restart**; it does not immediately revoke an
+already-running process's established RPCs. Apply the documented native reload,
+restart and connection-draining policy separately.
+
 ### Human SSH certificate authentication
 
 `certificates.sshTrustBundle` optionally references a non-optional ConfigMap key
@@ -246,6 +345,10 @@ is a separate native-authenticator policy, not implied by CA delivery.
 
 For a managed controlplane server profile the reserved gRPC port is assigned to
 `gateway.server.grpc.tls.endpoint` and the plaintext gRPC listener is disabled.
+Without that profile, the native host file or explicit palette environment owns
+both listener endpoints; configure the selected transport on `[::]:8080`. External
+TLS does not require a managed certificate profile, and no plaintext listener is
+injected merely because that profile is absent.
 The host file must configure native TLS key pairs, authentication and the HTTP
 listener. Clients must explicitly configure their supported `gateway_tls` or
 `gateways[].tls` fields and bounded reconnect behavior. Callback listeners need

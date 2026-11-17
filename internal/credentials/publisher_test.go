@@ -203,6 +203,95 @@ func TestServerSANAndTrustOverlap(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresDeliveredTrustOverlap(t *testing.T) {
+	a, b := newAuthority(t), newAuthority(t)
+	source, destination := t.TempDir(), t.TempDir()
+	trust := filepath.Join(t.TempDir(), "ca.crt")
+	persistedTrust := filepath.Join(destination, "current", "ca.crt")
+	identity := credentials.Identity{URI: identityURI, Usage: "client"}
+	cert, key := a.leaf(t, 21, nil)
+	write(t, trust, a.pem)
+	project(t, source, "first", cert, key)
+	first, err := credentials.Publish(source, destination, trust, identity, clock, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlap := append(bytes.Clone(a.pem), b.pem...)
+	write(t, trust, overlap)
+	if checkErr := credentials.Check(destination, trust, identity, clock, nil); checkErr == nil {
+		t.Error("readiness accepted X.509 trust overlap that was not delivered")
+	}
+	if checkErr := credentials.Check(destination, persistedTrust, identity, clock, nil); checkErr != nil {
+		t.Fatalf("last-good offline trust must remain usable: %v", checkErr)
+	}
+	// A failed delivery can keep the overlap pending indefinitely.
+	project(t, source, "invalid", cert, []byte("invalid private key"))
+	if _, publishErr := credentials.Publish(source, destination, trust, identity, clock, nil); publishErr == nil {
+		t.Fatal("invalid replacement accepted")
+	}
+	current, err := os.Readlink(filepath.Join(destination, "current"))
+	if err != nil || current != first {
+		t.Fatalf("failed delivery changed current: %s %v", current, err)
+	}
+	if checkErr := credentials.Check(destination, trust, identity, clock, nil); checkErr == nil {
+		t.Error("failed delivery became ready without installing overlap trust")
+	}
+	project(t, source, "valid", cert, key)
+	second, err := credentials.Publish(source, destination, trust, identity, clock, nil)
+	if err != nil || second == first {
+		t.Fatalf("trust-only update did not replace generation: %s %v", second, err)
+	}
+	stored, err := os.ReadFile(persistedTrust)
+	if err != nil || !bytes.Equal(stored, overlap) {
+		t.Fatalf("overlap trust was not delivered exactly: %q %v", stored, err)
+	}
+	if err := credentials.Check(destination, trust, identity, clock, nil); err != nil {
+		t.Fatalf("delivered overlap is not ready: %v", err)
+	}
+	if err := os.RemoveAll(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(trust); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Check(destination, persistedTrust, identity, clock, nil); err != nil {
+		t.Fatalf("offline overlap requires neither source nor external trust: %v", err)
+	}
+}
+
+func TestCheckRejectsDamagedInstalledTrust(t *testing.T) {
+	for _, damage := range []string{"corrupt", "missing", "unrelated issuer"} {
+		t.Run(damage, func(t *testing.T) {
+			a := newAuthority(t)
+			source, destination := t.TempDir(), t.TempDir()
+			trust := filepath.Join(t.TempDir(), "ca.crt")
+			identity := credentials.Identity{URI: identityURI, Usage: "client"}
+			cert, key := a.leaf(t, 22, nil)
+			write(t, trust, a.pem)
+			project(t, source, "first", cert, key)
+			if _, err := credentials.Publish(source, destination, trust, identity, clock, nil); err != nil {
+				t.Fatal(err)
+			}
+			persistedTrust := filepath.Join(destination, "current", "ca.crt")
+			switch damage {
+			case "corrupt":
+				write(t, persistedTrust, []byte("invalid certificate"))
+			case "missing":
+				if err := os.Remove(persistedTrust); err != nil {
+					t.Fatal(err)
+				}
+			case "unrelated issuer":
+				write(t, persistedTrust, newAuthority(t).pem)
+			}
+			for _, checkTrust := range []string{trust, persistedTrust} {
+				if err := credentials.Check(destination, checkTrust, identity, clock, nil); err == nil {
+					t.Errorf("%s installed trust passed Check with %s", damage, checkTrust)
+				}
+			}
+		})
+	}
+}
+
 // A policy-only update must create a new durable generation, and a gateway
 // startup check must reject old, missing or damaged account files without API access.
 func TestPublishGatewayAccountsAndOfflinePolicyGate(t *testing.T) {

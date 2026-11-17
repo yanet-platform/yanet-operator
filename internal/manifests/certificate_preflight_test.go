@@ -1,0 +1,158 @@
+package manifests
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+
+	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
+)
+
+func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
+	ctx := certificateBuildContext()
+	ctx.Certificates.SSHTrustBundle = &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "ssh-trust"}, Key: "ca.pub"}
+	ctx.Certificates.Profiles = append(ctx.Certificates.Profiles, api.CertificateProfile{Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/pki", Usage: "client"})
+	var workloads []*appsv1.Deployment
+	for _, component := range []*helpers.ResolvedComponent{
+		{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true},
+		{Kind: helpers.KindOperator, Name: "acl", Enabled: true, Containers: []helpers.ResolvedContainer{{Name: "acl"}}},
+	} {
+		rendered, err := RenderDeployments(ctx, component, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		workloads = append(workloads, rendered...)
+	}
+	plan := BuildCertificatePlan(ctx, workloads, true)
+	// Inspect the serialized API contract: an unissued role must not prevent the
+	// kubelet starting the independent publisher for an already-issued role.
+	encoded, err := json.Marshal(plan.Delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delivery appsv1.Deployment
+	if err := json.Unmarshal(encoded, &delivery); err != nil {
+		t.Fatal(err)
+	}
+	if delivery.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatal("delivery must retain its sole-writer strategy")
+	}
+	pod := delivery.Spec.Template.Spec
+	secrets, trust := 0, 0
+	for _, volume := range pod.Volumes {
+		if source := volume.Secret; source != nil {
+			secrets++
+			if source.Optional == nil || !*source.Optional {
+				t.Errorf("missing leaf source %s blocks every role publisher", volume.Name)
+			}
+			if source.DefaultMode == nil || *source.DefaultMode != 0o400 || !reflect.DeepEqual(source.Items, []corev1.KeyToPath{{Key: "tls.crt", Path: "tls.crt"}, {Key: "tls.key", Path: "tls.key"}}) {
+				t.Fatalf("leaf projection changed its restricted contract: %+v", source)
+			}
+		}
+		if source := volume.ConfigMap; source != nil {
+			trust++
+			if source.Optional != nil && *source.Optional {
+				t.Fatalf("public trust became optional: %+v", volume)
+			}
+		}
+	}
+	if secrets != 2 || trust != 2 || len(pod.Containers) != 2 {
+		t.Fatalf("lost independent roles or required trust: %+v", pod)
+	}
+	for _, container := range pod.Containers {
+		for _, mount := range container.VolumeMounts {
+			if strings.HasPrefix(mount.Name, "source-") && (mount.Name != "source-"+container.Name || !mount.ReadOnly || mount.MountPath != "/source") {
+				t.Fatalf("publisher gained another role's source: %+v", container)
+			}
+		}
+		if container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil || !strings.HasSuffix(strings.Join(container.ReadinessProbe.Exec.Command, " "), " --check") {
+			t.Fatalf("publisher lost fail-closed installed credential readiness: %+v", container)
+		}
+	}
+}
+
+func TestCertificateReservedGateNamesFailRendering(t *testing.T) {
+	for _, field := range []string{"containers", "initContainers"} {
+		t.Run(field, func(t *testing.T) {
+			ctx := certificateBuildContext()
+			patch := api.NamedPatch{Name: "collision"}
+			patch.Patch.Raw = []byte(fmt.Sprintf(`{"spec":{"template":{"spec":{%q:[{"name":"yanet-credential-gateway-check","image":"example.test/setup:v1"}]}}}}`, field))
+			config := &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName}, Spec: api.YanetConfigSpec{
+				Components: api.ComponentsSpec{
+					Controlplane: api.ControlplaneSpec{Image: api.ImageRef{Name: "example.test/controlplane"}},
+					Dataplane:    api.DataplaneSpec{Image: api.ImageRef{Name: "example.test/dataplane"}},
+				},
+				Patches: []api.NamedPatch{patch},
+				BoxTypes: []api.BoxType{{Name: "firewall", Components: api.BoxComponents{
+					Controlplane: &api.BoxComponent{Patches: []string{patch.Name}},
+					Dataplane:    &api.BoxDataplane{},
+				}}},
+			}}
+			if _, err := (&api.YanetConfigCustomValidator{}).ValidateCreate(context.Background(), config); err != nil {
+				t.Fatalf("fixture must be an admission-accepted patch: %v", err)
+			}
+			component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Patches: []string{patch.Name}}
+			workloads, err := RenderDeployments(ctx, component, NewPatchRegistry([]api.NamedPatch{patch}))
+			if err == nil || !strings.Contains(err.Error(), "startup gate") || workloads != nil {
+				t.Fatalf("reserved %s gate must fail preflight, got workloads=%v err=%v", field, workloads, err)
+			}
+		})
+	}
+}
+
+func TestCertificateGatePreservesNativeSidecar(t *testing.T) {
+	ctx := certificateBuildContext()
+	ctx.Certificates.Profiles[0].Component = "worker"
+	ctx.Certificates.Profiles[0].Container = "worker"
+	config, component := manifestPlacementConfig(t)
+	workloads, err := RenderDeployments(ctx, component, NewPatchRegistry(config.Patches))
+	if err != nil {
+		t.Fatal(err)
+	}
+	BuildCertificatePlan(ctx, workloads, true)
+	if err := ValidateComposedPod(workloads[0]); err != nil {
+		t.Fatal(err)
+	}
+	containers := workloads[0].Spec.Template.Spec.InitContainers
+	if len(containers) != 4 || containers[0].Name != "yanet-credential-gateway-check" || containers[0].RestartPolicy != nil || containers[2].Name != scopedOperatorName("worker", "worker") || containers[2].RestartPolicy == nil || *containers[2].RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Fatalf("startup gate changed native sidecar composition: %+v", containers)
+	}
+}
+
+func TestRenderDeploymentsRejectsUnsupportedNodeLabel(t *testing.T) {
+	for _, node := range []string{strings.Repeat("a", 63), strings.Repeat("a", 62) + ".b", strings.Repeat("a", 63) + ".example.test.x"} {
+		if problems := k8svalidation.IsDNS1123Subdomain(node); len(problems) != 0 {
+			t.Fatalf("fixture must be a valid Node name: %v", problems)
+		}
+		for _, certificates := range []bool{false, true} {
+			t.Run(fmt.Sprintf("length-%d/certificates-%t", len(node), certificates), func(t *testing.T) {
+				ctx := certificateBuildContext()
+				ctx.NodeName = node
+				if !certificates {
+					ctx.Certificates = nil
+				}
+				workloads, err := RenderDeployments(ctx, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
+				if len(node) > 63 {
+					if err == nil || !strings.Contains(err.Error(), "unsupported Node name") || !strings.Contains(err.Error(), node) || workloads != nil {
+						t.Fatalf("unsupported label must fail before returning manifests: workloads=%v err=%v", workloads, err)
+					}
+					return
+				}
+				if err != nil || len(workloads) != 1 {
+					t.Fatalf("supported boundary Node failed: %v", err)
+				}
+				if workloads[0].Labels[LabelNode] != node || workloads[0].Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] != node {
+					t.Fatal("supported Node lost its exact label or scheduling pin")
+				}
+			})
+		}
+	}
+}

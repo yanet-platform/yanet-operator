@@ -135,6 +135,42 @@ func (r *YanetReconciler) certificateDeliveryReady(ctx context.Context, desired 
 		existing.Status.ReadyReplicas == 1 && existing.Status.UpdatedReplicas == 1 && existing.Status.Replicas == 1, nil
 }
 
+// A failed Certificate API must not prevent an explicit drain. Only change the
+// replica count of an existing owned credential workload: never create it or
+// replace its writer policy or consumer gate with an unallocated revision.
+func (r *YanetReconciler) drainCredentialWorkload(ctx context.Context, desired *appsv1.Deployment, autoSync bool) (string, error) {
+	state := "synced"
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing := &appsv1.Deployment{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if err := validateDeploymentOwnership(existing, desired); err != nil {
+			return err
+		}
+		if existing.Spec.Replicas != nil && *existing.Spec.Replicas == 0 {
+			return nil
+		}
+		if !autoSync {
+			state = "out-of-sync (replicas)"
+			return nil
+		}
+		zero := int32(0)
+		existing.Spec.Replicas = &zero
+		if err := r.checkGlobalStop(); err != nil {
+			return err
+		}
+		return r.Update(ctx, existing)
+	})
+	if err != nil {
+		return "error", err
+	}
+	return state, nil
+}
+
 func setCertificateConditions(yanet *api.Yanet, enabled, issued, delivered bool) {
 	for _, condition := range []struct {
 		name             string

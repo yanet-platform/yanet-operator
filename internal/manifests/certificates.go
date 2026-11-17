@@ -49,9 +49,11 @@ func ConfigureCertificates(d *appsv1.Deployment, ctx BuildContext) error {
 			containerName = scopedOperatorName(p.Component, p.Container)
 		}
 		pod := &d.Spec.Template.Spec
-		for _, container := range pod.InitContainers {
-			if container.Name == "yanet-credential-"+p.Name+"-check" {
-				return fmt.Errorf("patch conflicts with certificate profile %q startup gate", p.Name)
+		for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
+			for _, container := range containers {
+				if container.Name == "yanet-credential-"+p.Name+"-check" {
+					return fmt.Errorf("patch conflicts with certificate profile %q startup gate", p.Name)
+				}
 			}
 		}
 		var target *corev1.Container
@@ -190,8 +192,11 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 		plan.Certificates = append(plan.Certificates, certificate)
 		secretVolume, outputVolume := "source-"+p.Name, "output-"+p.Name
 		directory := corev1.HostPathDirectoryOrCreate
+		// A missing leaf must not block other roles' publishers after Recreate.
+		// Each publisher still validates its own source before publishing, and
+		// readiness checks the installed generation independently.
 		pod.Volumes = append(pod.Volumes,
-			corev1.Volume{Name: secretVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name, DefaultMode: ptr[int32](0o400), Items: []corev1.KeyToPath{{Key: "tls.crt", Path: "tls.crt"}, {Key: "tls.key", Path: "tls.key"}}}}},
+			corev1.Volume{Name: secretVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name, Optional: helpers.PtrTrue(), DefaultMode: ptr[int32](0o400), Items: []corev1.KeyToPath{{Key: "tls.crt", Path: "tls.crt"}, {Key: "tls.key", Path: "tls.key"}}}}},
 			corev1.Volume{Name: outputVolume, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: credentialHostPath(ctx, p), Type: &directory}}},
 		)
 		pod.Containers = append(pod.Containers, corev1.Container{

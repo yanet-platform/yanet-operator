@@ -40,8 +40,10 @@ import (
 // YanetReconciler reconciles component-based installations.
 type YanetReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Recorder events.EventRecorder
+	// APIReader verifies the source of policy revisions without cache ordering assumptions.
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
+	Recorder  events.EventRecorder
 	// GlobalConfig is the in-memory v1alpha1 YanetConfig snapshot
 	// maintained by YanetConfigReconciler.
 	GlobalConfig *yanetv1alpha1.MutexYanetConfigSpec
@@ -130,6 +132,7 @@ func (r *YanetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 //   - corev1.Pod (mapped by manifests.LabelYanet to enqueue the
 //     owning Yanet when a managed Pod changes phase or loses its label)
 func (r *YanetReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.APIReader = mgr.GetAPIReader()
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&yanetv1alpha1.Yanet{}).
 		Watches(&yanetv1alpha1.YanetConfig{}, handler.EnqueueRequestsFromMapFunc(r.mapConfigToYanets)).
@@ -140,9 +143,30 @@ func (r *YanetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.ConfigMap{})
 	if r.ManageCertificates {
-		builder = builder.Owns(newCertificate())
+		builder = builder.Owns(newCertificate()).
+			Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.mapSSHTrustToYanets))
 	}
 	return builder.Complete(r)
+}
+
+// SSH bundles are externally provisioned, not necessarily owned by a Yanet.
+// Filter by the in-memory reference before any API inventory, then fan out only
+// within the source namespace (ConfigMapKeySelector is namespace-local).
+func (r *YanetReconciler) mapSSHTrustToYanets(ctx context.Context, obj client.Object) []ctrl.Request {
+	config, loaded := r.snapshotYanetConfig()
+	if !loaded || config.Certificates == nil || config.Certificates.SSHTrustBundle == nil || obj.GetName() != config.Certificates.SSHTrustBundle.Name {
+		return nil
+	}
+	list := &yanetv1alpha1.YanetList{}
+	if listErr := r.List(ctx, list, client.InNamespace(obj.GetNamespace())); listErr != nil {
+		log.FromContext(ctx).Error(listErr, "failed to enqueue installations for SSH trust change", "namespace", obj.GetNamespace(), "configMap", obj.GetName())
+		return nil
+	}
+	requests := make([]ctrl.Request, 0, len(list.Items))
+	for i := range list.Items {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return requests
 }
 
 // mapConfigToYanets enqueues all Yanet CRs whenever the

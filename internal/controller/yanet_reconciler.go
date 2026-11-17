@@ -305,6 +305,9 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	servicePlans, certificatePlans, workloadsByNode, preflightErr := r.preflightResources(
 		ctx, &cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
 	)
+	if preflightErr == nil && installationEnabled {
+		preflightErr = r.preparePolicyHandoff(ctx, yanet, &cfg.Spec, certificatePlans, workloadsByNode, nodes, autoSync)
+	}
 	if preflightErr != nil {
 		logger.Error(preflightErr, "resource preflight failed")
 		if r.Recorder != nil && r.checkGlobalStop() == nil {
@@ -357,30 +360,55 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		for _, certificate := range certificatePlan.Certificates {
 			desired.Certificates[certificate.GetName()] = struct{}{}
 		}
-		if delivery := certificatePlan.Delivery; delivery != nil && certErr == nil {
+		if delivery := certificatePlan.Delivery; delivery != nil {
 			desired.Deployments[delivery.Name] = struct{}{}
-			state, requeue, applyErr := r.applyDeployment(ctx, delivery, autoSync, updateWindow, node.Name, logger)
-			if applyErr != nil {
-				reconcileErrs = append(reconcileErrs, applyErr)
-			}
-			ready, readyErr := r.certificateDeliveryReady(ctx, delivery)
-			credentialsDelivered = credentialsDelivered && ready && readyErr == nil && state == "synced" && applyErr == nil
-			if readyErr != nil {
-				reconcileErrs = append(reconcileErrs, readyErr)
-			}
-			credentialsReady = credentialsReady && ready && state == "synced" && certErr == nil && applyErr == nil
-			if state == "synced" && !credentialsReady && installationEnabled {
-				state = syncWaitingCredentials
-			}
-			ns.Deployments[delivery.Name] = state
-			if state == "sync-waiting" || state == syncWaitingCredentials {
-				syncWaiting = true
-				if requeue == 0 {
-					requeue = 5 * time.Second
+			if !installationEnabled {
+				credentialsDelivered = false
+				state, drainErr := r.drainCredentialWorkload(ctx, delivery, autoSync)
+				ns.Deployments[delivery.Name] = state
+				if drainErr != nil {
+					reconcileErrs = append(reconcileErrs, drainErr)
 				}
-			}
-			if requeue > 0 && (earliestRequeue == 0 || requeue < earliestRequeue) {
-				earliestRequeue = requeue
+			} else if installationEnabled && (!credentialsReady || certErr != nil) {
+				// Keep the writer's policy matched to the frozen consumers until
+				// the desired issuance is ready. cert-manager needs no delivery Pod.
+				credentialsDelivered = false
+				state := syncWaitingCredentials
+				if !autoSync {
+					state = "out-of-sync (credentials)"
+				}
+				if certErr != nil {
+					state = "error"
+				}
+				ns.Deployments[delivery.Name] = state
+				syncWaiting = autoSync || syncWaiting
+				if earliestRequeue == 0 || earliestRequeue > 5*time.Second {
+					earliestRequeue = 5 * time.Second
+				}
+			} else {
+				state, requeue, applyErr := r.applyDeployment(ctx, delivery, autoSync, updateWindow, node.Name, logger)
+				if applyErr != nil {
+					reconcileErrs = append(reconcileErrs, applyErr)
+				}
+				ready, readyErr := r.certificateDeliveryReady(ctx, delivery)
+				credentialsDelivered = credentialsDelivered && ready && readyErr == nil && state == "synced" && applyErr == nil
+				if readyErr != nil {
+					reconcileErrs = append(reconcileErrs, readyErr)
+				}
+				credentialsReady = credentialsReady && ready && state == "synced" && certErr == nil && applyErr == nil
+				if state == "synced" && !credentialsReady && installationEnabled {
+					state = syncWaitingCredentials
+				}
+				ns.Deployments[delivery.Name] = state
+				if state == "sync-waiting" || state == syncWaitingCredentials {
+					syncWaiting = true
+					if requeue == 0 {
+						requeue = 5 * time.Second
+					}
+				}
+				if requeue > 0 && (earliestRequeue == 0 || requeue < earliestRequeue) {
+					earliestRequeue = requeue
+				}
 			}
 		}
 
@@ -427,6 +455,17 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 					ns.NumaCount++
 				}
 				normalizeDeploymentReplicas(d, rc.Enabled, installationEnabled)
+				if !installationEnabled && manifests.RequiresCertificateDelivery(d) {
+					// A drain must not replace a supported policy gate with a new
+					// unallocated (or legacy-format) template while scaling to zero.
+					state, drainErr := r.drainCredentialWorkload(ctx, d, autoSync)
+					ns.Deployments[d.Name] = state
+					desired.Deployments[d.Name] = struct{}{}
+					if drainErr != nil {
+						reconcileErrs = append(reconcileErrs, drainErr)
+					}
+					continue
+				}
 				if manifests.RequiresCertificateDelivery(d) && !credentialsReady && d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
 					// Preserve an existing workload while issuance/delivery is pending.
 					// Scale-to-zero and cleanup never wait for a certificate.
@@ -681,6 +720,16 @@ func (r *YanetReconciler) preflightResources(
 			deployments = append(deployments, workload.deployment)
 		}
 		certificatePlans[node.Name] = manifests.BuildCertificatePlan(buildCtx, deployments, installationEnabled)
+		// Certificate planning mutates consumer Pods and generates a new writer.
+		// Validate those final Pods, not only the pre-certificate rendering.
+		if delivery := certificatePlans[node.Name].Delivery; delivery != nil {
+			deployments = append(deployments, delivery)
+		}
+		for _, deployment := range deployments {
+			if err := manifests.ValidateComposedPod(deployment); err != nil {
+				preflightErrs = append(preflightErrs, fmt.Errorf("validate final deployment %s: %w", deployment.Name, err))
+			}
+		}
 	}
 	if len(nodes) == 0 {
 		buildCtx := manifests.BuildContext{
