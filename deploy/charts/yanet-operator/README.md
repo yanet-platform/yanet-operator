@@ -16,6 +16,47 @@ helm install yanet-operator \
 
 ## Configuration
 
+`manageCertificates` is an optional boolean, default `false`. It enables the
+manager's cert-manager Certificate watch and Certificate-only RBAC. Configure
+`yanetconfig.spec.certificates` as described in [managed workload certificates](../../../MANAGED_CERTIFICATES.md).
+Install cert-manager CRDs and the constrained issuer/approver before enabling it.
+The chart includes a pinned, optional cert-manager dependency. Set
+`cert-manager.enabled=true` only when this release should own cert-manager;
+the default is `false` for clusters with an existing installation. Its CRDs are
+enabled and retained on uninstall. The dependency does not create a workload
+issuer, CA private key, public trust bundle or approval policy.
+
+For gateway SSH certificate authentication, supply an OpenSSH public CA ConfigMap
+through `extraManifests` and reference it with
+`yanetconfig.spec.certificates.sshTrustBundle: {name: gateway-ssh-trust, key: ssh-ca.pub}`.
+Declare local users and explicit RPC grants in
+`yanetconfig.spec.certificates.additionalGatewayAccounts`. These are merged with
+UID-bound workload accounts and delivered persistently, including the SSH trust,
+without adding ConfigMap dependencies to runtime recovery Pods. See the managed
+certificate guide for the schema, native authenticator and restart contract.
+
+On a fresh cluster, bootstrap the dependency before enabling its consumers:
+
+```bash
+helm upgrade --install yanet-operator ./yanet-operator.tgz \
+  --namespace yanet-system --create-namespace --wait --timeout 5m \
+  --set cert-manager.enabled=true --set webhook.enabled=false \
+  --set manageCertificates=false --set metrics.serviceMonitor.enabled=false \
+  --set grafana.dashboards.enabled=false
+```
+
+After cert-manager's CRDs, controller, webhook and CA injector are ready,
+upgrade the same release with `cert-manager.enabled=true`, enable
+`webhook.certManager.enabled=true` / `webhook.enabled=true`, and enable
+`manageCertificates` after provisioning the constrained workload issuer/trust.
+This two-stage install is necessary because Helm resolves custom resources
+before applying dependency CRD templates. Do not switch an existing release's
+webhook certificate provider without the handover described below.
+
+For source builds, run `helm dependency build deploy/charts/yanet-operator`
+before rendering or packaging. CI uses the committed `Chart.lock`; packaged
+charts include the dependency and do not need to download it on the target.
+
 ### Metrics and Monitoring
 
 Enable Prometheus metrics collection:

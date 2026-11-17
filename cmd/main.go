@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -37,6 +38,7 @@ import (
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/controller"
+	"github.com/yanet-platform/yanet-operator/internal/credentials"
 	"github.com/yanet-platform/yanet-operator/internal/events"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	//+kubebuilder:scaffold:imports
@@ -55,6 +57,13 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "credential-sync" {
+		if err := credentials.Run(ctrl.SetupSignalHandler(), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "credential-sync failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var metricsAddr string
 	var enableLeaderElection bool
 	var probeAddr string
@@ -62,6 +71,8 @@ func main() {
 	var enableHTTP2 bool
 	var enableWebhook bool
 	var webhookPort int
+	var manageCertificates bool
+	flag.BoolVar(&manageCertificates, "manage-certificates", false, "Enable cert-manager Certificate management (requires CRDs).")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableWebhook, "webhook-enabled", true, "Enable webhook server.")
@@ -139,10 +150,11 @@ func main() {
 	// Both controllers share the cluster-wide component palette snapshot.
 	GlobalConfig := yanetv1alpha1.MutexYanetConfigSpec{}
 	if err = (&controller.YanetReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Recorder:     events.NewRecorderFor(mgr, "yanet-controller"),
-		GlobalConfig: &GlobalConfig,
+		Client:             mgr.GetClient(),
+		Scheme:             mgr.GetScheme(),
+		Recorder:           events.NewRecorderFor(mgr, "yanet-controller"),
+		GlobalConfig:       &GlobalConfig,
+		ManageCertificates: manageCertificates,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Yanet")
 		os.Exit(1)

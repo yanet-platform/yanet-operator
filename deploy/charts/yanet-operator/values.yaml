@@ -1,5 +1,18 @@
 replicaCount: 2
 
+# Enable after cert-manager CRDs are installed, using the optional dependency or
+# an existing installation. The issuer and constrained approver remain external.
+# This grants Certificate permissions only; the manager never reads TLS Secrets.
+manageCertificates: false
+
+# Cluster-wide dependency: enable only when this release owns cert-manager.
+# Leave disabled when cert-manager is already managed by another release.
+cert-manager:
+  enabled: false
+  crds:
+    enabled: true
+    keep: true
+
 image:
   repository: ghcr-io.mirror.yandex.net/yanet-platform/yanet-operator
   pullPolicy: IfNotPresent
@@ -97,6 +110,16 @@ yanetconfig: {}
 #  spec:
 #    stop: false
 #    updateWindow: 60
+#    certificates:
+#      # Existing issuer, X.509 trust, exporter and profiles are required.
+#      # Optional OpenSSH CA bundle, delivered durably to server profiles only.
+#      sshTrustBundle: {name: gateway-ssh-trust, key: ssh-ca.pub}
+#      # Optional explicit local logins; grants are merged with workload accounts.
+#      additionalGatewayAccounts:
+#        - username: root
+#          permissions: ['/*/*']
+#        - username: alice
+#          permissions: ['/controlplane.ynpb.v1.AuthService/IntrospectToken']
 #    images:
 #      registry: cr.yandex/yanet
 #      tag: v2.1

@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -108,22 +109,25 @@ func controlledByYanet(object client.Object, yanet *yanetv1alpha1.Yanet) bool {
 // for a single Yanet installation. Owned resources that are NOT in this
 // set are considered orphans.
 type desiredSet struct {
-	Deployments map[string]struct{}
-	ConfigMaps  map[string]struct{}
+	Deployments  map[string]struct{}
+	ConfigMaps   map[string]struct{}
+	Certificates map[string]struct{}
 }
 
 // newDesiredSet returns an empty desiredSet ready to be populated.
 func newDesiredSet() desiredSet {
 	return desiredSet{
-		Deployments: map[string]struct{}{},
-		ConfigMaps:  map[string]struct{}{},
+		Deployments:  map[string]struct{}{},
+		ConfigMaps:   map[string]struct{}{},
+		Certificates: map[string]struct{}{},
 	}
 }
 
 type pruneResult struct {
-	Deleted             int
-	RetainedDeployments []appsv1.Deployment
-	RetainedConfigMaps  []string
+	Deleted              int
+	RetainedDeployments  []appsv1.Deployment
+	RetainedConfigMaps   []string
+	RetainedCertificates []string
 }
 
 // pruneOrphans deletes every Deployment or ConfigMap that
@@ -273,7 +277,64 @@ func (r *YanetReconciler) pruneOrphans(
 		}
 	}
 
+	if r.ManageCertificates {
+		certificates := &unstructured.UnstructuredList{}
+		certificates.SetGroupVersionKind(manifests.CertificateGVK.GroupVersion().WithKind("CertificateList"))
+		if err := r.List(ctx, certificates, ns); err != nil {
+			return result, err
+		}
+		// Old delivery Pods/ReplicaSets may still project a Secret during
+		// foreground deletion or a throttled rollout. Keep renewal until drained.
+		secrets := map[string]bool{}
+		for i := range deps.Items {
+			if controlledByYanet(&deps.Items[i], yanet) {
+				collectCredentialSecrets(&deps.Items[i].Spec.Template.Spec, secrets)
+			}
+		}
+		pods := &corev1.PodList{}
+		if err := r.List(ctx, pods, ns, selector); err != nil {
+			return result, err
+		}
+		for i := range pods.Items {
+			collectCredentialSecrets(&pods.Items[i].Spec, secrets)
+		}
+		for i := range certificates.Items {
+			certificate := &certificates.Items[i]
+			if !controlledByYanet(certificate, yanet) {
+				continue
+			}
+			if _, keep := desired.Certificates[certificate.GetName()]; keep {
+				continue
+			}
+			if !autoSync {
+				result.RetainedCertificates = append(result.RetainedCertificates, certificate.GetName())
+				continue
+			}
+			if secrets[certificate.GetName()] || rolloutPending || !certificate.GetDeletionTimestamp().IsZero() {
+				continue
+			}
+			if err := r.checkGlobalStop(); err != nil {
+				return result, err
+			}
+			uid, version := certificate.GetUID(), certificate.GetResourceVersion()
+			if err := r.Delete(ctx, certificate, client.Preconditions{UID: &uid, ResourceVersion: &version}); err != nil {
+				if !isNotFoundOrGone(err) && firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				result.Deleted++
+			}
+		}
+	}
 	return result, firstErr
+}
+
+func collectCredentialSecrets(pod *corev1.PodSpec, secrets map[string]bool) {
+	for _, volume := range pod.Volumes {
+		if volume.Secret != nil {
+			secrets[volume.Secret.SecretName] = true
+		}
+	}
 }
 
 func collectPodConfigMapRefs(pod *corev1.PodSpec, referenced map[string]struct{}) {

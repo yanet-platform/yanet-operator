@@ -20,6 +20,8 @@ before replacing an existing installation; no compatibility conversion is provid
 - Typed Multus attachments with matching device resource requests/limits.
 - Admission validation, drift reporting, conditions, events and Prometheus metrics.
 - Ownership-aware cleanup and guarded role/network transitions.
+- Opt-in cert-manager issuance with role-scoped persistent credential delivery;
+  see [managed certificates](MANAGED_CERTIFICATES.md) for prerequisites and limits.
 
 ## Installation
 
@@ -127,12 +129,19 @@ environment after patches. Inline ConfigMap data stays opaque and receives no
 automatic environment. Optional `config.mountPath` selects the container directory
 (default `/etc/yanet2`); inline data is mounted as `<mountPath>/config`.
 Only `{numa}` in controlplane arguments is substituted; all other arguments are literal.
+Controlplane configs use the native `gateway.server.grpc` section. Configure their
+HTTP bind in the file on `[::]:8081`; the corresponding environment variable is
+ambiguous with the deprecated HTTP key and is not injected.
 
 Gateway endpoints use standard `xcfg.WithEnv()` variables
 `YANET_GATEWAYS_<index>_ENDPOINT`. Host configs already define the correct active
 gateways in ascending physical NUMA order; indices are list positions, not NUMA IDs.
 Names, TLS and list membership stay in the config. No runtime-specific gateway
 selection parser is required. See the [environment contract](ARCHITECTURE.md#listener-endpoint-configuration).
+
+For managed certificates, render native TLS/authentication fields in the host
+configuration generator and align their paths with the role mounts. See the
+[native application configuration contract](MANAGED_CERTIFICATES.md#native-application-configuration).
 
 Typed `components.dataplane.networks` couples existing NADs to device resources.
 An installation list replaces the palette, `[]` clears it, and omission/null

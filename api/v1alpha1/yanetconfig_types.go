@@ -57,6 +57,12 @@ type YanetConfigSpec struct {
 	// +optional
 	Images ImagesSpec `json:"images,omitempty"`
 
+	// Certificates enables cert-manager issuance and persistent node-local delivery.
+	// Requires the manager's --manage-certificates flag and cert-manager CRDs.
+	// Omitted leaves existing workloads and installations unchanged.
+	// +optional
+	Certificates *CertificateManagementSpec `json:"certificates,omitempty"`
+
 	// Components is the palette of available workload components plus a
 	// dynamic operators[] array. The dataplane slot describes one Pod with
 	// explicitly declared native sidecars.

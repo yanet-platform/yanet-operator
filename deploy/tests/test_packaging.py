@@ -40,6 +40,70 @@ def pod(docs):
 
 
 class PackagingTest(unittest.TestCase):
+    def test_gateway_ssh_trust_and_human_accounts(self):
+        values = {
+            "manageCertificates": True,
+            "yanetconfig": {"spec": {"certificates": {
+                "sshTrustBundle": {"name": "gateway-ssh-trust", "key": "ssh-ca.pub"},
+                "additionalGatewayAccounts": [
+                    {"username": "root", "permissions": ["/*/*"]},
+                    {"username": "alice", "permissions": ["/example.v1.Service/Read"]},
+                ],
+            }}},
+            "extraManifests": {"sshTrust": {
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": "gateway-ssh-trust", "namespace": "custom-system"},
+                "data": {"ssh-ca.pub": "public-ssh-ca-fixture\n"},
+            }},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "values.yaml"
+            source.write_text(yaml.safe_dump(values))
+            docs = render(shlex.split(os.environ.get("HELM", "helm")) + [
+                "template", "test", "deploy/charts/yanet-operator", "--namespace", "custom-system", "-f", str(source),
+            ])
+        certificates = one(docs, "YanetConfig")["spec"]["certificates"]
+        self.assertEqual(certificates["additionalGatewayAccounts"], [
+            {"username": "root", "permissions": ["/*/*"]},
+            {"username": "alice", "permissions": ["/example.v1.Service/Read"]},
+        ])
+        reference = certificates["sshTrustBundle"]
+        trust = next(doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == reference["name"])
+        self.assertEqual(trust["metadata"]["namespace"], "custom-system")
+        self.assertEqual(trust["data"][reference["key"]], "public-ssh-ca-fixture\n")
+        self.assertIn("--manage-certificates", pod(docs)["containers"][0]["args"])
+
+    def test_bundled_cert_manager(self):
+        docs = chart("cert-manager.enabled=true", "webhook.enabled=false")
+        deployments = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"}
+        self.assertTrue({
+            "test-cert-manager", "test-cert-manager-cainjector", "test-cert-manager-webhook",
+        } <= deployments, deployments)
+        crds = {doc["metadata"]["name"] for doc in docs if doc["kind"] == "CustomResourceDefinition"}
+        self.assertTrue({
+            "certificates.cert-manager.io", "certificaterequests.cert-manager.io",
+            "issuers.cert-manager.io", "clusterissuers.cert-manager.io",
+        } <= crds, crds)
+
+    def test_external_cert_manager(self):
+        docs = chart("cert-manager.enabled=false", "manageCertificates=true")
+        self.assertIn("--manage-certificates", pod(docs)["containers"][0]["args"])
+        self.assertFalse(any(doc["kind"] == "CustomResourceDefinition" for doc in docs))
+        self.assertFalse(any("cert-manager" in doc["metadata"]["name"] for doc in docs if doc["kind"] == "Deployment"))
+
+    def test_workload_certificate_opt_in(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                docs = chart(f"manageCertificates={str(enabled).lower()}")
+                args = pod(docs)["containers"][0]["args"]
+                self.assertEqual("--manage-certificates" in args, enabled)
+                role = next(d for d in docs if d["kind"] == "ClusterRole" and d["metadata"]["name"] == "manager-role")
+                certificate_rules = [r for r in role["rules"] if "cert-manager.io" in r["apiGroups"]]
+                self.assertEqual(bool(certificate_rules), enabled)
+                for rule in certificate_rules:
+                    self.assertEqual(rule["resources"], ["certificates"])
+                self.assertFalse(any("secrets" in r["resources"] for r in role["rules"]))
+
     def assert_certificate_wiring(self, docs):
         certificate = one(docs, "Certificate")
         issuer = one(docs, "Issuer")

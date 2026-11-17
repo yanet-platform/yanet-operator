@@ -1,0 +1,6 @@
+dependencies:
+- name: cert-manager
+  repository: oci://quay.io/jetstack/charts
+  version: v1.21.3
+digest: sha256:912121e3c691791f3225d46e6d932acf95397700ae4028bae6f7458067795739
+generated: "2026-11-03T14:32:24.470864471+03:00"

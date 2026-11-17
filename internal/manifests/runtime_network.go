@@ -80,14 +80,38 @@ func configureRuntimeContainer(deployment *appsv1.Deployment, ctx BuildContext, 
 	var variables []corev1.EnvVar
 	switch component.Kind {
 	case helpers.KindControlplane:
+		// Native gRPC sections ignore the deprecated server.endpoint key.
+		// HTTP binding stays in the file: its native and deprecated endpoint
+		// paths fold onto the same xcfg environment variable and are rejected.
 		variables = []corev1.EnvVar{
-			{Name: "YANET_GATEWAY_SERVER_ENDPOINT", Value: bind(grpcPort)},
-			{Name: "YANET_GATEWAY_SERVER_HTTP_ENDPOINT", Value: bind(httpPort)},
+			{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: bind(grpcPort)},
+		}
+		if ctx.Certificates != nil {
+			for _, profile := range ctx.Certificates.Profiles {
+				if profile.Component == "controlplane" && profile.Container == "controlplane" && profile.Usage == "server" {
+					// Keep the reserved Service port on the native TLS listener. A
+					// parallel plaintext bind would conflict with that same port.
+					variables[0].Value = ""
+					variables = append(variables, corev1.EnvVar{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", Value: bind(grpcPort)})
+					break
+				}
+			}
 		}
 	case helpers.KindBirdAdapter:
+		routeEndpoint := serviceEndpoint(ctx, SharedServiceName(ctx.BoxType, "route", nil), ServiceGRPCPort)
+		if ctx.Certificates != nil && len(ctx.GatewayEndpoints) > 0 {
+			for _, profile := range ctx.Certificates.Profiles {
+				if profile.Component == "birdAdapter" && profile.Usage == "client" {
+					// Authenticated imports go through the node-local gateway;
+					// the callback service itself has no TLS listener.
+					routeEndpoint = ctx.GatewayEndpoints[0]
+					break
+				}
+			}
+		}
 		variables = []corev1.EnvVar{
 			{Name: "YANET_LISTEN_ADDR", Value: bind(grpcPort)},
-			{Name: "YANET_ROUTE_OPERATOR_ENDPOINT", Value: serviceEndpoint(ctx, SharedServiceName(ctx.BoxType, "route", nil), ServiceGRPCPort)},
+			{Name: "YANET_ROUTE_OPERATOR_ENDPOINT", Value: routeEndpoint},
 		}
 	default:
 		endpoint := grpcPort

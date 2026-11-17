@@ -88,6 +88,11 @@ rules:
   - watch
   - patch
   - update
+{{- if .Values.manageCertificates }}
+- apiGroups: [cert-manager.io]
+  resources: [certificates]
+  verbs: [get, list, watch, create, update, patch, delete]
+{{- end }}
 - apiGroups:
   - apps
   resources:
