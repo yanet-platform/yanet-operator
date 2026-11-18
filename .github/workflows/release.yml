@@ -188,7 +188,8 @@ jobs:
 
       - name: Fetch release history
         # Fetch release ancestry and tags without unrelated branch refs.
-        run: git fetch --unshallow --tags origin "$GITHUB_REF"
+        # Checkout may create a lightweight ref for an annotated release tag.
+        run: git fetch --unshallow --tags origin "+$GITHUB_REF:$GITHUB_REF"
 
       - name: Download Helm chart artifact
         uses: actions/download-artifact@v4
