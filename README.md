@@ -6,7 +6,7 @@
 Kubernetes operator for YANET2 workloads: component palettes, named strategic-merge
 patches, box-type presets, multi-node installations and per-NUMA controlplanes.
 
-**Operator and chart 3.0.2** use one API, `yanet.yanet-platform.io/v1alpha1`.
+**Operator and chart 3.2.0** use one API, `yanet.yanet-platform.io/v1alpha1`.
 The former component-based API is exposed as `Yanet` and `YanetConfig`. The legacy
 single-node implementation is removed. See the [breaking release notes](release-notes/v3.0.0.md)
 before replacing an existing installation; no compatibility conversion is provided.
@@ -33,11 +33,14 @@ After release publication, install into a cluster with the new CRDs:
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/charts/yanet-operator \
-  --version 3.0.2 \
+  --version 3.2.0 \
   --namespace yanet-system \
   --create-namespace
 ```
 
+For an existing v3.1.0 installation, follow the [upgrade instructions](release-notes/v3.2.0.md)
+before updating Helm values or the operator image. Set `image.repository` to the
+published GHCR repository or a verified site mirror accessible to the cluster.
 Use `--set metrics.serviceMonitor.enabled=false` without Prometheus Operator.
 Set the Grafana dashboard namespace or disable it with
 `--set grafana.dashboards.enabled=false` when no Grafana sidecar consumes it.
@@ -118,7 +121,8 @@ the palette freezes reconciliation, including finalizer cleanup, without drainin
 Each node has one installation owner; an existing workload owner takes precedence
 over a new overlapping selector.
 Node names must fit Kubernetes label values (at most 63 characters), since workload
-labels and the exact hostname selector contain the node name. Unsupported names
+labels contain the node name. The scheduler pin uses required affinity on
+`metadata.name`, independently of the hostname label. Unsupported names
 fail resource preflight before workloads or certificates are written.
 
 ## Runtime contract

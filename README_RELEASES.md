@@ -8,8 +8,8 @@ Images remain at `ghcr.io/yanet-platform/yanet-operator`; charts from 3.0.2 use
 prevent one artifact from replacing the other's version tag. Historical 0.2.x
 charts remain at their original repository.
 
-The release being prepared is **operator 3.0.3 / chart 3.0.3**. Its compatibility
-notes are documented in [release notes](release-notes/v3.0.3.md). Upgrades from
+The v3.1.0 to **operator/chart 3.2.0** transition is documented in the
+[release notes](release-notes/v3.2.0.md). Upgrades from
 pre-3.0 installations must still follow the [3.0.0 API replacement procedure](release-notes/v3.0.0.md).
 Release preparation in a pull request does not publish images or qualify a live cluster.
 
@@ -42,8 +42,9 @@ After the reviewed commit is merged and its checks pass:
 
 ```bash
 git fetch origin main --tags
-git tag -a v3.0.3 origin/main -m "Release v3.0.3"
-git push origin v3.0.3
+: "${VERSION:?Set VERSION to the approved unused release number without v}"
+git tag -a "v${VERSION}" origin/main -m "Release v${VERSION}"
+git push origin "refs/tags/v${VERSION}"
 ```
 
 Verify that `origin/main` is the intended release revision before tagging.
@@ -67,9 +68,9 @@ workflow so a single-platform build cannot overwrite the multi-platform release.
 
 ```bash
 gh run list --workflow=release.yml
-gh release view v3.0.3
-docker manifest inspect ghcr.io/yanet-platform/yanet-operator:3.0.3
-helm show chart oci://ghcr.io/yanet-platform/charts/yanet-operator --version 3.0.3
+gh release view "v${VERSION}"
+docker manifest inspect "ghcr.io/yanet-platform/yanet-operator:${VERSION}"
+helm show chart oci://ghcr.io/yanet-platform/charts/yanet-operator --version "${VERSION}"
 ```
 
 Check both image platforms, the source revision/digest, chart `appVersion` and
@@ -81,7 +82,7 @@ For a new cluster:
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/charts/yanet-operator \
-  --version 3.0.3 \
+  --version "${VERSION}" \
   --namespace yanet-system \
   --create-namespace
 ```

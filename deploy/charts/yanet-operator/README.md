@@ -9,7 +9,7 @@ Requires Kubernetes 1.33+ for named Service target ports on native sidecars.
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/charts/yanet-operator \
-  --version 3.0.2 \
+  --version 3.2.0 \
   --namespace yanet-system \
   --create-namespace
 ```

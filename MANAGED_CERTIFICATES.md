@@ -282,6 +282,25 @@ The required per-installation transition is:
    recreated Yanet has a new UID, private credential directory and acknowledgment
    scope; copying another installation's state/acknowledgment is rejected.
 
+**Inspecting a pending handoff (read-only).** Inspect the same installation
+before and after the node/NUMA rollout. These fields show what the controller
+observed; they do not verify an external checkpoint or authorize an ACK:
+
+```bash
+set -o pipefail
+kubectl -n "$NAMESPACE" get yanet "$INSTALLATION" -o json | jq '
+  (.metadata.annotations // {}) as $a |
+  ($a["yanet.yanet-platform.io/policy-state"] | if . == null then null else fromjson end) as $p |
+  {uid: .metadata.uid, revision: $p.sequence, activated: $p.activated,
+   ack: $a["yanet.yanet-platform.io/policy-checkpoints-ready"],
+   conditions: [.status.conditions[]? | {type, status, reason, observedGeneration}]}'
+```
+
+A missing state has no revision to acknowledge. If `activated` is false, keep
+the policy unchanged and complete the rollout/checkpoint steps above. If an ACK
+is present but its UID or revision differs, repeat verification on the current
+inventory. A matching ACK by itself is not activation.
+
 **Node turnover before acknowledgment.** If a Node leaves the selection or is
 replaced (even under the same name), keep the original authorization on every
 remaining role. The replacement UID uses its own private path; never copy the
