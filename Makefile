@@ -113,16 +113,21 @@ test-unit: test-docker-unit ## Run unit tests only (no integration tests) in Doc
 test-integration: test-docker-integration ## Run integration tests only in Docker.
 
 .PHONY: test-docker
-test-docker: helm-crds ## Run all tests in Docker container.
+test-docker: helm-crds render-test-samples ## Run all tests in Docker container.
 	$(call docker-go,go mod download && \
 		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) && \
 		KUBEBUILDER_ASSETS=\$$(/go/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path) go test ./... -coverprofile cover.out)
 
 .PHONY: test-docker-race
-test-docker-race: ## Run tests with race detector in Docker container.
+test-docker-race: render-test-samples ## Run tests with race detector in Docker container.
 	$(call docker-go,go mod download && \
 		go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) && \
 		KUBEBUILDER_ASSETS=\$$(/go/bin/setup-envtest use $(ENVTEST_K8S_VERSION) -p path) go test -race ./... -coverprofile cover.out)
+
+.PHONY: render-test-samples
+render-test-samples: kustomize ## Render the real sample overlay for strict API validation in envtest.
+	mkdir -p bin
+	$(KUSTOMIZE) build config/samples > bin/test-samples.yaml
 
 .PHONY: test-docker-unit
 test-docker-unit: ## Run unit tests in Docker container.

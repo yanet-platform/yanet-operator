@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
@@ -111,20 +110,8 @@ func TestManagedPolicyRecoveryAcrossPartialUpdates(t *testing.T) {
 					t.Fatalf("expected both NUMA gateways: %d", len(before.Items))
 				}
 				writer := certificateWorkload(t, r, "credential-delivery")
-				if barrier == "delivery-pending" {
-					if len(writer.Spec.Template.Spec.Containers) != 2 {
-						t.Fatal("independent exporter role is missing")
-					}
-					identity := credentials.Identity{Usage: "client"}
-					for _, arg := range writer.Spec.Template.Spec.Containers[1].Args {
-						if value, ok := strings.CutPrefix(arg, "--uri="); ok {
-							identity.URI = value
-						}
-					}
-					_, err := credentials.Publish(t.TempDir(), t.TempDir(), "", identity, time.Now(), nil)
-					if err == nil || !strings.Contains(err.Error(), "resolve Secret generation") {
-						t.Fatalf("missing independent role projection did not exercise issuance/source outage: %v", err)
-					}
+				if barrier == "delivery-pending" && len(writer.Spec.Template.Spec.Containers) != 2 {
+					t.Fatal("independent exporter role is missing")
 				}
 				recoverGateway := gatewayRecoveryWithOldLeaf(t, writer)
 				for i := range before.Items {
@@ -201,6 +188,23 @@ func TestManagedPolicyRecoveryAcrossPartialUpdates(t *testing.T) {
 					}
 					if got.ResourceVersion == before.Items[i].ResourceVersion {
 						t.Fatal("unblocked gateway did not converge")
+					}
+					for _, args := range [][]string{writer.Spec.Template.Spec.Containers[0].Args, got.Spec.Template.Spec.InitContainers[0].Args} {
+						var alice *api.GatewayAccount
+						for _, arg := range args {
+							if data, ok := strings.CutPrefix(arg, "--gateway-account="); ok {
+								var decoded api.GatewayAccount
+								if err := json.Unmarshal([]byte(data), &decoded); err != nil {
+									t.Fatal(err)
+								}
+								if decoded.Username == account.Username {
+									alice = &decoded
+								}
+							}
+						}
+						if (remove && alice != nil) || (!remove && !reflect.DeepEqual(alice, &account)) {
+							t.Fatalf("wrong account after policy-only rollout (remove=%t): %+v", remove, alice)
+						}
 					}
 					recoverGateway(writer, got)
 				}

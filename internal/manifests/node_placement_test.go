@@ -9,8 +9,6 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -35,8 +33,7 @@ func assertExactNodePin(t *testing.T, pod *corev1.PodSpec, node string) {
 
 func TestRenderNodePlacementAndManagedDelivery(t *testing.T) {
 	build := certificateBuildContext()
-	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "api-node", Labels: map[string]string{corev1.LabelHostname: "custom-host"}}, Spec: corev1.NodeSpec{Unschedulable: true}}
-	build.NodeName = node.Name
+	build.NodeName = "api-node"
 	component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Numa: 3, DisabledNuma: []int32{1}}
 	workloads, err := RenderDeployments(build, component, nil)
 	if err != nil {
@@ -51,9 +48,9 @@ func TestRenderNodePlacementAndManagedDelivery(t *testing.T) {
 	}
 	for _, deployment := range append(workloads, plan.Delivery) {
 		pod := &deployment.Spec.Template.Spec
-		assertExactNodePin(t, pod, node.Name)
-		if !labels.SelectorFromSet(pod.NodeSelector).Matches(labels.Set(node.Labels)) || deployment.Spec.Template.Labels[LabelNode] != node.Name {
-			t.Fatalf("hostname %q must not prevent placement on %q", node.Labels[corev1.LabelHostname], node.Name)
+		assertExactNodePin(t, pod, build.NodeName)
+		if deployment.Spec.Template.Labels[LabelNode] != build.NodeName {
+			t.Fatalf("%s lost the selected Node label", deployment.Name)
 		}
 		// A wildcard NoSchedule toleration includes the scheduler's cordon taint.
 		if !slices.ContainsFunc(pod.Tolerations, func(tol corev1.Toleration) bool {

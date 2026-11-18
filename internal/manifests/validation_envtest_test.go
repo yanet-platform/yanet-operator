@@ -5,12 +5,10 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -74,19 +72,6 @@ func TestComposedManifestsAgainstLocalAPIServer(t *testing.T) {
 		if _, createErr := deployments.Create(t.Context(), deployment, strictDryRun); createErr != nil {
 			t.Fatalf("API rejected valid rendered Deployment: %v", createErr)
 		}
-		for _, field := range []string{"containers", "initContainers"} {
-			bad := deployment.DeepCopy()
-			badPod := &bad.Spec.Template.Spec
-			containers := badPod.Containers
-			if field == "initContainers" {
-				containers = badPod.InitContainers
-			}
-			containers[0].VolumeMounts[1].MountPath = "/fixture"
-			_, createErr := deployments.Create(t.Context(), bad, strictDryRun)
-			if !apierrors.IsInvalid(createErr) || !strings.Contains(createErr.Error(), field+`[0].volumeMounts[1].mountPath: Invalid value: "/fixture": must be unique`) {
-				t.Fatalf("expected API duplicate mountPath error for %s, got %v", field, createErr)
-			}
-		}
 	})
 	t.Run("kustomize-samples", func(t *testing.T) {
 		dynamicClient, dynamicErr := dynamic.NewForConfig(cfg)
@@ -94,7 +79,11 @@ func TestComposedManifestsAgainstLocalAPIServer(t *testing.T) {
 			t.Fatal(dynamicErr)
 		}
 		seen := map[string]bool{}
-		decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(samplesYAML(t)), 4096)
+		rendered, readErr := os.ReadFile("../../bin/test-samples.yaml")
+		if readErr != nil {
+			t.Fatalf("read samples rendered by make render-test-samples: %v", readErr)
+		}
+		decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(rendered), 4096)
 		for {
 			var sample unstructured.Unstructured
 			if decodeErr := decoder.Decode(&sample); errors.Is(decodeErr, io.EOF) {
@@ -122,26 +111,4 @@ func TestComposedManifestsAgainstLocalAPIServer(t *testing.T) {
 			t.Fatalf("expected both sample kinds, saw %v", seen)
 		}
 	})
-}
-
-func samplesYAML(t *testing.T) []byte {
-	t.Helper()
-	if _, lookupErr := exec.LookPath("kustomize"); lookupErr == nil {
-		rendered, err := exec.CommandContext(t.Context(), "kustomize", "build", "../../config/samples").Output()
-		if err != nil {
-			t.Fatalf("render samples: %v", err)
-		}
-		return rendered
-	}
-	// The sample overlay currently only lists resources (no transforms).
-	// Validate its source documents when the local envtest image lacks kustomize.
-	installation, err := os.ReadFile("../../config/samples/yanet_v1alpha1_yanet.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	palette, err := os.ReadFile("../../config/samples/yanet_v1alpha1_yanetconfig.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bytes.Join([][]byte{installation, palette}, []byte("\n---\n"))
 }

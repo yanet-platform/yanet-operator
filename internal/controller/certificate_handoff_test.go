@@ -249,24 +249,6 @@ func TestManagedCertificatesFreezeWriterUntilDesiredIssuance(t *testing.T) {
 	}
 }
 
-func TestManagedCertificatesReadyPolicyOnlyChange(t *testing.T) {
-	r, y, _ := certificateEnvironment(t)
-	startCertificateWorkloads(t, r, y)
-	before := certificateWorkload(t, r, "controlplane")
-	r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}}
-	publishCertificateConfig(t, r)
-	reconcileCertificates(t, r, y)
-	writer, consumer := certificateWorkload(t, r, "credential-delivery"), certificateWorkload(t, r, "controlplane")
-	if consumer.ResourceVersion == before.ResourceVersion {
-		t.Fatal("ready issuance blocked policy-only rollout")
-	}
-	for _, args := range [][]string{writer.Spec.Template.Spec.Containers[0].Args, consumer.Spec.Template.Spec.InitContainers[0].Args} {
-		if !strings.Contains(strings.Join(args, " "), "alice") {
-			t.Fatalf("policy-only rollout omitted new account: %v", args)
-		}
-	}
-}
-
 func TestManagedCertificatesFinalPodPreflightBeforeWrites(t *testing.T) {
 	for _, tc := range []struct{ name, patch, want string }{
 		{"gate-name", `{"spec":{"template":{"spec":{"containers":[{"name":"yanet-credential-gateway-check","image":"example.test/sidecar:v1"}]}}}}`, "startup gate"},

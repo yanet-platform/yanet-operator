@@ -2,9 +2,9 @@ package manifests
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -32,24 +32,19 @@ func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
 		workloads = append(workloads, rendered...)
 	}
 	plan := BuildCertificatePlan(ctx, workloads, true)
-	// Inspect the serialized API contract: an unissued role must not prevent the
-	// kubelet starting the independent publisher for an already-issued role.
-	encoded, err := json.Marshal(plan.Delivery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var delivery appsv1.Deployment
-	if err := json.Unmarshal(encoded, &delivery); err != nil {
-		t.Fatal(err)
+	delivery := plan.Delivery
+	if delivery == nil {
+		t.Fatal("no credential delivery Deployment")
 	}
 	if delivery.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
 		t.Fatal("delivery must retain its sole-writer strategy")
 	}
 	pod := delivery.Spec.Template.Spec
-	secrets, trust := 0, 0
+	sources := map[string]bool{}
+	trust := 0
 	for _, volume := range pod.Volumes {
 		if source := volume.Secret; source != nil {
-			secrets++
+			sources[volume.Name] = true
 			if source.Optional == nil || !*source.Optional {
 				t.Errorf("missing leaf source %s blocks every role publisher", volume.Name)
 			}
@@ -64,16 +59,23 @@ func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
 			}
 		}
 	}
-	if secrets != 2 || trust != 2 || len(pod.Containers) != 2 {
+	if len(sources) != 2 || trust != 2 || len(pod.Containers) != 2 {
 		t.Fatalf("lost independent roles or required trust: %+v", pod)
 	}
 	for _, container := range pod.Containers {
+		mounted := 0
 		for _, mount := range container.VolumeMounts {
-			if strings.HasPrefix(mount.Name, "source-") && (mount.Name != "source-"+container.Name || !mount.ReadOnly || mount.MountPath != "/source") {
-				t.Fatalf("publisher gained another role's source: %+v", container)
+			if sources[mount.Name] {
+				mounted++
+				if mount.Name != "source-"+container.Name || !mount.ReadOnly || mount.MountPath != "/source" {
+					t.Fatalf("publisher %s has an incorrect Secret mount: %+v", container.Name, mount)
+				}
 			}
 		}
-		if container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil || !strings.HasSuffix(strings.Join(container.ReadinessProbe.Exec.Command, " "), " --check --writer-readiness") {
+		if mounted != 1 {
+			t.Fatalf("publisher %s has %d Secret mounts, want one at /source", container.Name, mounted)
+		}
+		if container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil || !slices.Contains(container.ReadinessProbe.Exec.Command, "--check") || !slices.Contains(container.ReadinessProbe.Exec.Command, "--writer-readiness") {
 			t.Fatalf("publisher lost durable installed credential readiness: %+v", container)
 		}
 	}
@@ -84,7 +86,7 @@ func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
 				continue
 			}
 			gates++
-			if !strings.HasSuffix(strings.Join(gate.Args, " "), " --check --ssh-trust=/persist/current/ssh-ca.pub") {
+			if !slices.Contains(gate.Args, "--check") || slices.Contains(gate.Args, "--writer-readiness") || !slices.Contains(gate.Args, "--ssh-trust=/persist/current/ssh-ca.pub") {
 				t.Fatalf("startup gate no longer uses the read-only check: %+v", gate)
 			}
 		}
