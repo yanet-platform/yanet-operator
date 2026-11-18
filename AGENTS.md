@@ -4,7 +4,7 @@ Read this file before changing code or running builds/tests.
 
 ## Build and test through Make + Docker
 
-Use the Go version pinned in `go.mod`, `Dockerfile` and `Makefile` (1.26.2).
+Use the Go version pinned in `go.mod`, `Dockerfile` and `Makefile` (1.26.11).
 Do not run `go build`, `go test` or `go vet` directly on the host.
 
 ```bash
@@ -106,6 +106,10 @@ Shared Services have a separate lifecycle and remain available for box-type role
 Node selection depends on labels, not schedulability. Cordon must not remove a
 matching node from the desired set or prune its workloads. Scheduling constraints
 do not revoke the installation's ownership of that node.
+Workload and credential delivery Pods use required node affinity on the exact
+Node `metadata.name`, not the hostname label or `spec.nodeName`. Preserve patch
+constraints by ANDing the pin with each non-empty required term; the scheduler
+still evaluates cordon and taints against the Pod's tolerations.
 
 ### Three-tier configuration
 

@@ -11,6 +11,7 @@ import (
 
 	yanetv1alpha1 "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
+	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -85,6 +86,73 @@ func TestOperatorPlacementTransitionOldReplicaSet(t *testing.T) {
 				}
 			} else if err == nil || !strings.Contains(err.Error(), "ReplicaSet") {
 				t.Fatalf("old ReplicaSet must reserve the producer: %v", err)
+			}
+		})
+	}
+}
+
+func TestOperatorPlacementTransitionUnboundProducerOnAnotherNode(t *testing.T) {
+	for _, tc := range []struct{ kind, pin string }{
+		{"ReplicaSet", "exact"}, {"Pod", "exact"}, {"Pod", "exact-with-hostname"},
+		{"Pod", "same-node"}, {"Pod", "ambiguous"}, {"ReplicaSet", "missing"},
+	} {
+		t.Run(tc.kind+"/"+tc.pin, func(t *testing.T) {
+			testContext := t.Context()
+			y := reviewYanet()
+			a, b := reviewNode(), reviewNode()
+			b.Name, b.Labels["pool"] = "next-node", "next"
+			a.Labels[corev1.LabelHostname], b.Labels[corev1.LabelHostname] = "shared", "shared"
+			r, snapshot := makeReconcilerEnv(t, y, a, b)
+			snapshot.Config = colocatedConfig(t)
+			moveMonitorRole(&snapshot.Config, false)
+			if _, err := reviewReconcile(testContext, r, y); err != nil {
+				t.Fatal(err)
+			}
+			old := transitionDeployment(t, r, "monalive")
+			template := old.Spec.Template.DeepCopy()
+			delete(template.Labels, manifests.LabelNode)
+			terms := &template.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+			switch tc.pin {
+			case "exact-with-hostname":
+				template.Spec.NodeSelector = map[string]string{corev1.LabelHostname: "shared"}
+			case "same-node":
+				(*terms)[0].MatchFields[0].Values = []string{b.Name}
+			case "ambiguous":
+				*terms = append(*terms, corev1.NodeSelectorTerm{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "pool", Operator: corev1.NodeSelectorOpIn, Values: []string{"next"}}}})
+			case "missing":
+				template.Spec.Affinity = nil
+			}
+			var producer client.Object
+			meta := metav1.ObjectMeta{Name: "old-producer", Namespace: y.Namespace, Labels: template.Labels}
+			if tc.kind == "Pod" {
+				producer = &corev1.Pod{ObjectMeta: meta, Spec: template.Spec}
+			} else {
+				producer = &appsv1.ReplicaSet{ObjectMeta: meta, Spec: appsv1.ReplicaSetSpec{Template: *template}}
+			}
+			if err := r.Create(testContext, producer); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Delete(testContext, old); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Get(testContext, client.ObjectKeyFromObject(y), y); err != nil {
+				t.Fatal(err)
+			}
+			y.Spec.NodeSelector = map[string]string{"pool": "next"}
+			if err := r.Update(testContext, y); err != nil {
+				t.Fatal(err)
+			}
+			moveMonitorRole(&snapshot.Config, true)
+			_, err := reviewReconcile(testContext, r, y)
+			if strings.HasPrefix(tc.pin, "exact") {
+				if err != nil {
+					t.Fatalf("independent transition was blocked: %v", err)
+				}
+				if d := transitionDeployment(t, r, "dataplane"); d.Spec.Template.Labels[manifests.OperatorMembershipLabel("monalive")] != "monalive" || !manifests.HasExactNodePin(&d.Spec.Template.Spec, b.Name) {
+					t.Fatal("transition did not produce the colocated role on the selected Node")
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "old producer in "+tc.kind) {
+				t.Fatalf("potential same-node producer did not prevent transition: %v", err)
 			}
 		})
 	}

@@ -1,7 +1,8 @@
 # Build the manager binary
-FROM golang:1.26.2 AS builder
+FROM golang:1.26.11@sha256:4165ee6bf3b7811fd7b40373290405c83d0167dcb87ee5f29c427cdcef45ff8f AS builder
 ARG TARGETOS
 ARG TARGETARCH
+ENV GOTOOLCHAIN=local
 
 WORKDIR /workspace
 # Copy the Go Modules manifests

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-logr/logr"
@@ -40,11 +41,11 @@ import (
 func (r *YanetReconciler) pruneConflictingDeployments(
 	ctx context.Context,
 	yanet *yanetv1alpha1.Yanet,
-	nodeNames map[string]struct{},
+	conflict *nodeSelectionConflict,
 	logger logr.Logger,
 ) error {
 	deployments := &appsv1.DeploymentList{}
-	if err := r.Client.List(
+	if err := r.liveReader().List(
 		ctx,
 		deployments,
 		client.InNamespace(yanet.Namespace),
@@ -56,7 +57,14 @@ func (r *YanetReconciler) pruneConflictingDeployments(
 		if !controlledByYanet(deployment, yanet) || !deployment.DeletionTimestamp.IsZero() {
 			continue
 		}
-		if _, conflict := nodeNames[deployment.Labels[manifests.LabelNode]]; !conflict {
+		_, byNode := conflict.cleanupNodeNames[deploymentClaimNode(deployment)]
+		observed, byBinding := conflict.cleanupProducers[client.ObjectKeyFromObject(deployment)]
+		if byBinding && (*observed.UID != deployment.UID || *observed.ResourceVersion != deployment.ResourceVersion) {
+			// Re-evaluate the producer on the next reconcile; it may now be
+			// rolling out an exact pin on a non-conflicting node.
+			continue
+		}
+		if !byNode && !byBinding {
 			// A blocked acquisition must not prevent an explicit drain of the
 			// installation's other nodes. Never render or acquire new workloads here.
 			if helpers.BoolValue(yanet.Spec.Enabled, true) || (deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0) {
@@ -74,7 +82,7 @@ func (r *YanetReconciler) pruneConflictingDeployments(
 		}
 		logger.Info("deleting Deployment from released or conflicting node",
 			"deployment", deployment.Name,
-			"node", deployment.Labels[manifests.LabelNode],
+			"node", deploymentClaimNode(deployment),
 		)
 		if err := r.checkGlobalStop(); err != nil {
 			return err
@@ -91,6 +99,34 @@ func (r *YanetReconciler) pruneConflictingDeployments(
 		yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Inc()
 	}
 	return nil
+}
+
+// No render is possible after a box was removed. Only the explicit disable
+// path calls this; never initialize a finalizer or create a missing workload.
+func (r *YanetReconciler) drainExistingDeployments(ctx context.Context, y *yanetv1alpha1.Yanet) error {
+	if y.UID == "" {
+		return fmt.Errorf("cannot drain Yanet without an API identity")
+	}
+	deps := &appsv1.DeploymentList{}
+	if err := r.liveReader().List(ctx, deps, client.InNamespace(y.Namespace)); err != nil {
+		return err
+	}
+	var errs []error
+	for i := range deps.Items {
+		d := &deps.Items[i]
+		if !controlledByYanet(d, y) || !d.DeletionTimestamp.IsZero() || (d.Spec.Replicas != nil && *d.Spec.Replicas == 0) {
+			continue
+		}
+		if err := r.checkGlobalStop(); err != nil {
+			return err
+		}
+		zero := int32(0)
+		d.Spec.Replicas = &zero
+		if err := r.Update(ctx, d); err != nil && !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("drain Deployment %s: %w", client.ObjectKeyFromObject(d), err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func controlledByYanet(object client.Object, yanet *yanetv1alpha1.Yanet) bool {

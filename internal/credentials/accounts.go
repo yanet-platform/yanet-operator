@@ -3,6 +3,8 @@ package credentials
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
@@ -25,11 +27,21 @@ type GatewayAccount struct {
 type GatewayPolicy struct {
 	Accounts     []GatewayAccount
 	SSHTrustFile string
+	Revision     *PolicyRevision
+	// SSHTrustHash commits a managed revision to projected bytes, or "none".
+	// Empty is supported only for legacy, unversioned exact-policy callers.
+	SSHTrustHash string
+	// bridge preserves installed authorization until checkpoint retirement.
+	// requireCurrent additionally forbids initializing a known legacy path.
+	bridge, requireCurrent bool
 }
 
 func gatewayFiles(policy *GatewayPolicy) (map[string][]byte, error) {
 	if policy == nil {
 		return nil, nil
+	}
+	if policy.Revision != nil && policy.SSHTrustHash == "" {
+		return nil, fmt.Errorf("managed policy requires an expected SSH trust SHA-256 or none")
 	}
 	accounts := policy.Accounts
 	if accounts == nil {
@@ -40,12 +52,30 @@ func gatewayFiles(policy *GatewayPolicy) (map[string][]byte, error) {
 		return nil, err
 	}
 	if policy.SSHTrustFile == "" {
+		if policy.SSHTrustHash != "" && policy.SSHTrustHash != "none" {
+			return nil, fmt.Errorf("expected SSH trust bundle is absent from the requested policy")
+		}
 		return files, nil
 	}
 	data, err := os.ReadFile(policy.SSHTrustFile) // #nosec G304 -- The ConfigMap projection or persistent trust path is administrative input.
 	if err != nil {
 		return nil, fmt.Errorf("read SSH CA public keys: %w", err)
 	}
+	if policy.SSHTrustHash != "" {
+		hash := sha256.Sum256(data)
+		if hex.EncodeToString(hash[:]) != policy.SSHTrustHash {
+			return nil, fmt.Errorf("projected SSH trust does not match the allocated policy SHA-256")
+		}
+	}
+	if validationErr := ValidateSSHTrust(data); validationErr != nil {
+		return nil, validationErr
+	}
+	files["ssh-ca.pub"] = data
+	return files, nil
+}
+
+// ValidateSSHTrust checks the public bundle accepted by the gateway publisher.
+func ValidateSSHTrust(data []byte) error {
 	count := 0
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
@@ -55,18 +85,17 @@ func gatewayFiles(policy *GatewayPolicy) (map[string][]byte, error) {
 		}
 		key, _, options, _, err := ssh.ParseAuthorizedKey([]byte(line))
 		if err != nil || key.Type() != ssh.KeyAlgoECDSA256 || len(options) != 0 {
-			return nil, fmt.Errorf("SSH CA bundle requires bare ECDSA P-256 public keys")
+			return fmt.Errorf("SSH CA bundle requires bare ECDSA P-256 public keys")
 		}
 		count++
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read SSH CA public keys: %w", err)
+		return fmt.Errorf("read SSH CA public keys: %w", err)
 	}
 	if count == 0 {
-		return nil, fmt.Errorf("SSH CA bundle contains no public keys")
+		return fmt.Errorf("SSH CA bundle contains no public keys")
 	}
-	files["ssh-ca.pub"] = data
-	return files, nil
+	return nil
 }
 
 func accountFiles(accounts []GatewayAccount) (map[string][]byte, error) {

@@ -52,10 +52,8 @@ type BuildContext struct {
 	Namespace string
 	// BoxType is the shared service and endpoint identity selected by Yanet.
 	BoxType string
-	// NodeName the Deployment is pinned to (via nodeSelector).
-	// May be empty for cluster-wide operator placement; when empty
-	// the builder falls back to YanetSpec.NodeSelector and skips
-	// the kubernetes.io/hostname constraint.
+	// NodeName is the exact Node API name used for required node affinity.
+	// An empty name leaves an offline render unpinned.
 	NodeName string
 	// NodeUID prevents a replacement node inheriting a previous node's identity.
 	NodeUID string
@@ -243,9 +241,9 @@ func buildSingle(ctx BuildContext, c *helpers.ResolvedComponent) *appsv1.Deploym
 		Containers:       []corev1.Container{container},
 		Volumes:          volumes,
 		ImagePullSecrets: ctx.PullSecrets,
-		NodeSelector:     nodeSelector(ctx),
 		Tolerations:      runtimeTolerations(),
 	}
+	pinPodToNode(&pod, ctx.NodeName)
 	switch c.Kind {
 	case helpers.KindDataplane:
 		pod.HostIPC = true
@@ -295,9 +293,9 @@ func buildOperator(ctx BuildContext, c *helpers.ResolvedComponent) *appsv1.Deplo
 	labels := workloadLabels(ctx, selectorLabels)
 	pod := corev1.PodSpec{
 		ImagePullSecrets: ctx.PullSecrets,
-		NodeSelector:     nodeSelector(ctx),
 		Tolerations:      runtimeTolerations(),
 	}
+	pinPodToNode(&pod, ctx.NodeName)
 	for i, rc := range c.Containers {
 		volumes, mounts, _, configArgs := buildConfigVolumesForContainer(ctx, c, &rc, i)
 		pod.Volumes = append(pod.Volumes, volumes...)
@@ -386,13 +384,69 @@ func workloadLabels(ctx BuildContext, selectorLabels map[string]string) map[stri
 	return out
 }
 
-func nodeSelector(ctx BuildContext) map[string]string {
-	if ctx.NodeName == "" {
-		return nil
+// pinPodToNode intersects required node affinity with the selected API Node.
+// Keep the scheduler in charge (including taints and tolerations).
+func pinPodToNode(pod *corev1.PodSpec, node string) {
+	if node == "" {
+		return
 	}
-	return map[string]string{
-		"kubernetes.io/hostname": ctx.NodeName,
+	if pod.Affinity == nil {
+		pod.Affinity = &corev1.Affinity{}
 	}
+	if pod.Affinity.NodeAffinity == nil {
+		pod.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	pin := corev1.NodeSelectorRequirement{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{node}}
+	nodeAffinity := pod.Affinity.NodeAffinity
+	if nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchFields: []corev1.NodeSelectorRequirement{pin}}},
+		}
+		return
+	}
+	// Terms are ORed; adding a new pin-only term would bypass user constraints.
+	terms := nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	for i := range terms {
+		term := &terms[i]
+		// An empty term matches nothing, not everything. Do not make it viable.
+		if len(term.MatchFields) == 0 && len(term.MatchExpressions) == 0 {
+			continue
+		}
+		if !hasNodeNameRequirement(term, node) {
+			term.MatchFields = append(term.MatchFields, pin)
+		}
+	}
+}
+
+// HasExactNodePin reports whether every non-empty required affinity term has
+// an exact metadata.name requirement for node. Other requirements may make a
+// term unsatisfiable, but cannot enable placement on a different Node.
+func HasExactNodePin(pod *corev1.PodSpec, node string) bool {
+	if node == "" || pod.NodeName != "" || pod.Affinity == nil || pod.Affinity.NodeAffinity == nil {
+		return false
+	}
+	required := pod.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if required == nil {
+		return false
+	}
+	matched := false
+	for i := range required.NodeSelectorTerms {
+		term := &required.NodeSelectorTerms[i]
+		if len(term.MatchFields) == 0 && len(term.MatchExpressions) == 0 {
+			continue
+		}
+		if !hasNodeNameRequirement(term, node) {
+			return false
+		}
+		matched = true
+	}
+	return matched
+}
+
+func hasNodeNameRequirement(term *corev1.NodeSelectorTerm, node string) bool {
+	return slices.ContainsFunc(term.MatchFields, func(req corev1.NodeSelectorRequirement) bool {
+		return req.Key == "metadata.name" && req.Operator == corev1.NodeSelectorOpIn && len(req.Values) == 1 && req.Values[0] == node
+	})
 }
 
 func replicasFor(c *helpers.ResolvedComponent) *int32 {

@@ -10,7 +10,8 @@ spec:
   # yanet_v1alpha1_yanetconfig.yaml). Required.
   boxType: release
 
-  # Restrict the installation to a subset of nodes. Empty matches all.
+  # Restrict the installation by Node labels (empty matches all). The hostname
+  # label is an example selector; it need not equal the Node's API name.
   nodeSelector:
     kubernetes.io/hostname: node1.example.com
 
@@ -21,8 +22,8 @@ spec:
   # drift via Status without touching generated Deployments (default false).
   autoSync: true
 
-  # The ONLY per-installation overrides are enabled, per-container image, and
-  # controlplane disabledNuma. Runtime endpoints and everything broader
+  # Examples of per-installation overrides: enablement and per-container images.
+  # Runtime endpoints and everything broader
   # (resources, securityContext, hostIPC, ...) live in YanetConfig patches or
   # are emitted by the builder.
   components:

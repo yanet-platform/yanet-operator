@@ -1,6 +1,7 @@
 package manifests
 
 import (
+	"encoding/json"
 	"reflect"
 	"slices"
 	"testing"
@@ -243,7 +244,7 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 		listeners *[]api.OperatorListener
 		want      map[string]string
 	}{
-		{helpers.KindControlplane, "", nil, map[string]string{"YANET_GATEWAY_SERVER_GRPC_ENDPOINT": "[::]:8080"}},
+		{helpers.KindControlplane, "", nil, map[string]string{"YANET_GATEWAY_SERVER_GRPC_ENDPOINT": "[::]:9080"}},
 		{helpers.KindBirdAdapter, "", nil, map[string]string{"YANET_LISTEN_ADDR": "[::]:8080", "YANET_ROUTE_OPERATOR_ENDPOINT": "yanet-firewall-route.yanet.svc.cluster.local:8080"}},
 		{helpers.KindOperator, "route", nil, map[string]string{"YANET_SERVER_ENDPOINT": "[::]:8080", "YANET_SERVER_ADVERTISE_ENDPOINT": "yanet-firewall-route.yanet.svc.cluster.local:8080"}},
 		{helpers.KindOperator, "http", &[]api.OperatorListener{"http"}, map[string]string{"YANET_SERVER_ENDPOINT": "[::]:8081"}},
@@ -266,7 +267,12 @@ func TestRuntimeNetwork_StandaloneRuntimeContracts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			deployments, err := RenderDeployments(build, component, nil)
+			var registry PatchRegistry
+			if tc.role == helpers.KindControlplane {
+				component.Patches = []string{"native-endpoint"}
+				registry = NewPatchRegistry([]api.NamedPatch{patch("native-endpoint", `{"spec":{"template":{"spec":{"containers":[{"name":"controlplane","env":[{"name":"YANET_GATEWAY_SERVER_GRPC_ENDPOINT","value":"[::]:9080"}]}]}}}}`)})
+			}
+			deployments, err := RenderDeployments(build, component, registry)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -322,7 +328,9 @@ func TestRuntimeNetwork_ManagedBirdImportUsesFirstActiveGateway(t *testing.T) {
 func TestRuntimeNetwork_ManagedGatewayUsesTLSOnReservedPort(t *testing.T) {
 	build := certificateBuildContext()
 	component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}}
-	deployments, err := RenderDeployments(build, component, nil)
+	component.Patches = []string{"endpoints"}
+	registry := NewPatchRegistry([]api.NamedPatch{patch("endpoints", `{"spec":{"template":{"spec":{"containers":[{"name":"controlplane","env":[{"name":"YANET_GATEWAY_SERVER_GRPC_ENDPOINT","valueFrom":{"fieldRef":{"fieldPath":"status.podIP"}}},{"name":"YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT","value":"[::]:8443"},{"name":"CUSTOM","value":"retained"}]}]}}}}`)})
+	deployments, err := RenderDeployments(build, component, registry)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,6 +341,75 @@ func TestRuntimeNetwork_ManagedGatewayUsesTLSOnReservedPort(t *testing.T) {
 	}
 	if _, present := variables["YANET_GATEWAY_SERVER_HTTP_ENDPOINT"]; present {
 		t.Fatal("ambiguous HTTP environment override returned")
+	}
+	if variables["CUSTOM"] != "retained" {
+		t.Fatal("managed TLS removed unrelated environment")
+	}
+	for _, name := range []string{"YANET_GATEWAY_SERVER_GRPC_ENDPOINT", "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT"} {
+		count := 0
+		for _, variable := range deployments[0].Spec.Template.Spec.Containers[0].Env {
+			if variable.Name == name {
+				count++
+				if variable.ValueFrom != nil {
+					t.Fatalf("managed endpoint retained conflicting valueFrom: %+v", variable)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("managed endpoint %s occurs %d times", name, count)
+		}
+	}
+}
+
+func TestRuntimeNetwork_UnmanagedGatewayPreservesNativeEndpoints(t *testing.T) {
+	for _, certificates := range []string{"omitted", "empty profiles", "controlplane client", "other server"} {
+		t.Run(certificates, func(t *testing.T) {
+			for _, tc := range []struct {
+				name string
+				env  []corev1.EnvVar
+			}{
+				{name: "opaque host file owns TLS or plaintext"},
+				{name: "Service-port plaintext migration", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: "[::]:8080"}}},
+				{name: "explicit non-Service plaintext", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", Value: "[::]:9080"}}},
+				{name: "explicit TLS", env: []corev1.EnvVar{{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", Value: "[::]:8443"}}},
+				{name: "valueFrom endpoints", env: []corev1.EnvVar{
+					{Name: "YANET_GATEWAY_SERVER_GRPC_ENDPOINT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "native"}, Key: "plaintext"}}},
+					{Name: "YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "native"}, Key: "tls"}}},
+				}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					build := certificateBuildContext()
+					switch certificates {
+					case "omitted":
+						build.Certificates = nil
+					case "empty profiles":
+						build.Certificates.Profiles = nil
+					case "controlplane client":
+						build.Certificates.Profiles[0].Usage = "client"
+					case "other server":
+						build.Certificates.Profiles[0].Component = "route"
+					}
+					want := append([]corev1.EnvVar{{Name: "CUSTOM", Value: "retained"}}, tc.env...)
+					envJSON, err := json.Marshal(want)
+					if err != nil {
+						t.Fatal(err)
+					}
+					component := &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true, Config: &api.ConfigSource{HostPath: "/etc/yanet2"}, Patches: []string{"endpoints"}}
+					registry := NewPatchRegistry([]api.NamedPatch{patch("endpoints", `{"spec":{"template":{"spec":{"containers":[{"name":"controlplane","env":`+string(envJSON)+`}]}}}}`)})
+					deployments, err := RenderDeployments(build, component, registry)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(deployments) != 1 {
+						t.Fatalf("expected one controlplane deployment, got %d", len(deployments))
+					}
+					got := deployments[0].Spec.Template.Spec.Containers[0].Env
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("native endpoint environment changed without a managed server profile:\ngot  %+v\nwant %+v", got, want)
+					}
+				})
+			}
+		})
 	}
 }
 

@@ -81,6 +81,19 @@ One installation may own a node. The incumbent workload owner wins; before any
 workload exists, the oldest CR wins, with namespace/name as a stable tie-breaker.
 A deleting installation retains its claim until cleanup finishes.
 
+During a handoff, changing a Deployment's node pin does not move its existing
+Pods. The controller checks the owning Deployment, ReplicaSets and Pods, including
+terminating bound Pods and old ReplicaSets that could still start a Pod on the
+target. A legacy hostname shared by two Nodes can therefore delay handoff even
+when neither has a pending Pod. Possible placement alone does not authorize
+deleting a workload on the other Node.
+
+For a planned transfer, keep selection and hostname labels stable while draining
+the old installation. Verify its Deployments and ReplicaSets have observed zero
+replicas, its Pods have terminated, and its offline workloads cannot restart on
+the target. Then give the new installation exclusive selection. The controller's
+API reads do not lock out scheduler activity or concurrent label changes.
+
 Owner references include the API kind/group, controller bit and UID. Matching
 labels or a reused name do not authorize adoption/deletion. Finalizer cleanup
 requests foreground Deployment deletion and waits for its completion before
@@ -160,16 +173,31 @@ not the NUMA ID: a config containing only `numa1` uses
 `YANET_GATEWAYS_0_ENDPOINT` pointing to the `controlplane-numa1` Service.
 Only endpoints are overridden; list membership, names and TLS remain in the host
 config. The operator neither reads nor rewrites application configuration.
-Controlplane gRPC uses `YANET_GATEWAY_SERVER_GRPC_ENDPOINT`, matching the native
-`gateway.server.grpc.endpoint` section. Its HTTP listener must be configured in
-the host file on `[::]:8081`: `YANET_GATEWAY_SERVER_HTTP_ENDPOINT` is ambiguous
+Without a managed controlplane server certificate profile, the host file or
+explicit palette environment owns the native `gateway.server.grpc` listener.
+Configure plaintext `grpc.endpoint` or TLS `grpc.tls.endpoint` on `[::]:8080` to match
+the Service port; the operator does not synthesize a plaintext endpoint or replace
+explicit listener environment in this mode. Its HTTP listener must be configured
+in the host file on `[::]:8081`: `YANET_GATEWAY_SERVER_HTTP_ENDPOINT` is ambiguous
 between `gateway.server.http.endpoint` and deprecated `gateway.server.http_endpoint`
 and the runtime loader rejects it. The operator does not inject that variable.
+Without a native gRPC section or an explicit legacy endpoint, the public runtime
+defaults to `[::1]:8080`, which does not serve the Service's Pod IP target.
+The [v3.1.0 upgrade preflight](MANAGED_CERTIFICATES.md#gateway-listener-preflight-for-upgrades-from-v310)
+is mandatory before rolling out this ownership change.
 With a managed controlplane server certificate profile, the same reserved gRPC
 port is assigned through `YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT` and the plaintext
 gRPC endpoint is cleared. Native key-pair/authentication configuration stays in
 the host file. UID-bound gateway account policy and its offline startup gate are
 described in [MANAGED_CERTIFICATES.md](MANAGED_CERTIFICATES.md).
+Its handoff uses an installation-UID epoch and durable monotonic policy revision
+on the Yanet, allocated with uncached source verification and optimistic CAS.
+Atomic local publication lets retained revision-aware gates load newer validated
+authorization without reviving historical grants. Writer readiness requires the
+exact desired revision; consumer gates require at least their template's revision.
+Upgrading from published v3.1.0 requires an unchanged-policy rollout, refreshed
+offline checkpoints and an explicit UID-scoped acknowledgment before policy can
+advance. Deployment readiness alone does not acknowledge external checkpoints.
 Other YAML schemas, such as an ACL's nested `operator.instances`, require explicit
 schema-specific env in palette patches through the same runtime loader.
 

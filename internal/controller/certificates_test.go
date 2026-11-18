@@ -26,13 +26,31 @@ import (
 
 func certificateEnvironment(t *testing.T) (*YanetReconciler, *api.Yanet, *corev1.Node) {
 	t.Helper()
-	yanet := &api.Yanet{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "default", UID: "installation-uid", Finalizers: []string{yanetFinalizer}}, Spec: api.YanetSpec{BoxType: "release", AutoSync: helpers.PtrTrue()}}
+	yanet := &api.Yanet{ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "default", UID: "installation-uid", Generation: 1, Finalizers: []string{yanetFinalizer}}, Spec: api.YanetSpec{BoxType: "release", AutoSync: helpers.PtrTrue()}}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker.example.test", UID: "node-uid"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{"hugepages-2Mi": resource.MustParse("1Gi")}}}
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(yanet, node).WithStatusSubresource(&api.Yanet{}, &appsv1.Deployment{}, newCertificate()).Build()
 	cfg := minimalConfig()
 	cfg.Certificates = &api.CertificateManagementSpec{IssuerRef: api.CertificateIssuerRef{Name: "issuer", Kind: "Issuer"}, TrustDomain: "example.test", TrustBundle: corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "trust"}, Key: "ca.crt"}, HostPath: "/var/lib/yanet/pki", ExporterImage: "example.test/operator@sha256:" + strings.Repeat("a", 64), Duration: "87600h", RenewBefore: "480h", Profiles: []api.CertificateProfile{{Name: "gateway", Component: "controlplane", Container: "controlplane", MountPath: "/etc/yanet2/pki/gateway", Usage: "server", DNSNames: []string{"{node}"}}}}
+	if err := cl.Create(context.Background(), &api.YanetConfig{ObjectMeta: metav1.ObjectMeta{Name: api.YanetConfigName, UID: "config-uid", Generation: 1}, Spec: *cfg.DeepCopy()}); err != nil {
+		t.Fatal(err)
+	}
 	return &YanetReconciler{Client: cl, Scheme: scheme, GlobalConfig: &api.MutexYanetConfigSpec{Config: cfg}, ManageCertificates: true}, yanet, node
+}
+
+// Publish a real configuration change at the API boundary as well as updating
+// the controller's already-refreshed snapshot. Fake clients do not bump generation.
+func publishCertificateConfig(t *testing.T, r *YanetReconciler) {
+	t.Helper()
+	cfg := &api.YanetConfig{}
+	if err := r.Get(context.Background(), client.ObjectKey{Name: api.YanetConfigName}, cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Spec = *r.GlobalConfig.Config.DeepCopy()
+	cfg.Generation++
+	if err := r.Update(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func reconcileCertificates(t *testing.T, r *YanetReconciler, yanet *api.Yanet) {
@@ -92,8 +110,8 @@ func TestManagedCertificatesWaitForIssuanceAndDelivery(t *testing.T) {
 			delivery = d.DeepCopy()
 		}
 	}
-	if delivery == nil {
-		t.Fatal("delivery workload missing")
+	if delivery != nil {
+		t.Fatal("delivery started before desired issuance")
 	}
 	// Issuance alone must not unblock the consumer.
 	certificate.Object["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": certificate.GetGeneration()}}}
@@ -101,6 +119,7 @@ func TestManagedCertificatesWaitForIssuanceAndDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	reconcileCertificates(t, r, yanet)
+	delivery = certificateWorkload(t, r, "credential-delivery")
 	if err := r.List(context.Background(), deployments, client.MatchingLabels{manifests.LabelComponent: "controlplane"}); err != nil || len(deployments.Items) != 0 {
 		t.Fatalf("Secret readiness unblocked consumers: %+v %v", deployments.Items, err)
 	}
@@ -269,6 +288,8 @@ func TestManagedCertificatesDeploymentConflicts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			r, y, _ := certificateEnvironment(t)
+			reconcileCertificates(t, r, y)
+			markCertificatesIssued(t, r)
 			reconcileCertificates(t, r, y)
 			list := &appsv1.DeploymentList{}
 			if err := r.List(ctx, list, client.MatchingLabels{manifests.LabelComponent: "credential-delivery"}); err != nil {

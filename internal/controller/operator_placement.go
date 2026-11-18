@@ -22,6 +22,10 @@ func deploymentReplicasAreZero(deployment *appsv1.Deployment) bool {
 	return deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 0
 }
 
+func replicaSetMayProduce(set *appsv1.ReplicaSet) bool {
+	return set.Spec.Replicas == nil || *set.Spec.Replicas != 0 || set.Status.Replicas != 0 || set.Status.ObservedGeneration < set.Generation
+}
+
 // validateOperatorPlacementTransition refuses cross-workload migrations until
 // the previous producer cannot create Pods and every old Pod has terminated.
 // Recreate serializes only one Deployment, not a standalone-to-sidecar move.
@@ -62,10 +66,7 @@ func (r *YanetReconciler) validateOperatorPlacementTransition(
 	})
 	for _, target := range desired {
 		check := func(kind, name string, pod corev1.PodTemplateSpec) error {
-			matches := podMayUseNode(&pod.Spec, &target.node)
-			if pod.Spec.NodeName == "" && pod.Labels[manifests.LabelNode] != "" {
-				matches = pod.Labels[manifests.LabelNode] == target.node.Name
-			}
+			matches := podMayUseNode(&pod.Spec, &target.node, pod.Labels[manifests.LabelNode])
 			if pod.Labels[manifests.LabelYanet] != yanet.Name || !matches {
 				return nil
 			}
@@ -109,7 +110,7 @@ func listPlacementProducers(ctx context.Context, reader client.Reader, namespace
 		}
 	}
 	for _, set := range sets.Items {
-		if set.Spec.Replicas == nil || *set.Spec.Replicas != 0 || set.Status.Replicas != 0 || set.Status.ObservedGeneration < set.Generation {
+		if replicaSetMayProduce(&set) {
 			producers = append(producers, placementProducer{kind: "ReplicaSet", name: set.Name, template: set.Spec.Template})
 		}
 	}

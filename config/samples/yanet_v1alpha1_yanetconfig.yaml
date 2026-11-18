@@ -9,10 +9,6 @@ spec:
   # Global per-cluster throttling between any two node restarts (seconds).
   updateWindow: 60
 
-  # Optional inclusive range for application listeners after a Deployment
-  # patch enables hostNetwork. Service ports remain 8080 (gRPC) / 8081 (HTTP).
-  hostNetworkPortRange: {start: 20000, end: 20100}
-
   # Global image settings shared by every generated Deployment:
   # {registry}/{prefix}/{image}:{tag}.
   images:
@@ -43,16 +39,16 @@ spec:
       hugepages:
         size: 1Gi
         count: 8
-      hostNetwork: false  # default; true remains available for legacy nodes
+      # Workloads use private Pod networking; hostNetwork and hostPort are not supported.
       config:
         hostPath: /etc/yanet2
         args: [/etc/yanet2/dataplane.yaml]
       sidecars:
-        bird:
+        - name: bird
           image: {name: bird, tag: "2.15"}
           config:
             hostPath: /etc/bird
-        netlinkDataplaneSidecar:
+        - name: netlink-dataplane-sidecar
           image: {name: netlink-dataplane-sidecar, tag: v2.1.0}
           config:
             hostPath: /etc/yanet2
@@ -64,7 +60,7 @@ spec:
   # ============================================================
   patches:
     # The operator injects YANET_KUBERNETES_GRPC_PORT before patch env entries.
-    # It is 8080 in a Pod network namespace and an allocated port with hostNetwork.
+    # The standalone controlplane uses gRPC port 8080 in its Pod network namespace.
     - name: controlplane-listener
       patch:
         spec:
@@ -112,5 +108,5 @@ spec:
         dataplane:
           sidecars:
             bird: {}
-            netlinkDataplaneSidecar: {}
+            netlink-dataplane-sidecar: {}
           patches: [tolerations, dp-resources]

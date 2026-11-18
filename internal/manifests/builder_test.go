@@ -83,9 +83,7 @@ func TestBuildDeployments_Controlplane_NUMAFanout(t *testing.T) {
 		if v := d.Spec.Template.Labels[labelNuma]; v == "" {
 			t.Errorf("d[%d] missing numa label", i)
 		}
-		if d.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] != "node-1" {
-			t.Errorf("d[%d] missing node selector", i)
-		}
+		assertExactNodePin(t, &d.Spec.Template.Spec, "node-1")
 	}
 }
 
@@ -838,7 +836,7 @@ func TestBuildDeployments_NilComponent(t *testing.T) {
 	}
 }
 
-func TestBuildDeployments_NoNodeName_NoNodeSelector(t *testing.T) {
+func TestBuildDeployments_NoNodeName_NoNodePin(t *testing.T) {
 	ctx := ctx()
 	ctx.NodeName = ""
 	c := &helpers.ResolvedComponent{
@@ -846,8 +844,8 @@ func TestBuildDeployments_NoNodeName_NoNodeSelector(t *testing.T) {
 		Image: helpers.ResolvedImage{Name: "announcer", Tag: "x"},
 	}
 	deps, _ := BuildDeployments(ctx, c)
-	if deps[0].Spec.Template.Spec.NodeSelector != nil {
-		t.Errorf("no NodeName: expect empty selector, got %v", deps[0].Spec.Template.Spec.NodeSelector)
+	if pod := deps[0].Spec.Template.Spec; pod.Affinity != nil || pod.NodeName != "" || len(pod.NodeSelector) != 0 {
+		t.Errorf("offline build unexpectedly pinned to a Node: %+v", pod)
 	}
 }
 

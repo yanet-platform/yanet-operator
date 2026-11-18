@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,7 +57,7 @@ func SetupYanetWebhookWithManager(mgr ctrl.Manager) error {
 // ValidateCreate implements admission.Validator.
 func (v *YanetCustomValidator) ValidateCreate(ctx context.Context, y *Yanet) (admission.Warnings, error) {
 	yanetLog.Info("validate create", "name", y.Name, "namespace", y.Namespace)
-	return v.validate(ctx, y)
+	return v.validate(ctx, y, false)
 }
 
 // ValidateUpdate implements admission.Validator.
@@ -76,7 +77,13 @@ func (v *YanetCustomValidator) ValidateUpdate(ctx context.Context, old, y *Yanet
 	if old.Spec.BoxType != y.Spec.BoxType {
 		return nil, fmt.Errorf("spec.boxType is immutable (was %q, now %q)", old.Spec.BoxType, y.Spec.BoxType)
 	}
-	return v.validate(ctx, y)
+	// Only the drain switches may change when the referenced box is missing.
+	previous := old.Spec.DeepCopy()
+	previous.Enabled, previous.AutoSync = y.Spec.Enabled, y.Spec.AutoSync
+	drain := y.Spec.Enabled != nil && !*y.Spec.Enabled && y.Spec.AutoSync != nil && *y.Spec.AutoSync &&
+		(old.Spec.Enabled == nil || *old.Spec.Enabled || old.Spec.AutoSync == nil || !*old.Spec.AutoSync) &&
+		apiequality.Semantic.DeepEqual(*previous, y.Spec)
+	return v.validate(ctx, y, drain)
 }
 
 // ValidateDelete implements admission.Validator. Deletes are always
@@ -94,7 +101,7 @@ func (v *YanetCustomValidator) ValidateDelete(ctx context.Context, _ *Yanet) (ad
 // If no cluster-wide YanetConfig is reachable, the webhook degrades
 // gracefully to shape-only validation with a warning. Bootstrapping may create
 // the Yanet before the singleton YanetConfig.
-func (v *YanetCustomValidator) validate(ctx context.Context, y *Yanet) (admission.Warnings, error) {
+func (v *YanetCustomValidator) validate(ctx context.Context, y *Yanet, allowMissingBox bool) (admission.Warnings, error) {
 	if len(y.Name) > 63 {
 		return nil, fmt.Errorf("metadata.name must fit in a 63-character workload label")
 	}
@@ -124,6 +131,9 @@ func (v *YanetCustomValidator) validate(ctx context.Context, y *Yanet) (admissio
 			}
 			return nil, nil
 		}
+	}
+	if allowMissingBox {
+		return admission.Warnings{fmt.Sprintf("boxType %q is missing; only existing workloads can be drained", y.Spec.BoxType)}, nil
 	}
 	return nil, fmt.Errorf("spec.boxType %q is not defined in the cluster YanetConfig", y.Spec.BoxType)
 }
