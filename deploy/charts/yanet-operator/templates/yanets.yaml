@@ -1,0 +1,14 @@
+{{- range $name, $resource := .Values.yanets }}
+---
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: Yanet
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ $.Release.Namespace | quote }}
+  {{- with $resource.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- toYaml (required (printf "yanets.%s.spec is required" $name) $resource.spec) | nindent 2 }}
+{{- end }}

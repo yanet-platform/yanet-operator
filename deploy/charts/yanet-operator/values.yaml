@@ -92,6 +92,10 @@ grafana:
 
 extraManifests: {}
 
+# Optional map of names to Yanet resources in the release namespace.
+# Each entry takes a spec and optional annotations (string values).
+yanets: {}
+
 # ============================================================
 # v1alpha1 cluster-wide YanetConfig (optional).
 #
@@ -101,12 +105,11 @@ extraManifests: {}
 #   spec.patches    — named registry of strategic-merge fragments
 #   spec.boxTypes   — box presets (which components + which patches)
 #
-# Comment out / unset to omit the YanetConfig (e.g. if you manage
-# it through GitOps or applies it manually).
-# Chart-managed YanetConfig requires webhook.failurePolicy=Ignore because the
-# webhook certificate/CA job completes after Helm's main resource phase.
+# Leave empty to omit the YanetConfig (for example, if managed separately).
+# With failurePolicy=Fail, see the README for the webhook readiness prerequisite.
 # ============================================================
 yanetconfig: {}
+#  annotations: {}
 #  spec:
 #    stop: false
 #    updateWindow: 60
