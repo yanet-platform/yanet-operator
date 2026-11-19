@@ -80,6 +80,43 @@ def secret_rules(rules):
 
 
 class PackagingTest(unittest.TestCase):
+    def test_argocd_runtime_resources_with_fail_closed_admission(self):
+        docs = chart(
+            "webhook.enabled=true", "webhook.failurePolicy=Fail",
+            "webhook.certManager.enabled=true", "runtimeResources.argoCD=true",
+            "yanetconfig.spec.updateWindow=600", "yanets.example.boxType=release",
+            "yanets.example.enabled=false",
+        )
+        palette = one(docs, "YanetConfig")
+        installation = one(docs, "Yanet")
+        self.assertEqual(palette["metadata"]["name"], "config")
+        self.assertNotIn("namespace", palette["metadata"])
+        self.assertEqual(palette["spec"], {"updateWindow": 600})
+        self.assertEqual(installation["metadata"]["name"], "example")
+        self.assertEqual(installation["metadata"]["namespace"], "custom-system")
+        self.assertEqual(installation["spec"], {"boxType": "release", "enabled": False})
+        webhook = one(docs, "ValidatingWebhookConfiguration")
+        self.assertEqual({entry["failurePolicy"] for entry in webhook["webhooks"]}, {"Fail"})
+
+        def wave(resource):
+            return int(resource["metadata"].get("annotations", {}).get("argocd.argoproj.io/sync-wave", "0"))
+
+        for prerequisite in (one(docs, "Deployment"), one(docs, "Certificate"), webhook):
+            self.assertLess(wave(prerequisite), wave(palette))
+        self.assertLess(wave(palette), wave(installation))
+
+    def test_fail_closed_runtime_resources_require_argocd_and_cert_manager(self):
+        webhook = ("webhook.enabled=true", "webhook.failurePolicy=Fail")
+        for resource in ("yanetconfig.spec.updateWindow=600", "yanets.example.boxType=release"):
+            with self.subTest(resource=resource):
+                with self.assertRaisesRegex(AssertionError, "require an ordered Argo CD sync"):
+                    chart(*webhook, resource, "webhook.certManager.enabled=true")
+                with self.assertRaisesRegex(AssertionError, "require webhook.certManager.enabled"):
+                    chart(*webhook, resource, "runtimeResources.argoCD=true")
+
+        docs = chart(*webhook)
+        self.assertFalse({doc["kind"] for doc in docs} & {"YanetConfig", "Yanet"})
+
     def test_gateway_ssh_trust_and_human_accounts(self):
         values = {
             "manageCertificates": True,

@@ -117,7 +117,7 @@ The chart creates `serviceAccount.name` (default `controller-manager`) and binds
 operator RBAC to it. Set `serviceAccount.create: false` to use an existing account;
 the chart still binds its RBAC but does not create/delete that account.
 
-### YanetConfig
+### Runtime resources
 
 Optionally manage the cluster-scoped `YanetConfig/config` singleton through
 `yanetconfig.spec`. The default `{}` omits it. This minimal palette illustrates
@@ -139,7 +139,14 @@ yanetconfig:
         components:
           controlplane: {}
           dataplane: {}
+yanets:
+  example:
+    boxType: release
+    enabled: false
 ```
+
+`yanets` maps resource names to `Yanet` specs in the Helm release namespace.
+Its default `{}` leaves installations unmanaged by the chart.
 
 Chart 0.2.0 / operator 3.0.0 uses only `yanet.yanet-platform.io/v1alpha1`, kinds
 `Yanet` and `YanetConfig`. The former component-based API has these short names;
@@ -171,10 +178,20 @@ for additional inputs, sockets and permissions; no component name implies a moun
 The full example uses a generated ConfigMap to select netconfig's Netplan mode and
 mounts only the host `/etc/netplan/00-interfaces.yaml` file as its network input.
 
-With webhooks enabled, chart-managed `yanetconfig` requires
-`webhook.failurePolicy: Ignore`. Helm
-creates normal resources before the post-install/post-upgrade webhook CA job;
-with `Fail`, manage the singleton separately after the webhook is ready.
+With `webhook.enabled: true` and `webhook.failurePolicy: Fail`, keep runtime
+resources in a separate lifecycle for direct `helm install` or `helm upgrade`.
+Helm submits ordinary resources before the post-install/post-upgrade CA job and
+does not honor Argo CD sync waves.
+
+When Argo CD renders and syncs the chart, set `runtimeResources.argoCD: true`
+and `webhook.certManager.enabled: true` to use chart-managed runtime resources
+with fail-closed admission. The chart places `YanetConfig` in sync wave 1 and
+`Yanet` in wave 2. On a new cluster, first sync the operator without runtime
+resources. Before enabling them, verify that both webhook entries have an injected
+CA bundle and that the API server can reach the webhook and enforce its validation.
+Sync waves order the submissions; they do not verify CA injection or admission
+readiness. If migrating objects already managed elsewhere, coordinate ownership
+and pruning before switching sources.
 
 Drain workloads before changing networking or moving a role between standalone
 and dataplane. Use installation `enabled: false` and `autoSync: true`, then wait for

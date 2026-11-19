@@ -92,6 +92,14 @@ grafana:
 
 extraManifests: {}
 
+# Set only when Argo CD renders and synchronizes this chart. Helm itself does
+# not process Argo CD sync waves.
+runtimeResources:
+  argoCD: false
+
+# Optional map of names to Yanet specs in the release namespace.
+yanets: {}
+
 # ============================================================
 # v1alpha1 cluster-wide YanetConfig (optional).
 #
@@ -101,10 +109,10 @@ extraManifests: {}
 #   spec.patches    — named registry of strategic-merge fragments
 #   spec.boxTypes   — box presets (which components + which patches)
 #
-# Comment out / unset to omit the YanetConfig (e.g. if you manage
-# it through GitOps or applies it manually).
-# Chart-managed YanetConfig requires webhook.failurePolicy=Ignore because the
-# webhook certificate/CA job completes after Helm's main resource phase.
+# Leave empty to omit the YanetConfig (for example, if managed separately).
+# With failurePolicy=Fail, manage these resources separately for Helm installs.
+# When Argo CD renders the chart, use runtimeResources.argoCD and cert-manager;
+# see the README for the webhook readiness prerequisite.
 # ============================================================
 yanetconfig: {}
 #  spec:

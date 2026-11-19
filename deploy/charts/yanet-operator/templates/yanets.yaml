@@ -1,0 +1,14 @@
+{{- range $name, $spec := .Values.yanets }}
+---
+apiVersion: yanet.yanet-platform.io/v1alpha1
+kind: Yanet
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ $.Release.Namespace | quote }}
+  {{- if $.Values.runtimeResources.argoCD }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  {{- end }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}
