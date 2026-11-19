@@ -29,10 +29,15 @@ issuer, CA private key, public trust bundle or approval policy.
 For gateway SSH certificate authentication, supply an OpenSSH public CA ConfigMap
 through `extraManifests` and reference it with
 `yanetconfig.spec.certificates.sshTrustBundle: {name: gateway-ssh-trust, key: ssh-ca.pub}`.
-Declare local users and explicit RPC grants in
-`yanetconfig.spec.certificates.additionalGatewayAccounts`. These are merged with
-UID-bound workload accounts and delivered persistently, including the SSH trust,
-without adding ConfigMap dependencies to runtime recovery Pods. See the managed
+Declare RPC grants under `yanetconfig.spec.certificates`:
+
+- `additionalGatewayAccounts` grants explicit RPC methods to local logins.
+- `profiles[].gatewayPermissions` grants explicit RPC methods to the UID-bound
+  identity of an active workload profile.
+
+The operator combines these grants per installation and delivers the gateway
+policy persistently along with the configured trust. A trust bundle authenticates
+identities; membership in that bundle does not grant RPC access. See the managed
 certificate guide for the schema, native authenticator and restart contract.
 
 On a fresh cluster, bootstrap the dependency before enabling its consumers:
@@ -126,6 +131,8 @@ before enabling workloads:
 
 ```yaml
 yanetconfig:
+  annotations:
+    example.com/owner: platform
   spec:
     images:
       tag: example
@@ -141,12 +148,17 @@ yanetconfig:
           dataplane: {}
 yanets:
   example:
-    boxType: release
-    enabled: false
+    annotations:
+      example.com/owner: edge
+    spec:
+      boxType: release
+      enabled: false
 ```
 
-`yanets` maps resource names to `Yanet` specs in the Helm release namespace.
-Its default `{}` leaves installations unmanaged by the chart.
+`yanets` maps resource names to `Yanet` definitions in the Helm release namespace.
+Its default `{}` leaves installations unmanaged by the chart. Both `yanetconfig`
+and each `yanets` entry accept an optional `annotations` map of string values,
+rendered as `metadata.annotations` on the resource.
 
 Chart 0.2.0 / operator 3.0.0 uses only `yanet.yanet-platform.io/v1alpha1`, kinds
 `Yanet` and `YanetConfig`. The former component-based API has these short names;
@@ -178,20 +190,18 @@ for additional inputs, sockets and permissions; no component name implies a moun
 The full example uses a generated ConfigMap to select netconfig's Netplan mode and
 mounts only the host `/etc/netplan/00-interfaces.yaml` file as its network input.
 
-With `webhook.enabled: true` and `webhook.failurePolicy: Fail`, keep runtime
-resources in a separate lifecycle for direct `helm install` or `helm upgrade`.
-Helm submits ordinary resources before the post-install/post-upgrade CA job and
-does not honor Argo CD sync waves.
+With `webhook.enabled: true` and `webhook.failurePolicy: Fail`, chart-managed
+runtime resources require `webhook.certManager.enabled: true`. The certgen CA
+patch hooks run after Helm submits ordinary resources; with certgen, manage the
+runtime resources separately.
 
-When Argo CD renders and syncs the chart, set `runtimeResources.argoCD: true`
-and `webhook.certManager.enabled: true` to use chart-managed runtime resources
-with fail-closed admission. The chart places `YanetConfig` in sync wave 1 and
-`Yanet` in wave 2. On a new cluster, first sync the operator without runtime
-resources. Before enabling them, verify that both webhook entries have an injected
-CA bundle and that the API server can reach the webhook and enforce its validation.
-Sync waves order the submissions; they do not verify CA injection or admission
-readiness. If migrating objects already managed elsewhere, coordinate ownership
-and pruning before switching sources.
+On a new cluster, first deploy the operator without runtime resources. Before
+enabling them, verify that both webhook entries have an injected CA bundle and
+that the API server can reach the webhook and enforce its validation. Apply
+`YanetConfig` before `Yanet` resources that use its palette. Deployment tools can
+use annotations to order submissions, but ordering alone does not establish
+webhook readiness. Coordinate ownership and pruning when moving existing objects
+into the release.
 
 Drain workloads before changing networking or moving a role between standalone
 and dataplane. Use installation `enabled: false` and `autoSync: true`, then wait for

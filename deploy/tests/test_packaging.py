@@ -80,39 +80,33 @@ def secret_rules(rules):
 
 
 class PackagingTest(unittest.TestCase):
-    def test_argocd_runtime_resources_with_fail_closed_admission(self):
+    def test_runtime_resource_annotations_with_fail_closed_admission(self):
         docs = chart(
             "webhook.enabled=true", "webhook.failurePolicy=Fail",
-            "webhook.certManager.enabled=true", "runtimeResources.argoCD=true",
-            "yanetconfig.spec.updateWindow=600", "yanets.example.boxType=release",
-            "yanets.example.enabled=false",
+            "webhook.certManager.enabled=true", "yanetconfig.spec.updateWindow=600",
+            r"yanetconfig.annotations.example\.com/owner=platform",
+            r"yanets.example.annotations.example\.com/owner=edge",
+            "yanets.example.spec.boxType=release", "yanets.example.spec.enabled=false",
         )
         palette = one(docs, "YanetConfig")
         installation = one(docs, "Yanet")
         self.assertEqual(palette["metadata"]["name"], "config")
         self.assertNotIn("namespace", palette["metadata"])
+        self.assertEqual(palette["metadata"]["annotations"], {"example.com/owner": "platform"})
         self.assertEqual(palette["spec"], {"updateWindow": 600})
         self.assertEqual(installation["metadata"]["name"], "example")
         self.assertEqual(installation["metadata"]["namespace"], "custom-system")
+        self.assertEqual(installation["metadata"]["annotations"], {"example.com/owner": "edge"})
         self.assertEqual(installation["spec"], {"boxType": "release", "enabled": False})
         webhook = one(docs, "ValidatingWebhookConfiguration")
         self.assertEqual({entry["failurePolicy"] for entry in webhook["webhooks"]}, {"Fail"})
 
-        def wave(resource):
-            return int(resource["metadata"].get("annotations", {}).get("argocd.argoproj.io/sync-wave", "0"))
-
-        for prerequisite in (one(docs, "Deployment"), one(docs, "Certificate"), webhook):
-            self.assertLess(wave(prerequisite), wave(palette))
-        self.assertLess(wave(palette), wave(installation))
-
-    def test_fail_closed_runtime_resources_require_argocd_and_cert_manager(self):
+    def test_fail_closed_runtime_resources_reject_certgen_hooks(self):
         webhook = ("webhook.enabled=true", "webhook.failurePolicy=Fail")
-        for resource in ("yanetconfig.spec.updateWindow=600", "yanets.example.boxType=release"):
+        for resource in ("yanetconfig.spec.updateWindow=600", "yanets.example.spec.boxType=release"):
             with self.subTest(resource=resource):
-                with self.assertRaisesRegex(AssertionError, "require an ordered Argo CD sync"):
-                    chart(*webhook, resource, "webhook.certManager.enabled=true")
                 with self.assertRaisesRegex(AssertionError, "require webhook.certManager.enabled"):
-                    chart(*webhook, resource, "runtimeResources.argoCD=true")
+                    chart(*webhook, resource)
 
         docs = chart(*webhook)
         self.assertFalse({doc["kind"] for doc in docs} & {"YanetConfig", "Yanet"})
@@ -126,6 +120,11 @@ class PackagingTest(unittest.TestCase):
                     {"username": "root", "permissions": ["/*/*"]},
                     {"username": "alice", "permissions": ["/example.v1.Service/Read"]},
                 ],
+                "profiles": [{
+                    "name": "reader", "component": "reader", "container": "reader",
+                    "usage": "client", "mountPath": "/etc/yanet2/pki/reader",
+                    "gatewayPermissions": ["/example.v1.Service/Read"],
+                }],
             }}},
             "extraManifests": {"sshTrust": {
                 "apiVersion": "v1", "kind": "ConfigMap",
@@ -144,6 +143,7 @@ class PackagingTest(unittest.TestCase):
             {"username": "root", "permissions": ["/*/*"]},
             {"username": "alice", "permissions": ["/example.v1.Service/Read"]},
         ])
+        self.assertEqual(certificates["profiles"][0]["gatewayPermissions"], ["/example.v1.Service/Read"])
         reference = certificates["sshTrustBundle"]
         trust = next(doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == reference["name"])
         self.assertEqual(trust["metadata"]["namespace"], "custom-system")

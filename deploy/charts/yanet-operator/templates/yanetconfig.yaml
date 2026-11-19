@@ -1,13 +1,12 @@
 {{- include "yanet-operator.validateRuntimeResources" . }}
-{{- $argoCD := .Values.runtimeResources.argoCD }}
 {{- with .Values.yanetconfig }}
 apiVersion: yanet.yanet-platform.io/v1alpha1
 kind: YanetConfig
 metadata:
   name: config
-  {{- if $argoCD }}
+  {{- with .annotations }}
   annotations:
-    argocd.argoproj.io/sync-wave: "1"
+    {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
    {{- with .spec }}
