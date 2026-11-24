@@ -253,7 +253,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	enabled, err := helpers.EnabledComponentsForBox(&cfg.Spec, yanet.Spec.BoxType)
+	wired, err := helpers.EnabledComponentsForBox(&cfg.Spec, yanet.Spec.BoxType)
 	if err != nil {
 		logger.Error(err, "could not enumerate boxType components")
 		if r.Recorder != nil && r.checkGlobalStop() == nil {
@@ -297,7 +297,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 	}
 
 	servicePlans, certificatePlans, workloadsByNode, preflightErr := r.preflightResources(
-		ctx, &cfg.Spec, yanet, nodes, enabled, installationEnabled, pullPolicy, owner, registry,
+		ctx, &cfg.Spec, yanet, nodes, wired, installationEnabled, pullPolicy, owner, registry,
 	)
 	var policyErr error
 	var frozen credentialFreeze
@@ -448,7 +448,7 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			}
 		}
 
-		for _, ref := range enabled {
+		for _, ref := range wired {
 			rc, rerr := helpers.ResolveBoxComponent(&cfg.Spec, &yanet.Spec, ref.Kind, ref.OperatorName)
 			if rerr != nil {
 				logger.Error(rerr, "resolve failed", "kind", ref.Kind, "operator", ref.OperatorName)
@@ -683,7 +683,7 @@ func (r *YanetReconciler) preflightResources(
 	cfg *yanetv1alpha1.YanetConfigSpec,
 	yanet *yanetv1alpha1.Yanet,
 	nodes []corev1.Node,
-	enabled []helpers.ComponentRef,
+	wired []helpers.ComponentRef,
 	installationEnabled bool,
 	pullPolicy corev1.PullPolicy,
 	owner metav1.OwnerReference,
@@ -702,6 +702,7 @@ func (r *YanetReconciler) preflightResources(
 	if cfg.Certificates != nil && !r.ManageCertificates {
 		return nil, nil, nil, fmt.Errorf("certificates require --manage-certificates")
 	}
+	boxCertificates := certificatesForWiredComponents(cfg.Certificates, wired)
 	workloadsByNode = make(map[string][]renderedWorkload, len(nodes))
 	deploymentNames := make(map[client.ObjectKey]string)
 	collided := make(map[string]struct{})
@@ -741,7 +742,7 @@ func (r *YanetReconciler) preflightResources(
 			BoxType:         yanet.Spec.BoxType,
 			NodeName:        node.Name,
 			NodeUID:         string(node.UID),
-			Certificates:    cfg.Certificates,
+			Certificates:    boxCertificates,
 			PullPolicy:      pullPolicy,
 			PullSecrets:     cfg.Images.PullSecrets,
 			OwnerRef:        owner,
@@ -752,7 +753,7 @@ func (r *YanetReconciler) preflightResources(
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		for _, ref := range enabled {
+		for _, ref := range wired {
 			rc, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
 			if err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("resolve %s on node %s: %w", ref.Kind, node.Name, err))
@@ -809,7 +810,7 @@ func (r *YanetReconciler) preflightResources(
 			Namespace: yanet.Namespace,
 			BoxType:   yanet.Spec.BoxType,
 		}
-		for _, ref := range enabled {
+		for _, ref := range wired {
 			component, err := helpers.ResolveBoxComponent(cfg, &yanet.Spec, ref.Kind, ref.OperatorName)
 			if err != nil {
 				preflightErrs = append(preflightErrs, fmt.Errorf("resolve %s without matched nodes: %w", ref.Kind, err))

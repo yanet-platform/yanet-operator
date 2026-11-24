@@ -57,7 +57,8 @@ type BuildContext struct {
 	NodeName string
 	// NodeUID prevents a replacement node inheriting a previous node's identity.
 	NodeUID string
-	// Certificates is opt-in; consumers get persistent HostPaths, never Secrets.
+	// Certificates holds the opt-in profiles for the selected box, including
+	// disabled roles. Consumers get persistent HostPaths, never Secrets.
 	Certificates *yanetv1alpha1.CertificateManagementSpec
 	// NodeAllocatable supplies hugepage pools for automatic dataplane sizing.
 	// It is a node snapshot, not currently unallocated scheduler capacity.

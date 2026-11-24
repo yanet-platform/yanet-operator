@@ -101,28 +101,30 @@ func certificateName(ctx BuildContext, profile string) string {
 
 // BuildCertificatePlan issues only profiles actually mounted by effective
 // workloads. NUMA fan-out shares one role identity; disabled/unselected native
-// sidecars do not acquire credentials. Delivery lives in a separate Pod so static
-// recovery checkpoints of the consumers contain no Secret or ConfigMap volumes.
+// sidecars do not acquire credentials. Gateway policy includes every wired client
+// profile's grants, regardless of whether its credential is currently issued.
+// Delivery lives in a separate Pod so recovery checkpoints of the consumers
+// contain no Secret or ConfigMap volumes.
 func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enabled bool) CertificatePlan {
 	var plan CertificatePlan
 	if ctx.Certificates == nil {
 		return plan
 	}
-	selected := map[string]bool{}
+	mounted := map[string]bool{}
 	for _, d := range workloads {
-		// Disabled roles must not block active consumers on unnecessary issuance
-		// or retain gateway grants. A whole-installation drain still inventories
-		// its credentials for ownership checks and scales delivery to zero.
+		// Disabled roles must not block active consumers on unnecessary issuance.
+		// A whole-installation drain still inventories its credentials for
+		// ownership checks and scales delivery to zero.
 		if enabled && d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
 			continue
 		}
 		for _, v := range d.Spec.Template.Spec.Volumes {
-			selected[v.Name] = true
+			mounted[v.Name] = true
 		}
 	}
 	var accountArgs []string
 	for _, profile := range ctx.Certificates.Profiles {
-		if !selected[pemVolumePrefix+profile.Name] || len(profile.GatewayPermissions) == 0 {
+		if len(profile.GatewayPermissions) == 0 {
 			continue
 		}
 		account := credentials.GatewayAccount{
@@ -149,7 +151,7 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 		}}})
 	}
 	for _, p := range ctx.Certificates.Profiles {
-		if !selected[pemVolumePrefix+p.Name] {
+		if !mounted[pemVolumePrefix+p.Name] {
 			continue
 		}
 		name := certificateName(ctx, p.Name)

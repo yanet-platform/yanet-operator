@@ -217,11 +217,15 @@ Provision issuer keys outside this controller, with separate backup/rotation.
 Authentication mode, RPC permissions and account mapping are application policy.
 Client profiles can declare `gatewayPermissions`: at most 128 full
 `/package.Service/Method` patterns, with `*` allowed within service/method names.
-Only effective node workloads receive accounts. Every server-role exporter writes
-their exact installation/Node UID-bound URI principals to `identities.yaml` and
-their explicit grants to `permissions.yaml` alongside the PEMs in `current`.
+Every client profile wired into the installation's `boxType` keeps its configured
+grants even when the workload is disabled, scaled to zero, or omitted as a
+disabled native sidecar. Only active workloads require issuance and delivery of
+client certificates. Every server-role exporter writes the exact
+installation/Node UID-bound URI principals to `identities.yaml` and their explicit
+grants to `permissions.yaml` alongside the PEMs in `current`.
 An empty set writes an explicit empty policy, including after the last grant is
-removed. No account is implied by certificate issuance alone.
+removed. To revoke a grant, edit `gatewayPermissions` or remove the role from
+the box wiring; scaling down is not revocation.
 
 Configure the gateway's file identity provider and permission store to read
 `<server mountPath>/current/identities.yaml` and `permissions.yaml`. The operator
@@ -229,7 +233,10 @@ does not enable authentication or infer role permissions. Policy changes create
 a new durable generation and change the gateway Pod template; a read-only
 `credential-sync --check` init container rejects stale policy before startup.
 It uses only cached public trust and the role directory, so the gate also works
-without the API. Normal leaf rotation does not change the Pod template.
+without the API. Client enablement and normal leaf rotation do not change the
+gateway Pod template. On upgrade from a policy that omitted disabled clients,
+adding their configured grants is a one-time policy change. Complete any pending
+checkpoint bridge on the previous version before applying that change.
 
 ### Policy handoff and upgrade from v3.1.0
 
