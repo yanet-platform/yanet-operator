@@ -235,7 +235,7 @@ func publishOnlinePolicy(destination string, candidate onlinePolicyGeneration, d
 	if err := os.MkdirAll(destination, 0o700); err != nil {
 		return false, err
 	}
-	if err := os.Chmod(destination, 0o700); err != nil { //nolint:gosec // The writer owns this private role directory.
+	if err := os.Chmod(destination, 0o700); err != nil { // #nosec G302 -- This is an owner-only directory, which requires search permission.
 		return false, err
 	}
 	root, err := os.OpenRoot(destination)
