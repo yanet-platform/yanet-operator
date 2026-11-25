@@ -22,7 +22,7 @@ type CertificateManagementSpec struct {
 	// namespace. The leaf Secret's ca.crt is deliberately not a trust source.
 	TrustBundle corev1.ConfigMapKeySelector `json:"trustBundle"`
 	// SSHTrustBundle supplies OpenSSH CA public keys for gateway SSH certificate
-	// authentication. It is independent of X.509 trust and is persisted only in
+	// authentication. It is independent of X.509 trust and is persisted in
 	// server-role current/ssh-ca.pub generations.
 	// +optional
 	SSHTrustBundle *corev1.ConfigMapKeySelector `json:"sshTrustBundle,omitempty"`
@@ -31,6 +31,10 @@ type CertificateManagementSpec struct {
 	// +optional
 	// +kubebuilder:validation:MaxItems=32
 	AdditionalGatewayAccounts []GatewayAccount `json:"additionalGatewayAccounts,omitempty"`
+	// OnlineGatewayPolicy delivers policy separately from TLS credentials.
+	// Enable only on a fresh installation with compatible runtime and exporter images.
+	// +optional
+	OnlineGatewayPolicy bool `json:"onlineGatewayPolicy,omitempty"`
 	// HostPath must be a persistent directory, not /run, /tmp or kubelet cache.
 	HostPath string `json:"hostPath"`
 	// ExporterImage is an exact operator image containing /manager credential-sync.
@@ -164,8 +168,15 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 	}
 	names := map[string]bool{}
 	for _, op := range components.Operators {
-		if op.Name == "credential-delivery" {
-			return fmt.Errorf("credential-delivery is reserved when certificates are enabled")
+		if op.Name == "credential-delivery" || (c.OnlineGatewayPolicy && op.Name == "policy-delivery") {
+			return fmt.Errorf("%s is reserved when the corresponding delivery is enabled", op.Name)
+		}
+	}
+	if c.OnlineGatewayPolicy {
+		for _, sidecar := range components.Dataplane.Sidecars {
+			if sidecar.Name == "policy-delivery" {
+				return fmt.Errorf("%s is reserved when online gateway policy is enabled", sidecar.Name)
+			}
 		}
 	}
 	hasServer := false
@@ -220,8 +231,8 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 			return fmt.Errorf("certificate profile %q references an undeclared component/container", p.Name)
 		}
 	}
-	if !hasServer && (c.SSHTrustBundle != nil || len(c.AdditionalGatewayAccounts) > 0) {
-		return fmt.Errorf("gateway SSH trust and additional accounts require a server certificate profile")
+	if !hasServer && (c.OnlineGatewayPolicy || c.SSHTrustBundle != nil || len(c.AdditionalGatewayAccounts) > 0) {
+		return fmt.Errorf("managed gateway policy requires a server certificate profile")
 	}
 	return nil
 }

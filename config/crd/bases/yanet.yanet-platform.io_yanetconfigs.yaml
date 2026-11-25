@@ -212,6 +212,11 @@ spec:
                     - kind
                     - name
                     type: object
+                  onlineGatewayPolicy:
+                    description: |-
+                      OnlineGatewayPolicy delivers policy separately from TLS credentials.
+                      Enable only on a fresh installation with compatible runtime and exporter images.
+                    type: boolean
                   profiles:
                     items:
                       description: |-
@@ -268,7 +273,7 @@ spec:
                   sshTrustBundle:
                     description: |-
                       SSHTrustBundle supplies OpenSSH CA public keys for gateway SSH certificate
-                      authentication. It is independent of X.509 trust and is persisted only in
+                      authentication. It is independent of X.509 trust and is persisted in
                       server-role current/ssh-ca.pub generations.
                     properties:
                       key:

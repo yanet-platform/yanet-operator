@@ -26,8 +26,9 @@ const pemVolumePrefix = "yanet-credential-"
 // CertificatePlan separates issuance from node-local delivery. Neither alone
 // proves that a running application loaded the new leaf or reconnected its RPCs.
 type CertificatePlan struct {
-	Certificates []*unstructured.Unstructured
-	Delivery     *appsv1.Deployment
+	Certificates   []*unstructured.Unstructured
+	Delivery       *appsv1.Deployment
+	PolicyDelivery *appsv1.Deployment
 }
 
 // ConfigureCertificates applies the typed mount contract after user patches.
@@ -76,6 +77,10 @@ func ConfigureCertificates(d *appsv1.Deployment, ctx BuildContext) error {
 		for _, containers := range [][]corev1.Container{pod.Containers, pod.InitContainers} {
 			for _, container := range containers {
 				for _, mount := range container.VolumeMounts {
+					if container.Name == containerName && mount.MountPath == policyMount &&
+						strings.HasPrefix(mount.Name, policyVolumePrefix) && overlapsPolicyMount(p.MountPath) {
+						return fmt.Errorf("certificate profile %q mount overlaps the managed policy mount", p.Name)
+					}
 					// Volume names are Pod-wide; mount paths belong to each container.
 					if mount.Name == volumeName || (container.Name == containerName && mount.MountPath == p.MountPath) {
 						return fmt.Errorf("patch conflicts with certificate profile %q mount", p.Name)
@@ -86,6 +91,11 @@ func ConfigureCertificates(d *appsv1.Deployment, ctx BuildContext) error {
 		directory := corev1.HostPathDirectoryOrCreate
 		pod.Volumes = append(pod.Volumes, corev1.Volume{Name: volumeName, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: credentialHostPath(ctx, p), Type: &directory}}})
 		target.VolumeMounts = append(target.VolumeMounts, corev1.VolumeMount{Name: volumeName, MountPath: p.MountPath, ReadOnly: true})
+		if ctx.Certificates.OnlineGatewayPolicy && p.Usage == "server" {
+			if err := configureOnlinePolicyMount(ctx, pod, target, p); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -123,21 +133,13 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 		}
 	}
 	var accountArgs []string
-	for _, profile := range ctx.Certificates.Profiles {
-		if len(profile.GatewayPermissions) == 0 {
-			continue
+	if !ctx.Certificates.OnlineGatewayPolicy {
+		for _, account := range GatewayAccounts(ctx.Certificates, ctx.Namespace, string(ctx.OwnerRef.UID), ctx.NodeUID) {
+			encoded, _ := json.Marshal(account) //nolint:errcheck // Strings and string slices cannot fail JSON encoding.
+			accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
 		}
-		account := credentials.GatewayAccount{
-			Username:    api.CertificateURI(ctx.Certificates.TrustDomain, ctx.Namespace, string(ctx.OwnerRef.UID), ctx.NodeUID, profile.Name),
-			Permissions: profile.GatewayPermissions,
-		}
-		encoded, _ := json.Marshal(account) //nolint:errcheck // Strings and string slices cannot fail JSON encoding.
-		accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
 	}
-	for _, account := range ctx.Certificates.AdditionalGatewayAccounts {
-		encoded, _ := json.Marshal(account) //nolint:errcheck // Strings and string slices cannot fail JSON encoding.
-		accountArgs = append(accountArgs, "--gateway-account="+string(encoded))
-	}
+	plan.PolicyDelivery = buildPolicyDelivery(ctx, enabled)
 	pod := corev1.PodSpec{
 		AutomountServiceAccountToken: helpers.PtrFalse(),
 		Tolerations:                  runtimeTolerations(), ImagePullSecrets: ctx.PullSecrets,
@@ -145,7 +147,8 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 		Volumes:         []corev1.Volume{{Name: "trust", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: ctx.Certificates.TrustBundle.LocalObjectReference, Items: []corev1.KeyToPath{{Key: ctx.Certificates.TrustBundle.Key, Path: "ca.crt"}}}}}},
 	}
 	pinPodToNode(&pod, ctx.NodeName)
-	if trust := ctx.Certificates.SSHTrustBundle; trust != nil {
+	legacySSH := !ctx.Certificates.OnlineGatewayPolicy && ctx.Certificates.SSHTrustBundle != nil
+	if trust := ctx.Certificates.SSHTrustBundle; legacySSH {
 		pod.Volumes = append(pod.Volumes, corev1.Volume{Name: "ssh-trust", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: trust.LocalObjectReference, Items: []corev1.KeyToPath{{Key: trust.Key, Path: "ssh-ca.pub"}},
 		}}})
@@ -164,12 +167,14 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			args = append(args, "--dns="+value)
 		}
 		if p.Usage == "server" {
-			args = append(args, "--gateway-policy")
-			args = append(args, accountArgs...)
-			if ctx.Certificates.SSHTrustBundle != nil {
-				args = append(args, "--ssh-trust=/ssh-trust/ssh-ca.pub")
+			if !ctx.Certificates.OnlineGatewayPolicy {
+				args = append(args, "--gateway-policy")
+				args = append(args, accountArgs...)
+				if legacySSH {
+					args = append(args, "--ssh-trust=/ssh-trust/ssh-ca.pub")
+				}
 			}
-			configureGatewayAccountGate(ctx, workloads, p, args)
+			configureServerCredentialGate(ctx, workloads, p, args)
 		}
 		group := ctx.Certificates.IssuerRef.Group
 		if group == "" {
@@ -209,7 +214,7 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			VolumeMounts:    []corev1.VolumeMount{{Name: secretVolume, MountPath: "/source", ReadOnly: true}, {Name: "trust", MountPath: "/trust", ReadOnly: true}, {Name: outputVolume, MountPath: "/persist"}},
 			ReadinessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: append(append([]string{"/manager"}, args...), "--check", "--writer-readiness")}}, PeriodSeconds: 10, TimeoutSeconds: 5},
 		})
-		if p.Usage == "server" && ctx.Certificates.SSHTrustBundle != nil {
+		if p.Usage == "server" && legacySSH {
 			exporter := &pod.Containers[len(pod.Containers)-1]
 			exporter.VolumeMounts = append(exporter.VolumeMounts, corev1.VolumeMount{Name: "ssh-trust", MountPath: "/ssh-trust", ReadOnly: true})
 		}
@@ -227,10 +232,27 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 	return plan
 }
 
-// A gateway reads identities once at startup. Gate each new Pod on the exact
-// delivered policy, so it cannot start with an older still-valid PEM generation
-// while the independent delivery Deployment is catching up.
-func configureGatewayAccountGate(ctx BuildContext, workloads []*appsv1.Deployment, profile api.CertificateProfile, args []string) {
+// GatewayAccounts preserves legacy argument order while sharing account
+// selection between the legacy and online publishers.
+func GatewayAccounts(spec *api.CertificateManagementSpec, namespace, epoch, nodeUID string) []credentials.GatewayAccount {
+	accounts := make([]credentials.GatewayAccount, 0, len(spec.Profiles)+len(spec.AdditionalGatewayAccounts))
+	for _, profile := range spec.Profiles {
+		if len(profile.GatewayPermissions) != 0 {
+			accounts = append(accounts, credentials.GatewayAccount{
+				Username:    api.CertificateURI(spec.TrustDomain, namespace, epoch, nodeUID, profile.Name),
+				Permissions: profile.GatewayPermissions,
+			})
+		}
+	}
+	for _, account := range spec.AdditionalGatewayAccounts {
+		accounts = append(accounts, credentials.GatewayAccount(account))
+	}
+	return accounts
+}
+
+// The credential gate checks TLS on startup. In legacy mode it also checks the
+// exact policy bundled with the PEM. Online policy has its own gate and store.
+func configureServerCredentialGate(ctx BuildContext, workloads []*appsv1.Deployment, profile api.CertificateProfile, args []string) {
 	volumeName := pemVolumePrefix + profile.Name
 	digest := sha256.Sum256([]byte(strings.Join(args, "\x00")))
 	for _, workload := range workloads {
@@ -238,13 +260,15 @@ func configureGatewayAccountGate(ctx BuildContext, workloads []*appsv1.Deploymen
 			if volume.Name != volumeName {
 				continue
 			}
-			if workload.Spec.Template.Annotations == nil {
-				workload.Spec.Template.Annotations = map[string]string{}
+			if !ctx.Certificates.OnlineGatewayPolicy {
+				if workload.Spec.Template.Annotations == nil {
+					workload.Spec.Template.Annotations = map[string]string{}
+				}
+				workload.Spec.Template.Annotations["yanet.yanet-platform.io/accounts-"+profile.Name] = hex.EncodeToString(digest[:])
 			}
-			workload.Spec.Template.Annotations["yanet.yanet-platform.io/accounts-"+profile.Name] = hex.EncodeToString(digest[:])
 			checkArgs := append([]string{}, args...)
 			checkArgs = append(checkArgs, "--destination=/persist", "--trust=/persist/current/ca.crt", "--check")
-			if ctx.Certificates.SSHTrustBundle != nil {
+			if !ctx.Certificates.OnlineGatewayPolicy && ctx.Certificates.SSHTrustBundle != nil {
 				checkArgs = append(checkArgs, "--ssh-trust=/persist/current/ssh-ca.pub")
 			}
 			gate := corev1.Container{

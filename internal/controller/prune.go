@@ -101,6 +101,40 @@ func (r *YanetReconciler) pruneConflictingDeployments(
 	return nil
 }
 
+// Missing online ACL input blocks publication, not foreground deletion of
+// this installation's workloads from nodes it no longer selects.
+func (r *YanetReconciler) pruneReleasedOnlineNodes(
+	ctx context.Context, y *yanetv1alpha1.Yanet, cfg *yanetv1alpha1.YanetConfigSpec, nodes []corev1.Node, logger logr.Logger,
+) error {
+	fresh, _, err := r.onlinePolicySources(ctx, y, cfg, "", false)
+	if err != nil {
+		return err
+	}
+	if verifyErr := r.verifyOnlineNodes(ctx, fresh, nodes); verifyErr != nil {
+		return verifyErr
+	}
+	deployments := &appsv1.DeploymentList{}
+	if listErr := r.liveReader().List(ctx, deployments, client.InNamespace(fresh.Namespace)); listErr != nil {
+		return fmt.Errorf("list released Deployments: %w", listErr)
+	}
+	selected := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		selected[node.Name] = true
+	}
+	released := map[string]struct{}{}
+	for i := range deployments.Items {
+		d := &deployments.Items[i]
+		node := deploymentClaimNode(d)
+		if controlledByYanet(d, fresh) && node != "" && !selected[node] {
+			released[node] = struct{}{}
+		}
+	}
+	if len(released) == 0 {
+		return nil
+	}
+	return r.pruneConflictingDeployments(ctx, fresh, &nodeSelectionConflict{cleanupNodeNames: released}, logger)
+}
+
 // No render is possible after a box was removed. Only the explicit disable
 // path calls this; never initialize a finalizer or create a missing workload.
 func (r *YanetReconciler) drainExistingDeployments(ctx context.Context, y *yanetv1alpha1.Yanet) error {

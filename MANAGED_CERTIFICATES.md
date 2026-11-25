@@ -220,7 +220,7 @@ Client profiles can declare `gatewayPermissions`: at most 128 full
 Every client profile wired into the installation's `boxType` keeps its configured
 grants even when the workload is disabled, scaled to zero, or omitted as a
 disabled native sidecar. Only active workloads require issuance and delivery of
-client certificates. Every server-role exporter writes the exact
+client certificates. With online policy disabled, every server-role exporter writes the exact
 installation/Node UID-bound URI principals to `identities.yaml` and their explicit
 grants to `permissions.yaml` alongside the PEMs in `current`.
 An empty set writes an explicit empty policy, including after the last grant is
@@ -243,6 +243,56 @@ The first upgrade from a policy that omitted disabled clients can cause a
 one-time rollout to load their configured grants. For an existing installation
 with a managed gateway, complete the [checkpoint handoff](#policy-handoff-and-upgrade-from-v310)
 before upgrading to the version that renders grants from box wiring.
+
+### Online gateway policy
+
+Use `spec.certificates.onlineGatewayPolicy: true` in `YanetConfig` for fresh
+installations only. To switch existing hosts to this mode, decommission the
+old workloads and retire their offline startup definitions before creating a
+new `Yanet` with a new UID. Do not copy old policy state or HostPath generations.
+There is no in-place conversion or acknowledgment step.
+
+Install the updated `YanetConfig` CRD and select compatible runtime and exporter
+images before creating the installation. Helm does not update an existing CRD
+from `crds/` on upgrade. Each wired server profile must run a gateway supporting
+`auth.managed_policy` and the `YANET_` environment overlay. The operator supplies
+the read-only policy mount, `auth.mode: enabled`, and the expected installation
+UID, Node UID and server URI. Remove
+`identity_providers`, `permissions_path`, and the deprecated `auth.disabled`
+from those runtime configurations; keep the authenticators and TLS settings.
+When using managed SSH trust, set `gateway.auth.managed_policy.ssh_trust: true`
+and remove that SSH authenticator's `ca_sources`. Set it from the first start
+even if the managed CA is initially absent. Subsequent edits
+to `sshTrustBundle` do not change the Pod template. Combining managed SSH
+trust with independent `sshcert.ca_sources` is not supported in this mode.
+
+The `policy-delivery` Deployment starts independently of cert-manager.
+On a new host, the gateway's read-only startup gate waits for a valid local
+generation. Edit grants as data; do not turn online mode off in place,
+downgrade a reader image, or restore older revision annotations or HostPath
+contents. To restore an old permission set, submit it as a new revision.
+Drain and retire readers and their offline startup definitions before removing
+their policy scope.
+
+The writer reads a single `bundle.json` from a stable, installation/Node-owned
+ConfigMap. The bundle is limited to 900 KiB; updates exceeding the budget are
+rejected as a whole. Allow ConfigMap and policy-state annotation writes only
+from the controller and trusted administrators. Ownership and file hashes are
+not authentication of an API writer. The delivery Pod has no service-account
+token and mounts no TLS private keys.
+
+The `policy-delivery` Pod logs `sequence` and `server_uri` for each published
+role. Compare these with the sequence in the ConfigMap and the gateway's
+`auth_policy_active_revision` metric. A valid local generation can start a
+gateway without Kubernetes access; startup does not wait for an undelivered
+control plane revision. A node that hasn't converged can still use its previous
+policy. Confirm a global revocation only after checking every endpoint serving
+traffic. `autoSync: false` prevents policy writes and `stop: true` freezes
+reconciliation; neither deletes the last local generation.
+
+Clients using the gateway do not need policy reloads. Direct backend listeners
+are not protected by the gateway and must remain isolated from callers. A
+separate authorization endpoint needs its own compatible reader and scope.
 
 ### Policy handoff and upgrade from v3.1.0
 

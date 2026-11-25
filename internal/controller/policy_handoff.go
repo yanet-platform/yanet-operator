@@ -405,6 +405,9 @@ func (r *YanetReconciler) preparePolicyHandoff(ctx context.Context, y *api.Yanet
 			if current.UID != y.UID {
 				return fmt.Errorf("policy installation UID changed")
 			}
+			if current.Annotations[onlinePolicyStateAnnotation] != "" {
+				return fmt.Errorf("online policy cannot return to legacy authorization")
+			}
 			if current.Annotations[policyStateAnnotation] == "" {
 				live := &appsv1.DeploymentList{}
 				if err := reader.List(ctx, live, client.InNamespace(y.Namespace)); err != nil {
@@ -469,6 +472,9 @@ func (r *YanetReconciler) preparePolicyHandoff(ctx context.Context, y *api.Yanet
 			}
 		}
 		state = policyState{}
+		if fresh.Annotations[onlinePolicyStateAnnotation] != "" {
+			return fmt.Errorf("online policy cannot return to legacy authorization")
+		}
 		stored := fresh.Annotations[policyStateAnnotation]
 		if stored != "" {
 			if err := json.Unmarshal([]byte(stored), &state); err != nil {
