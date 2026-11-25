@@ -217,11 +217,15 @@ Provision issuer keys outside this controller, with separate backup/rotation.
 Authentication mode, RPC permissions and account mapping are application policy.
 Client profiles can declare `gatewayPermissions`: at most 128 full
 `/package.Service/Method` patterns, with `*` allowed within service/method names.
-Only effective node workloads receive accounts. Every server-role exporter writes
-their exact installation/Node UID-bound URI principals to `identities.yaml` and
-their explicit grants to `permissions.yaml` alongside the PEMs in `current`.
+Every client profile wired into the installation's `boxType` keeps its configured
+grants even when the workload is disabled, scaled to zero, or omitted as a
+disabled native sidecar. Only active workloads require issuance and delivery of
+client certificates. Every server-role exporter writes the exact
+installation/Node UID-bound URI principals to `identities.yaml` and their explicit
+grants to `permissions.yaml` alongside the PEMs in `current`.
 An empty set writes an explicit empty policy, including after the last grant is
-removed. No account is implied by certificate issuance alone.
+removed. To revoke a grant, edit `gatewayPermissions` or remove the role from
+the box wiring; scaling down is not revocation.
 
 Configure the gateway's file identity provider and permission store to read
 `<server mountPath>/current/identities.yaml` and `permissions.yaml`. The operator
@@ -229,17 +233,34 @@ does not enable authentication or infer role permissions. Policy changes create
 a new durable generation and change the gateway Pod template; a read-only
 `credential-sync --check` init container rejects stale policy before startup.
 It uses only cached public trust and the role directory, so the gate also works
-without the API. Normal leaf rotation does not change the Pod template.
+without the API. When the set of managed server roles and the gateway policy
+are unchanged, toggling a client or rotating a leaf certificate does not change
+the gateway Pod template. Scaling down a workload that also serves as a managed
+server can remove that server from the policy inventory and trigger a rollout of
+the remaining gateways even though the client grants are unchanged.
+
+The first upgrade from a policy that omitted disabled clients can cause a
+one-time rollout to load their configured grants. For an existing installation
+with a managed gateway, complete the [checkpoint handoff](#policy-handoff-and-upgrade-from-v310)
+before upgrading to the version that renders grants from box wiring.
 
 ### Policy handoff and upgrade from v3.1.0
 
 v3.1.0 was published on 2026-11-17. Its exact-policy startup gates are not
 forward-compatible with a different account policy. Upgrading only the manager
-does not change the digest-pinned gate images or saved checkpoints. This change
-requires an operator and `certificates.exporterImage` containing the revision-aware
-protocol; it does not retroactively change v3.1.0 images.
+does not change the digest-pinned gate images or saved checkpoints.
 
-The required per-installation transition is:
+For installations with managed gateways still on v3.1.0, first upgrade to
+operator/chart 3.2.0 and pin `certificates.exporterImage` to the matching 3.2.0
+release image digest. Follow the [v3.2.0 upgrade procedure](https://github.com/yanet-platform/yanet-operator/blob/v3.2.0/release-notes/v3.2.0.md#before-upgrading-from-v310)
+with the existing gateway policy intact. If a handoff is already in progress,
+finish it on the revision-aware version that started it and preserves the old
+policy. Before upgrading to the version that renders grants from box wiring,
+verify `activated: true` in the controller-owned `policy-state` annotation for
+each managed-gateway installation. If the handoff is already activated, proceed
+without repeating it solely for this upgrade.
+
+Complete the unchanged-policy handoff as follows:
 
 1. Keep the existing gateway accounts, permissions, role paths and SSH CA policy
    unchanged. Upgrade the operator and the digest-pinned exporter image together.

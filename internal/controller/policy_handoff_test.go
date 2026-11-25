@@ -76,6 +76,134 @@ func readPolicyState(t *testing.T, r *YanetReconciler, y *api.Yanet) policyState
 	return state
 }
 
+func TestManagedClientTogglesKeepGatewayPolicy(t *testing.T) {
+	testCtx := context.Background()
+	r, y, _ := certificateEnvironment(t)
+	cfg := &r.GlobalConfig.Config
+	numa := int32(2)
+	cfg.Components.Controlplane.Numa = &numa
+	for _, role := range []string{"observer", "unwired"} {
+		cfg.Components.Operators = append(cfg.Components.Operators, api.OperatorSpec{Name: role, Containers: []api.OperatorContainer{{Name: role, Image: api.ImageRef{Name: role, Tag: "v1"}}}})
+	}
+	cfg.Components.Dataplane.Sidecars = []api.SidecarSpec{{Name: "worker", Image: api.ImageRef{Name: "worker", Tag: "v1"}}}
+	cfg.Components.BirdAdapter = &api.BirdAdapterComp{Image: api.ImageRef{Name: "adapter", Tag: "v1"}}
+	box := &cfg.BoxTypes[0]
+	box.Operators = map[string]api.BoxOperator{"observer": {Patches: []string{"standby"}}}
+	box.Components.Dataplane.Sidecars = map[string]api.BoxDataplaneSidecar{"worker": {Enabled: helpers.PtrFalse()}}
+	box.Components.BirdAdapter = &api.BoxComponent{Patches: []string{"standby"}}
+	standby := api.NamedPatch{Name: "standby"}
+	standby.Patch.Raw = []byte(`{"spec":{"replicas":0}}`)
+	cfg.Patches = append(cfg.Patches, standby)
+	for _, role := range []string{"observer", "worker", "unwired"} {
+		cfg.Certificates.Profiles = append(cfg.Certificates.Profiles, api.CertificateProfile{
+			Name: role, Component: role, Container: role, MountPath: "/etc/pki/" + role, Usage: "client",
+			GatewayPermissions: []string{"/example.v1.Service/Read"},
+		})
+	}
+	cfg.Certificates.Profiles = append(cfg.Certificates.Profiles, api.CertificateProfile{
+		Name: "adapter", Component: "birdAdapter", Container: api.BirdAdapterContainerName, MountPath: "/etc/pki/adapter", Usage: "client",
+		GatewayPermissions: []string{"/example.v1.Service/Write"},
+	})
+	publishCertificateConfig(t, r)
+	converge := func() {
+		t.Helper()
+		reconcileCertificates(t, r, y)
+		markCertificatesIssued(t, r)
+		reconcileCertificates(t, r, y)
+		writer := certificateWorkload(t, r, "credential-delivery")
+		writer.Status = appsv1.DeploymentStatus{ObservedGeneration: writer.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
+		if err := r.Status().Update(testCtx, writer); err != nil {
+			t.Fatal(err)
+		}
+		reconcileCertificates(t, r, y)
+	}
+	converge()
+	readyCertificateDeployments(t, r)
+	acknowledgePolicyCheckpoints(t, r, y)
+	before := readPolicyState(t, r, y)
+	if !before.Activated {
+		t.Fatal("ready acknowledged installation did not activate")
+	}
+	gateways := &appsv1.DeploymentList{}
+	if err := r.List(testCtx, gateways, client.MatchingLabels{manifests.LabelComponent: "controlplane"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateways.Items) != 2 {
+		t.Fatalf("expected both NUMA gateways, got %d", len(gateways.Items))
+	}
+	const rolePrefix = "spiffe://example.test/ns/default/installation/installation-uid/node/node-uid/role/"
+	wantAccounts := []api.GatewayAccount{
+		{Username: rolePrefix + "observer", Permissions: []string{"/example.v1.Service/Read"}},
+		{Username: rolePrefix + "worker", Permissions: []string{"/example.v1.Service/Read"}},
+		{Username: rolePrefix + "adapter", Permissions: []string{"/example.v1.Service/Write"}},
+	}
+	check := func(enabled bool) {
+		t.Helper()
+		writer := certificateWorkload(t, r, "credential-delivery")
+		var accounts []api.GatewayAccount
+		for _, c := range writer.Spec.Template.Spec.Containers {
+			if c.Name != "gateway" {
+				continue
+			}
+			for _, arg := range c.Args {
+				if value, ok := strings.CutPrefix(arg, "--gateway-account="); ok {
+					var account api.GatewayAccount
+					if err := json.Unmarshal([]byte(value), &account); err != nil {
+						t.Fatal(err)
+					}
+					accounts = append(accounts, account)
+				}
+			}
+		}
+		if !reflect.DeepEqual(accounts, wantAccounts) {
+			t.Errorf("enabled=%t: wrong gateway policy: got %v, want %v", enabled, accounts, wantAccounts)
+		}
+		wantReplicas, wantCertificates := int32(0), 1
+		if enabled {
+			wantReplicas, wantCertificates = 1, 4
+		}
+		for _, role := range []string{"observer", "birdAdapter"} {
+			if d := certificateWorkload(t, r, role); d.Spec.Replicas == nil || *d.Spec.Replicas != wantReplicas {
+				t.Errorf("enabled=%t: %s did not converge to %d replicas", enabled, role, wantReplicas)
+			}
+		}
+		dp := certificateWorkload(t, r, "dataplane")
+		if present := dp.Spec.Template.Labels[manifests.OperatorMembershipLabel("worker")] != ""; present != enabled {
+			t.Errorf("enabled=%t: incorrect native sidecar membership: %t", enabled, present)
+		}
+		if count := len(listCertificates(t, r)); count != wantCertificates {
+			t.Errorf("enabled=%t: got %d Certificates, want %d", enabled, count, wantCertificates)
+		}
+		if state := readPolicyState(t, r, y); state.Sequence != before.Sequence || state.Hash != before.Hash {
+			t.Errorf("enabled=%t: component toggle advanced policy from %d to %d", enabled, before.Sequence, state.Sequence)
+		}
+		for i := range gateways.Items {
+			original := &gateways.Items[i]
+			current := &appsv1.Deployment{}
+			if err := r.Get(testCtx, client.ObjectKeyFromObject(original), current); err != nil {
+				t.Fatal(err)
+			}
+			if current.ResourceVersion != original.ResourceVersion || !reflect.DeepEqual(current.Spec, original.Spec) {
+				t.Errorf("enabled=%t: component toggle updated controlplane Deployment %s", enabled, original.Name)
+			}
+		}
+	}
+	check(false)
+	for _, enabled := range []bool{true, false} {
+		y.Spec.Components = &api.YanetComponentsOverride{
+			Operators:   map[string]api.YanetComponentOverride{"observer": {Enabled: &enabled}},
+			Dataplane:   &api.YanetDataplaneOverride{Sidecars: map[string]api.YanetContainerOverride{"worker": {Enabled: &enabled}}},
+			BirdAdapter: &api.YanetComponentOverride{Enabled: &enabled},
+		}
+		y.Generation++
+		if err := r.Update(testCtx, y); err != nil {
+			t.Fatal(err)
+		}
+		converge()
+		check(enabled)
+	}
+}
+
 func TestManagedPolicyRecoveryAcrossPartialUpdates(t *testing.T) {
 	for _, barrier := range []string{"delivery-pending", "consumer-forbidden"} {
 		for _, remove := range []bool{false, true} {

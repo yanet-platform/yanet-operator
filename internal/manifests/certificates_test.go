@@ -2,6 +2,7 @@ package manifests
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -201,7 +202,7 @@ func TestCertificateRoleIsolation(t *testing.T) {
 	}
 }
 
-func TestCertificatePlanExcludesDisabledRole(t *testing.T) {
+func TestCertificatePlanKeepsGrantForDisabledRole(t *testing.T) {
 	build := certificateBuildContext()
 	build.Certificates.Profiles = append(build.Certificates.Profiles, api.CertificateProfile{
 		Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/yanet2/pki/acl", Usage: "client",
@@ -219,18 +220,20 @@ func TestCertificatePlanExcludesDisabledRole(t *testing.T) {
 	if len(plan.Certificates) != 1 || plan.Delivery == nil || len(plan.Delivery.Spec.Template.Spec.Containers) != 1 {
 		t.Fatal("a disabled role must not require issuance or delivery")
 	}
-	for _, arg := range plan.Delivery.Spec.Template.Spec.Containers[0].Args {
-		if strings.HasPrefix(arg, "--gateway-account=") {
-			t.Fatalf("disabled role retained gateway access: %s", arg)
-		}
+	const account = `--gateway-account={"username":"spiffe://example.test/ns/default/installation/installation-uid/node/node-uid/role/acl","permissions":["/example.v1.Service/Update"]}`
+	if !slices.Contains(plan.Delivery.Spec.Template.Spec.Containers[0].Args, account) {
+		t.Fatal("gateway publisher lost the configured grant for a disabled role")
+	}
+	gates := cp[0].Spec.Template.Spec.InitContainers
+	if len(gates) != 1 || !slices.Contains(gates[0].Args, account) {
+		t.Fatal("gateway startup gate lost the configured grant for a disabled role")
 	}
 }
 
-func TestCertificateGatewayAccountsFollowEffectiveNodeRoles(t *testing.T) {
+func TestCertificateGatewayAccountsFollowConfiguredGrants(t *testing.T) {
 	build := certificateBuildContext()
 	build.Certificates.Profiles = append(build.Certificates.Profiles,
 		api.CertificateProfile{Name: "acl", Component: "acl", Container: "acl", MountPath: "/etc/yanet2/pki/acl", Usage: "client", GatewayPermissions: []string{"/example.v1.Service/Update"}},
-		api.CertificateProfile{Name: "unused", Component: "unused", Container: "unused", MountPath: "/etc/yanet2/pki/unused", Usage: "client", GatewayPermissions: []string{"/example.v1.Service/*"}},
 	)
 	cp, err := RenderDeployments(build, &helpers.ResolvedComponent{Kind: helpers.KindControlplane, Name: "controlplane", Enabled: true}, nil)
 	if err != nil {

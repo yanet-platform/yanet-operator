@@ -33,7 +33,7 @@ Declare RPC grants under `yanetconfig.spec.certificates`:
 
 - `additionalGatewayAccounts` grants explicit RPC methods to local logins.
 - `profiles[].gatewayPermissions` grants explicit RPC methods to the UID-bound
-  identity of an active workload profile.
+  identity of a client profile wired into the `boxType`, even when it is disabled.
 
 The operator combines these grants per installation and delivers the gateway
 policy persistently along with the configured trust. A trust bundle authenticates

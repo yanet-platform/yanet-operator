@@ -11,6 +11,7 @@ import (
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
+	"github.com/yanet-platform/yanet-operator/internal/helpers"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -283,6 +284,30 @@ func normalizedCertificateSpec(certificate *unstructured.Unstructured) (map[stri
 		}
 	}
 	return spec, nil
+}
+
+// Select authorization profiles from box wiring, before workload enablement and
+// replica patches affect which deployments and credentials run on a node.
+func certificatesForWiredComponents(spec *api.CertificateManagementSpec, wired []helpers.ComponentRef) *api.CertificateManagementSpec {
+	if spec == nil {
+		return nil
+	}
+	components := make(map[string]bool, len(wired))
+	for _, ref := range wired {
+		name := ref.OperatorName
+		if name == "" {
+			name = string(ref.Kind)
+		}
+		components[name] = true
+	}
+	selected := *spec
+	selected.Profiles = nil
+	for _, profile := range spec.Profiles {
+		if components[profile.Component] {
+			selected.Profiles = append(selected.Profiles, profile)
+		}
+	}
+	return &selected
 }
 
 func (r *YanetReconciler) certificateDeliveryReady(ctx context.Context, desired *appsv1.Deployment) (bool, error) {
