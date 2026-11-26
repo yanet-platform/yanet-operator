@@ -59,7 +59,7 @@ func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
 			}
 		}
 	}
-	if len(sources) != 2 || trust != 2 || len(pod.Containers) != 2 {
+	if len(sources) != 2 || trust != 1 || len(pod.Containers) != 2 {
 		t.Fatalf("lost independent roles or required trust: %+v", pod)
 	}
 	for _, container := range pod.Containers {
@@ -86,7 +86,7 @@ func TestCertificateDeliveryAllowsIndependentMissingLeafSources(t *testing.T) {
 				continue
 			}
 			gates++
-			if !slices.Contains(gate.Args, "--check") || slices.Contains(gate.Args, "--writer-readiness") || !slices.Contains(gate.Args, "--ssh-trust=/persist/current/ssh-ca.pub") {
+			if !slices.Contains(gate.Args, "--check") || slices.Contains(gate.Args, "--writer-readiness") {
 				t.Fatalf("startup gate no longer uses the read-only check: %+v", gate)
 			}
 		}
@@ -139,7 +139,9 @@ func TestCertificateGatePreservesNativeSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	containers := workloads[0].Spec.Template.Spec.InitContainers
-	if len(containers) != 4 || containers[0].Name != "yanet-credential-gateway-check" || containers[0].RestartPolicy != nil || containers[2].Name != scopedOperatorName("worker", "worker") || containers[2].RestartPolicy == nil || *containers[2].RestartPolicy != corev1.ContainerRestartPolicyAlways {
+	if len(containers) != 5 || containers[0].Name != "yanet-credential-gateway-check" || containers[0].RestartPolicy != nil ||
+		containers[1].Name != "yanet-policy-gateway-check" || containers[1].RestartPolicy != nil ||
+		containers[3].Name != scopedOperatorName("worker", "worker") || containers[3].RestartPolicy == nil || *containers[3].RestartPolicy != corev1.ContainerRestartPolicyAlways {
 		t.Fatalf("startup gate changed native sidecar composition: %+v", containers)
 	}
 }

@@ -148,9 +148,9 @@ func TestManagedCertificatesWaitForIssuanceAndDelivery(t *testing.T) {
 		}
 	}
 	if gate == nil {
-		t.Fatal("applied gateway lost the offline credential/account startup gate")
+		t.Fatal("applied gateway lost the offline credential startup gate")
 	}
-	for _, arg := range []string{"--gateway-policy", "--check", "--destination=/persist", "--trust=/persist/current/ca.crt"} {
+	for _, arg := range []string{"--check", "--destination=/persist", "--trust=/persist/current/ca.crt"} {
 		if !slices.Contains(gate.Args, arg) {
 			t.Fatalf("applied gateway gate is missing %q: %v", arg, gate.Args)
 		}
@@ -159,8 +159,11 @@ func TestManagedCertificatesWaitForIssuanceAndDelivery(t *testing.T) {
 		gate.VolumeMounts[0].Name != "yanet-credential-gateway" || gate.VolumeMounts[0].MountPath != "/persist" {
 		t.Fatalf("gateway startup gate must use only its read-only durable credentials: %+v", gate.VolumeMounts)
 	}
-	if consumer.Spec.Template.Annotations["yanet.yanet-platform.io/accounts-gateway"] == "" {
-		t.Fatal("applied gateway has no desired-account rollout annotation")
+	policyGate := slices.IndexFunc(consumer.Spec.Template.Spec.InitContainers, func(c corev1.Container) bool {
+		return c.Name == "yanet-policy-gateway-check"
+	})
+	if policyGate < 0 || !slices.Equal(consumer.Spec.Template.Spec.InitContainers[policyGate].Args, []string{"policy-sync", "--check"}) {
+		t.Fatal("applied gateway lost its independent offline policy gate")
 	}
 	consumerVersion := deployments.Items[0].ResourceVersion
 	// A pending renewal keeps the existing working consumer, including its version.

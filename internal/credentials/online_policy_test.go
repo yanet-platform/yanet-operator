@@ -2,185 +2,146 @@ package credentials_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/yanet-platform/yanet-operator/internal/credentials"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 )
 
-func onlineBundle() credentials.OnlinePolicyBundle {
-	return credentials.OnlinePolicyBundle{
-		Epoch: "installation-uid", NodeUID: "node-uid", Sequence: 1,
-		Namespace: "default", Domain: "example.test", Roles: []string{"gateway"},
-		Accounts: []credentials.GatewayAccount{{Username: "alice", Permissions: []string{"/example.Service/Read"}}},
-	}
-}
-
-func runProjectedPolicy(t *testing.T, destination string, bundle credentials.OnlinePolicyBundle, witness string) {
-	t.Helper()
-	data, err := credentials.EncodeOnlinePolicyBundle(bundle)
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestOnlinePolicyDeliveryAndOfflineStartup(t *testing.T) {
 	source := filepath.Join(t.TempDir(), credentials.PolicyBundleKey)
-	write(t, source, data)
-	scope := []string{
-		"--epoch=" + bundle.Epoch, "--node-uid=" + bundle.NodeUID,
-		"--namespace=" + bundle.Namespace, "--domain=" + bundle.Domain,
+	destination := t.TempDir()
+	run := func(mode string) error {
+		return credentials.RunPolicy(t.Context(), []string{
+			"--source=" + source, "--destination=" + destination, mode,
+		})
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	done := make(chan error, 1)
-	go func() {
-		done <- credentials.RunPolicy(ctx, append(scope, "--source="+source, "--destination="+destination))
-	}()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("policy writer: %v", err)
-		}
-	}()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	var checkErr error
-	for {
-		checkErr = credentials.RunPolicy(ctx, append(scope,
-			"--destination="+filepath.Join(destination, witness), "--check-role="+witness))
-		if checkErr == nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("policy writer did not publish role %s: %v", witness, checkErr)
-		case <-ticker.C:
-		}
-	}
-}
-
-func TestOnlinePolicyWriterFencesAndOfflineCheck(t *testing.T) {
-	root := t.TempDir()
-	bundle := onlineBundle()
-	runProjectedPolicy(t, root, bundle, "gateway")
-
-	current := filepath.Join(root, "gateway", "current")
-	read := func(name string) []byte {
+	project := func(bundle credentials.OnlinePolicyBundle) {
 		t.Helper()
-		data, err := os.ReadFile(filepath.Join(current, name))
+		value, err := credentials.EncodeOnlinePolicyBundle(bundle)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return data
+		write(t, source, value)
 	}
-	if !bytes.Contains(read("permissions.yaml"), []byte("/example.Service/Read")) {
-		t.Fatal("initial grant was not published")
+	read := func(name string) []byte {
+		t.Helper()
+		value, err := os.ReadFile(filepath.Join(destination, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
 	}
-	bundle.Sequence = 2
-	bundle.Accounts = []credentials.GatewayAccount{}
-	bundle.Roles = []string{"gateway", "second"}
-	runProjectedPolicy(t, root, bundle, "second")
-	revision := read("policy.json")
-	if !bytes.Contains(revision, []byte(`"sequence":2`)) ||
-		strings.TrimSpace(string(read("identities.yaml"))) != "identities: []" ||
-		strings.TrimSpace(string(read("permissions.yaml"))) != "permissions:\n    users: []" {
-		t.Fatal("empty policy was not explicitly installed")
-	}
-	for _, tc := range []struct {
-		role     string
-		sequence uint64
-	}{
-		{"stale-witness", 1},
-		{"conflict-witness", 2},
-	} {
-		previous := onlineBundle()
-		previous.Sequence = tc.sequence
-		previous.Roles = []string{"gateway", tc.role}
-		// The untouched witness can publish despite the bad update on
-		// gateway. The revoked role must retain its previous generation.
-		runProjectedPolicy(t, root, previous, tc.role)
-		if !bytes.Equal(revision, read("policy.json")) {
-			t.Fatalf("%s changed the published revision", tc.role)
+	checkAccounts := func(wantPermission string) {
+		t.Helper()
+		var identities struct {
+			Identities []struct{ Username string } `yaml:"identities"`
+		}
+		var permissions struct {
+			Permissions struct {
+				Users []credentials.GatewayAccount `yaml:"users"`
+			} `yaml:"permissions"`
+		}
+		if err := yaml.Unmarshal(read("identities.yaml"), &identities); err != nil {
+			t.Fatal(err)
+		}
+		if err := yaml.Unmarshal(read("permissions.yaml"), &permissions); err != nil {
+			t.Fatal(err)
+		}
+		if wantPermission == "" {
+			if identities.Identities == nil || len(identities.Identities) != 0 ||
+				permissions.Permissions.Users == nil || len(permissions.Permissions.Users) != 0 {
+				t.Fatal("revocation must leave explicit empty documents")
+			}
+			return
+		}
+		users := permissions.Permissions.Users
+		if len(identities.Identities) != 1 || identities.Identities[0].Username != "alice" ||
+			len(users) != 1 || users[0].Username != "alice" ||
+			len(users[0].Permissions) != 1 || users[0].Permissions[0] != wantPermission {
+			t.Fatalf("unexpected policy: identities=%+v permissions=%+v", identities, users)
 		}
 	}
-	err := credentials.RunPolicy(t.Context(), []string{
-		"--epoch=installation-uid", "--node-uid=foreign-node", "--namespace=default",
-		"--domain=example.test", "--destination=" + filepath.Join(root, "gateway"), "--check-role=gateway",
-	})
-	if err == nil || !strings.Contains(err.Error(), "scope") {
-		t.Fatalf("expected offline scope check to reject foreign Node: %v", err)
-	}
-}
 
-func TestOnlinePolicyBundleBudgetRejectsWholeUpdate(t *testing.T) {
-	bundle := onlineBundle()
-	bundle.Accounts = nil
-	for account := range 64 {
-		var methods []string
-		for method := range 128 {
-			methods = append(methods, fmt.Sprintf("/%s/Method%d", strings.Repeat("x", 160), method))
-		}
-		bundle.Accounts = append(bundle.Accounts, credentials.GatewayAccount{
-			Username: fmt.Sprintf("user%d", account), Permissions: methods,
-		})
+	if err := run("--check"); err == nil {
+		t.Fatal("empty persistent directory passed startup")
 	}
-	if data, err := credentials.EncodeOnlinePolicyBundle(bundle); err == nil || data != nil || !strings.Contains(err.Error(), "maximum") {
-		t.Fatalf("oversized policy not rejected in full: %d bytes, %v", len(data), err)
-	}
-}
-
-func TestOnlinePolicyWriterPreservesSSHTrustBytes(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, err := ssh.NewPublicKey(&key.PublicKey)
+	public, err := ssh.NewPublicKey(&key.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundle := onlineBundle()
-	bundle.SSHTrust = append(bytes.TrimSpace(ssh.MarshalAuthorizedKey(pub)), ' ', 0xff, '\r', '\n')
-	root := t.TempDir()
-	runProjectedPolicy(t, root, bundle, "gateway")
-	path := filepath.Join(root, "gateway", "current", "ssh-ca.pub")
-	got, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(got, bundle.SSHTrust) {
-		t.Fatalf("SSH trust was not preserved byte-for-byte: %v", err)
+	trust := append(bytes.TrimSpace(ssh.MarshalAuthorizedKey(public)), ' ', 0xff, '\n')
+	bundle := credentials.OnlinePolicyBundle{
+		Accounts: []credentials.GatewayAccount{{Username: "alice", Permissions: []string{"/example.Service/Read"}}},
+		SSHTrust: trust,
 	}
-	bundle.Sequence++
-	bundle.SSHTrust = nil
-	bundle.Roles = append(bundle.Roles, "ready-witness")
-	runProjectedPolicy(t, root, bundle, "ready-witness")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("removed trust is still present: %v", err)
+	project(bundle)
+	if err := run("--once"); err != nil {
+		t.Fatal(err)
 	}
-}
+	checkAccounts("/example.Service/Read")
+	if !bytes.Equal(read("ssh-ca.pub"), trust) {
+		t.Fatal("SSH trust bytes changed")
+	}
+	if err := run("--check-projection"); err != nil {
+		t.Fatal(err)
+	}
+	beforeIdentities, beforePermissions := read("identities.yaml"), read("permissions.yaml")
+	for _, invalid := range []string{
+		`{`, `{}`, `{"accounts":null}`, `{"accounts":[],"ssh_trust":"YmFk"}`,
+		`{"accounts":[],"unknown":true}`, `{"accounts":[]} {}`,
+		strings.Repeat(" ", credentials.MaxPolicyBundleSize+1),
+	} {
+		write(t, source, []byte(invalid))
+		if err := run("--once"); err == nil {
+			t.Fatal("invalid projection was accepted")
+		}
+		if !bytes.Equal(read("identities.yaml"), beforeIdentities) ||
+			!bytes.Equal(read("permissions.yaml"), beforePermissions) ||
+			!bytes.Equal(read("ssh-ca.pub"), trust) {
+			t.Fatal("invalid projection changed the local policy")
+		}
+	}
+	bundle.Accounts[0].Permissions = []string{"/example.Service/Write"}
+	project(bundle)
+	if err := run("--check-projection"); err == nil {
+		t.Fatal("undelivered projection passed readiness")
+	}
+	if err := run("--once"); err != nil {
+		t.Fatal(err)
+	}
+	checkAccounts("/example.Service/Write")
 
-func TestOnlinePolicyOfflineGateSharesReaderLock(t *testing.T) {
-	bundle := onlineBundle()
-	root := t.TempDir()
-	runProjectedPolicy(t, root, bundle, "gateway")
-	role := filepath.Join(root, "gateway")
-	lock, err := os.Open(filepath.Join(role, ".publish-lock"))
-	if err != nil {
+	project(credentials.OnlinePolicyBundle{Accounts: []credentials.GatewayAccount{}})
+	if err := run("--once"); err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Close()
-	if flockErr := unix.Flock(int(lock.Fd()), unix.LOCK_SH|unix.LOCK_NB); flockErr != nil {
-		t.Fatal(flockErr)
+	checkAccounts("")
+	if _, err := os.Stat(filepath.Join(destination, "ssh-ca.pub")); !os.IsNotExist(err) {
+		t.Fatalf("removed SSH trust is still on disk: %v", err)
 	}
-	args := []string{
-		"--epoch=" + bundle.Epoch, "--node-uid=" + bundle.NodeUID, "--namespace=" + bundle.Namespace,
-		"--domain=" + bundle.Domain, "--destination=" + role, "--check-role=gateway",
+	if err := run("--check-projection"); err != nil {
+		t.Fatal(err)
 	}
-	if checkErr := credentials.RunPolicy(t.Context(), args); checkErr != nil {
-		t.Fatalf("another reader prevents a valid offline check: %v", checkErr)
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
 	}
+	if err := run("--check"); err != nil {
+		t.Fatalf("offline startup requires the projection: %v", err)
+	}
+	if err := run("--once"); err == nil {
+		t.Fatal("missing projection must report a delivery error")
+	}
+	checkAccounts("")
 }

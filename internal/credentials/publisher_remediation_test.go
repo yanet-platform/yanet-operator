@@ -54,13 +54,13 @@ func TestPublishValidatesCompleteCertificateInputs(t *testing.T) {
 			trust := filepath.Join(t.TempDir(), "ca.crt")
 			write(t, trust, root.pem)
 			project(t, source, "first", chain, key)
-			first, err := credentials.Publish(source, destination, trust, identity, clock, nil)
+			first, err := credentials.Publish(source, destination, trust, identity, clock)
 			if err != nil {
 				t.Fatal(err)
 			}
 			write(t, trust, tc.ca)
 			project(t, source, "update", tc.cert, key)
-			_, err = credentials.Publish(source, destination, trust, identity, clock, nil)
+			_, err = credentials.Publish(source, destination, trust, identity, clock)
 			assertResult(err)
 			if tc.want != "" {
 				if target, err := os.Readlink(filepath.Join(destination, "current")); err != nil || target != first {
@@ -71,39 +71,9 @@ func TestPublishValidatesCompleteCertificateInputs(t *testing.T) {
 	}
 }
 
-func TestPublishPolicyABAReusesImmutablePEM(t *testing.T) {
-	f := newPublicationFixture(t)
-	data := map[string][]byte{"tls.crt": f.cert, "tls.key": f.key, "ca.crt": f.authority.pem}
-	policy := recoveryPolicy(1, true)
-	first, err := f.publish(policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	previous := first
-	for _, next := range []*credentials.GatewayPolicy{recoveryPolicy(2, false), recoveryPolicy(3, true)} {
-		got, err := f.publish(next)
-		if err != nil || got == previous || got == first {
-			t.Fatalf("expected new immutable revision: %q, %v", got, err)
-		}
-		for name, want := range data {
-			before := stat(t, filepath.Join(f.destination, first, name))
-			path := filepath.Join(f.destination, got, name)
-			after := stat(t, path)
-			if after.Mode() != 0o600 || !os.SameFile(before, after) {
-				t.Fatalf("%s is not the same regular 0600 PEM", name)
-			}
-			if body, err := os.ReadFile(path); err != nil || !bytes.Equal(body, want) {
-				t.Fatalf("unexpected published bytes for %s: %v", name, err)
-			}
-		}
-		previous = got
-	}
-}
-
 func TestPublishIdenticalDoesNotReplaceCurrent(t *testing.T) {
 	f := newPublicationFixture(t)
-	policy := recoveryPolicy(1, false)
-	first, err := f.publish(policy)
+	first, err := f.publish()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +83,7 @@ func TestPublishIdenticalDoesNotReplaceCurrent(t *testing.T) {
 	if err := os.Link(current, filepath.Join(f.destination, "pinned-link")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := f.publish(policy); err != nil || got != first {
+	if got, err := f.publish(); err != nil || got != first {
 		t.Fatalf("no-op publication: %q, %v", got, err)
 	}
 	if !os.SameFile(before, stat(t, current)) {
@@ -123,8 +93,7 @@ func TestPublishIdenticalDoesNotReplaceCurrent(t *testing.T) {
 
 func TestPublishRetainsValidAlternateKeyEncoding(t *testing.T) {
 	f := newPublicationFixture(t)
-	policy := recoveryPolicy(1, false)
-	previous, err := f.publish(policy)
+	previous, err := f.publish()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +110,7 @@ func TestPublishRetainsValidAlternateKeyEncoding(t *testing.T) {
 		t.Fatal(err)
 	}
 	project(t, f.source, "alternate", f.cert, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
-	if got, err := f.publish(policy); err != nil || got != previous {
+	if got, err := f.publish(); err != nil || got != previous {
 		t.Fatalf("equivalent key re-encoding replaced the generation or blocked delivery: %q, %v", got, err)
 	}
 	if body, err := os.ReadFile(filepath.Join(f.destination, previous, "tls.key")); err != nil || !bytes.Equal(body, f.key) {
@@ -149,15 +118,11 @@ func TestPublishRetainsValidAlternateKeyEncoding(t *testing.T) {
 	}
 }
 
-func TestPublishRecoversPrivateKeyLossWithReissuanceAtSameFloor(t *testing.T) {
+func TestPublishRecoversPrivateKeyLossWithReissuance(t *testing.T) {
 	for _, damage := range []string{"missing", "damaged"} {
 		t.Run(damage, func(t *testing.T) {
 			f := newPublicationFixture(t)
-			old, floor := recoveryPolicy(1, true), recoveryPolicy(2, false)
-			if _, err := f.publish(old); err != nil {
-				t.Fatal(err)
-			}
-			current, publishErr := f.publish(floor)
+			current, publishErr := f.publish()
 			if publishErr != nil {
 				t.Fatal(publishErr)
 			}
@@ -170,18 +135,15 @@ func TestPublishRecoversPrivateKeyLossWithReissuanceAtSameFloor(t *testing.T) {
 			if damage == "damaged" {
 				write(t, keyPath, []byte("damaged key"))
 			}
-			if _, err := f.publish(floor); err == nil || !strings.Contains(err.Error(), "reissue") {
+			if _, err := f.publish(); err == nil || !strings.Contains(err.Error(), "reissue") {
 				t.Fatalf("same-cert delivery must recommend reissuance; got %v", err)
 			}
 			cert, key := f.authority.leaf(t, 51, serverEKU)
 			project(t, f.source, "reissued", cert, key)
-			if _, err := f.publish(old); err == nil || !strings.Contains(err.Error(), "stale policy writer") {
-				t.Fatalf("repair accepted a stale writer: %v", err)
+			if got, err := f.publish(); err != nil || got == current {
+				t.Fatalf("reissuance failed to recover: %q, %v", got, err)
 			}
-			if got, err := f.publish(floor); err != nil || got == current {
-				t.Fatalf("reissuance failed to recover at the same floor: %q, %v", got, err)
-			}
-			if err := credentials.Check(f.destination, f.trust, f.identity, clock, floor); err != nil {
+			if err := credentials.Check(f.destination, f.trust, f.identity, clock); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(keyPath)
@@ -210,20 +172,12 @@ func newPublicationFixture(t *testing.T) publicationFixture {
 	return publicationFixture{a, source, destination, trust, credentials.Identity{URI: identityURI, Usage: "server"}, cert, key}
 }
 
-func (f publicationFixture) publish(policy *credentials.GatewayPolicy) (string, error) {
-	return credentials.Publish(f.source, f.destination, f.trust, f.identity, clock, policy)
+func (f publicationFixture) publish() (string, error) {
+	return credentials.Publish(f.source, f.destination, f.trust, f.identity, clock)
 }
 
 func serverEKU(cert *x509.Certificate) {
 	cert.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-}
-
-func recoveryPolicy(sequence uint64, grant bool) *credentials.GatewayPolicy {
-	policy := &credentials.GatewayPolicy{Revision: &credentials.PolicyRevision{Epoch: "installation-uid", Sequence: sequence}, SSHTrustHash: "none"}
-	if grant {
-		policy.Accounts = []credentials.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}}
-	}
-	return policy
 }
 
 func stat(t *testing.T, name string) os.FileInfo {

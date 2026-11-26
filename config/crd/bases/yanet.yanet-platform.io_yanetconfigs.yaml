@@ -189,7 +189,7 @@ spec:
                     type: string
                   exporterImage:
                     description: ExporterImage is an exact operator image containing
-                      /manager credential-sync.
+                      credential-sync and policy-sync.
                     type: string
                   hostPath:
                     description: HostPath must be a persistent directory, not /run,
@@ -212,11 +212,6 @@ spec:
                     - kind
                     - name
                     type: object
-                  onlineGatewayPolicy:
-                    description: |-
-                      OnlineGatewayPolicy delivers policy separately from TLS credentials.
-                      Enable only on a fresh installation with compatible runtime and exporter images.
-                    type: boolean
                   profiles:
                     items:
                       description: |-
@@ -241,7 +236,7 @@ spec:
                           description: |-
                             GatewayPermissions grants this client profile's UID-bound account explicit
                             gRPC method patterns. Server profiles receive the effective client accounts
-                            in persistent current/{identities.yaml,permissions.yaml} files.
+                            in persistent identity and permission files.
                           items:
                             type: string
                           maxItems: 128
@@ -274,7 +269,7 @@ spec:
                     description: |-
                       SSHTrustBundle supplies OpenSSH CA public keys for gateway SSH certificate
                       authentication. It is independent of X.509 trust and is persisted in
-                      server-role current/ssh-ca.pub generations.
+                      the shared gateway policy directory.
                     properties:
                       key:
                         description: The key to select.

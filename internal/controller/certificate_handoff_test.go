@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/helpers"
@@ -29,6 +28,25 @@ func markCertificatesIssued(t *testing.T, r *YanetReconciler) {
 	for _, c := range listCertificates(t, r) {
 		c.Object["status"] = map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": c.GetGeneration()}}}
 		if err := r.Status().Update(context.Background(), &c); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func readyCertificateDeployments(t *testing.T, r *YanetReconciler) {
+	t.Helper()
+	list := &appsv1.DeploymentList{}
+	if err := r.List(context.Background(), list); err != nil {
+		t.Fatal(err)
+	}
+	for i := range list.Items {
+		d := &list.Items[i]
+		replicas := int32(1)
+		if d.Spec.Replicas != nil {
+			replicas = *d.Spec.Replicas
+		}
+		d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: replicas, UpdatedReplicas: replicas, ReadyReplicas: replicas, AvailableReplicas: replicas}
+		if err := r.Status().Update(context.Background(), d); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -64,10 +82,6 @@ func startCertificateWorkloads(t *testing.T, r *YanetReconciler, y *api.Yanet) {
 		t.Fatal(err)
 	}
 	if err := r.Get(context.Background(), client.ObjectKeyFromObject(y), y); err != nil {
-		t.Fatal(err)
-	}
-	y.Annotations[policyAckAnnotation] = string(y.UID) + "/1"
-	if err := r.Update(context.Background(), y); err != nil {
 		t.Fatal(err)
 	}
 	reconcileCertificates(t, r, y)
@@ -161,94 +175,6 @@ func TestManagedCertificatesDrainDespiteCertificateFailure(t *testing.T) {
 	}
 }
 
-func TestManagedCertificatesFreezeWriterUntilDesiredIssuance(t *testing.T) {
-	for _, remove := range []bool{false, true} {
-		t.Run(map[bool]string{false: "add-account", true: "remove-last-account"}[remove], func(t *testing.T) {
-			ctx := context.Background()
-			r, y, _ := certificateEnvironment(t)
-			account := api.GatewayAccount{Username: "alice", Permissions: []string{"/example.v1.Service/Read"}}
-			if remove {
-				r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{account}
-			}
-			startCertificateWorkloads(t, r, y)
-			writer := certificateWorkload(t, r, "credential-delivery")
-			consumer := certificateWorkload(t, r, "controlplane")
-			recoverGateway := gatewayRecoveryWithOldLeaf(t, writer)
-			recoverGateway(writer, consumer)
-			r.GlobalConfig.Config.Certificates.IssuerRef.Name = "replacement-issuer"
-			if remove {
-				r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = nil
-			} else {
-				r.GlobalConfig.Config.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{account}
-			}
-			publishCertificateConfig(t, r)
-			// The API increments generation after spec updates; the fake does not.
-			// Model it at that external boundary, retaining old Ready status.
-			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if u, ok := obj.(*unstructured.Unstructured); ok && u.GetKind() == "Certificate" {
-					u.SetGeneration(u.GetGeneration() + 1)
-				}
-				if d, ok := obj.(*appsv1.Deployment); ok {
-					options := &client.UpdateOptions{}
-					for _, option := range opts {
-						option.ApplyToUpdate(options)
-					}
-					if len(options.DryRun) == 0 {
-						d.Generation++
-					}
-				}
-				return cl.Update(ctx, obj, opts...)
-			}})
-			for range 3 {
-				result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
-				if err != nil || result.RequeueAfter != 5*time.Second {
-					t.Fatalf("pending issuance: %+v %v", result, err)
-				}
-				if err := r.Get(ctx, client.ObjectKeyFromObject(y), y); err != nil {
-					t.Fatal(err)
-				}
-				if apimeta.IsStatusConditionTrue(y.Status.Conditions, "Ready") || !apimeta.IsStatusConditionFalse(y.Status.Conditions, "CredentialsDelivered") {
-					t.Fatalf("skipped delivery reported ready: %+v", y.Status.Conditions)
-				}
-				for _, before := range []*appsv1.Deployment{writer, consumer} {
-					got := &appsv1.Deployment{}
-					if err := r.Get(ctx, client.ObjectKeyFromObject(before), got); err != nil {
-						t.Fatal(err)
-					}
-					if got.ResourceVersion != before.ResourceVersion {
-						t.Fatalf("pending issuer changed working %s template/policy", before.Labels[manifests.LabelComponent])
-					}
-				}
-				recoverGateway(certificateWorkload(t, r, "credential-delivery"), certificateWorkload(t, r, "controlplane"))
-			}
-			markCertificatesIssued(t, r)
-			reconcileCertificates(t, r, y)
-			newWriter := certificateWorkload(t, r, "credential-delivery")
-			if reflect.DeepEqual(writer.Spec.Template, newWriter.Spec.Template) {
-				t.Fatal("ready issuance did not activate writer policy")
-			}
-			if got := certificateWorkload(t, r, "controlplane"); got.ResourceVersion != consumer.ResourceVersion {
-				t.Fatal("old delivery status unblocked a new consumer policy")
-			}
-			newWriter.Status.ObservedGeneration = newWriter.Generation
-			if err := r.Status().Update(ctx, newWriter); err != nil {
-				t.Fatal(err)
-			}
-			reconcileCertificates(t, r, y)
-			newConsumer := certificateWorkload(t, r, "controlplane")
-			if reflect.DeepEqual(consumer.Spec.Template, newConsumer.Spec.Template) {
-				t.Fatal("ready delivery did not activate consumer policy")
-			}
-			for _, args := range [][]string{newWriter.Spec.Template.Spec.Containers[0].Args, newConsumer.Spec.Template.Spec.InitContainers[0].Args} {
-				hasAlice := strings.Contains(strings.Join(args, " "), "alice")
-				if hasAlice == remove {
-					t.Fatalf("converged policy retained wrong account permissions: %v", args)
-				}
-			}
-		})
-	}
-}
-
 func TestManagedCertificatesFinalPodPreflightBeforeWrites(t *testing.T) {
 	for _, tc := range []struct{ name, patch, want string }{
 		{"gate-name", `{"spec":{"template":{"spec":{"containers":[{"name":"yanet-credential-gateway-check","image":"example.test/sidecar:v1"}]}}}}`, "startup gate"},
@@ -285,9 +211,6 @@ func TestManagedCertificatesFinalPodPreflightBeforeWrites(t *testing.T) {
 			}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(y), y); err != nil {
 				t.Fatal(err)
-			}
-			if y.Annotations[policyStateAnnotation] != "" {
-				t.Fatal("preflight allocated credential policy before rejecting final consumer")
 			}
 		})
 	}

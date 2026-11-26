@@ -28,13 +28,6 @@ func policyHostPath(ctx BuildContext) string {
 	return path.Join(ctx.Certificates.HostPath, ctx.Namespace, ctx.YanetName, string(ctx.OwnerRef.UID), ctx.NodeUID, ".gateway-policy")
 }
 
-func policyArgs(ctx BuildContext) []string {
-	return []string{
-		"policy-sync", "--epoch=" + string(ctx.OwnerRef.UID), "--node-uid=" + ctx.NodeUID,
-		"--namespace=" + ctx.Namespace, "--domain=" + ctx.Certificates.TrustDomain,
-	}
-}
-
 func policySecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsUser: ptr[int64](0), RunAsGroup: ptr[int64](0), RunAsNonRoot: helpers.PtrFalse(),
@@ -45,9 +38,6 @@ func policySecurityContext() *corev1.SecurityContext {
 }
 
 func buildPolicyDelivery(ctx BuildContext, enabled bool) *appsv1.Deployment {
-	if !ctx.Certificates.OnlineGatewayPolicy {
-		return nil
-	}
 	hasServer := false
 	for _, profile := range ctx.Certificates.Profiles {
 		hasServer = hasServer || profile.Usage == "server"
@@ -57,7 +47,7 @@ func buildPolicyDelivery(ctx BuildContext, enabled bool) *appsv1.Deployment {
 	}
 	delivery := buildSingle(ctx, &helpers.ResolvedComponent{Kind: helpers.KindOperator, Name: PolicyDeliveryComponent, Enabled: enabled})
 	directory := corev1.HostPathDirectoryOrCreate
-	args := policyArgs(ctx)
+	args := []string{"policy-sync"}
 	projection := &corev1.ConfigMapVolumeSource{
 		LocalObjectReference: corev1.LocalObjectReference{Name: PolicyConfigMapName(string(ctx.OwnerRef.UID), ctx.NodeUID)},
 		Items:                []corev1.KeyToPath{{Key: credentials.PolicyBundleKey, Path: credentials.PolicyBundleKey}},
@@ -114,13 +104,13 @@ func configureOnlinePolicyMount(ctx BuildContext, pod *corev1.PodSpec, target *c
 			}
 		}
 	}
-	scope := api.CertificateURI(ctx.Certificates.TrustDomain, ctx.Namespace, string(ctx.OwnerRef.UID), ctx.NodeUID, profile.Name)
 	env := []corev1.EnvVar{
 		{Name: "YANET_GATEWAY_AUTH_MODE", Value: "enabled"},
-		{Name: "YANET_GATEWAY_AUTH_MANAGED_POLICY_DIRECTORY", Value: policyMount},
-		{Name: "YANET_GATEWAY_AUTH_MANAGED_POLICY_EXPECTED_SCOPE_EPOCH", Value: string(ctx.OwnerRef.UID)},
-		{Name: "YANET_GATEWAY_AUTH_MANAGED_POLICY_EXPECTED_SCOPE_NODE_UID", Value: ctx.NodeUID},
-		{Name: "YANET_GATEWAY_AUTH_MANAGED_POLICY_EXPECTED_SCOPE_SERVER_URI", Value: scope},
+		{Name: "YANET_GATEWAY_AUTH_IDENTITY_PROVIDERS_0_TYPE", Value: "file"},
+		{Name: "YANET_GATEWAY_AUTH_IDENTITY_PROVIDERS_0_PATH", Value: policyMount + "/identities.yaml"},
+		{Name: "YANET_GATEWAY_AUTH_IDENTITY_PROVIDERS_0_REFRESH_INTERVAL", Value: "5s"},
+		{Name: "YANET_GATEWAY_AUTH_PERMISSIONS_PATH", Value: policyMount + "/permissions.yaml"},
+		{Name: "YANET_GATEWAY_AUTH_PERMISSIONS_REFRESH_INTERVAL", Value: "5s"},
 	}
 	for _, existing := range target.Env {
 		for _, managed := range env {
@@ -140,12 +130,12 @@ func configureOnlinePolicyMount(ctx BuildContext, pod *corev1.PodSpec, target *c
 	}
 	directory := corev1.HostPathDirectoryOrCreate
 	pod.Volumes = append(pod.Volumes, corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
-		Path: path.Join(policyHostPath(ctx), profile.Name), Type: &directory,
+		Path: policyHostPath(ctx), Type: &directory,
 	}}})
 	target.VolumeMounts = append(target.VolumeMounts, corev1.VolumeMount{Name: name, MountPath: policyMount, ReadOnly: true})
 	pod.InitContainers = append([]corev1.Container{{
 		Name: gateName, Image: ctx.Certificates.ExporterImage, ImagePullPolicy: ctx.PullPolicy,
-		Command: []string{"/manager"}, Args: append(policyArgs(ctx), "--check-role="+profile.Name),
+		Command: []string{"/manager"}, Args: []string{"policy-sync", "--check"},
 		SecurityContext: policySecurityContext(),
 		VolumeMounts:    []corev1.VolumeMount{{Name: name, MountPath: "/persist", ReadOnly: true}},
 	}}, pod.InitContainers...)

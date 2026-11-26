@@ -2,10 +2,8 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,33 +13,21 @@ import (
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func readOnlineState(t *testing.T, r *YanetReconciler, y *api.Yanet) onlinePolicyState {
-	t.Helper()
-	if err := r.Get(t.Context(), client.ObjectKeyFromObject(y), y); err != nil {
-		t.Fatal(err)
-	}
-	var state onlinePolicyState
-	if err := json.Unmarshal([]byte(y.Annotations[onlinePolicyStateAnnotation]), &state); err != nil {
-		t.Fatal(err)
-	}
-	return state
-}
-
-func convergeOnlinePolicy(t *testing.T, r *YanetReconciler, y *api.Yanet) onlinePolicyState {
+func convergeOnlinePolicy(t *testing.T, r *YanetReconciler, y *api.Yanet) {
 	t.Helper()
 	reconcileCertificates(t, r, y)
 	markCertificatesIssued(t, r)
 	reconcileCertificates(t, r, y)
 	readyCertificateDeployments(t, r)
 	reconcileCertificates(t, r, y)
-	return readOnlineState(t, r, y)
+	if err := r.Get(t.Context(), client.ObjectKeyFromObject(y), y); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readPolicyConfigMap(t *testing.T, r *YanetReconciler, y *api.Yanet, node *corev1.Node) (*corev1.ConfigMap, credentials.OnlinePolicyBundle) {
@@ -60,9 +46,6 @@ func readPolicyConfigMap(t *testing.T, r *YanetReconciler, y *api.Yanet, node *c
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bundle.Epoch != string(y.UID) || bundle.NodeUID != string(node.UID) {
-		t.Fatalf("wrong policy scope: %s/%s", bundle.Epoch, bundle.NodeUID)
-	}
 	return cm, bundle
 }
 
@@ -76,7 +59,6 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 	cfg := &r.GlobalConfig.Config
 	numa := int32(2)
 	cfg.Components.Controlplane.Numa = &numa
-	cfg.Certificates.OnlineGatewayPolicy = true
 	cfg.UpdateWindow = 1800
 	cfg.Components.Operators = []api.OperatorSpec{{Name: "dual",
 		Containers: []api.OperatorContainer{{Name: "dual", Image: api.ImageRef{Name: "dual", Tag: "v1"}}}}}
@@ -91,14 +73,13 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 			Usage: "client", GatewayPermissions: []string{"/example.v1.Service/Read"}},
 	)
 	publishCertificateConfig(t, r)
-	initial := convergeOnlinePolicy(t, r, y)
+	convergeOnlinePolicy(t, r, y)
 	onBothNodes := []*corev1.Node{node, other}
 	for _, n := range onBothNodes {
 		_, bundle := readPolicyConfigMap(t, r, y, n)
 		want := api.CertificateURI(cfg.Certificates.TrustDomain, y.Namespace, string(y.UID), string(n.UID), "dual-client")
-		if !slices.Equal(bundle.Roles, []string{"dual-server", "gateway"}) ||
-			len(bundle.Accounts) != 1 || bundle.Accounts[0].Username != want {
-			t.Fatalf("Node %s lost wired disabled client/server inventory: %+v", n.Name, bundle)
+		if len(bundle.Accounts) != 1 || bundle.Accounts[0].Username != want {
+			t.Fatalf("Node %s lost the wired disabled client's grants: %+v", n.Name, bundle)
 		}
 	}
 
@@ -112,6 +93,19 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 			numGateways++
 			if len(manifests.OnlinePolicyTargets(&d)) != 1 {
 				t.Fatalf("%s has no managed runtime reader", d.Name)
+			}
+			variables := d.Spec.Template.Spec.Containers[0].Env
+			for _, expected := range []corev1.EnvVar{
+				{Name: "YANET_GATEWAY_AUTH_MODE", Value: "enabled"},
+				{Name: "YANET_GATEWAY_AUTH_IDENTITY_PROVIDERS_0_TYPE", Value: "file"},
+				{Name: "YANET_GATEWAY_AUTH_IDENTITY_PROVIDERS_0_PATH", Value: "/var/lib/yanet2/gateway-policy/identities.yaml"},
+				{Name: "YANET_GATEWAY_AUTH_IDENTITY_PROVIDERS_0_REFRESH_INTERVAL", Value: "5s"},
+				{Name: "YANET_GATEWAY_AUTH_PERMISSIONS_PATH", Value: "/var/lib/yanet2/gateway-policy/permissions.yaml"},
+				{Name: "YANET_GATEWAY_AUTH_PERMISSIONS_REFRESH_INTERVAL", Value: "5s"},
+			} {
+				if !slices.Contains(variables, expected) {
+					t.Fatalf("%s does not configure upstream file polling: missing %+v", d.Name, expected)
+				}
 			}
 		}
 	}
@@ -139,19 +133,17 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 	cfg.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{{Username: "alice", Permissions: []string{"/example.v1.Service/Write"}}}
 	publishCertificateConfig(t, r)
 	reconcileCertificates(t, r, y)
-	state := readOnlineState(t, r, y)
-	if state.Sequence != initial.Sequence+1 {
-		t.Fatalf("grant did not allocate a revision: %+v", state)
-	}
+	projected := map[string]map[string]string{}
 	for _, n := range onBothNodes {
-		_, bundle := readPolicyConfigMap(t, r, y, n)
-		if bundle.Sequence != state.Sequence || len(bundle.Accounts) != 2 || bundle.Accounts[0].Username != "alice" {
+		cm, bundle := readPolicyConfigMap(t, r, y, n)
+		projected[n.Name] = cm.Data
+		if len(bundle.Accounts) != 2 || bundle.Accounts[0].Username != "alice" {
 			t.Fatalf("Node %s did not receive the grant: %+v", n.Name, bundle)
 		}
 	}
 
-	// Changing the running server inventory must not allocate a policy
-	// revision. Leave both of the new role's certificates unissued.
+	// Changing the running server inventory preserves policy data. Leave both
+	// of the new role's certificates unissued.
 	y.Spec.Components = &api.YanetComponentsOverride{Operators: map[string]api.YanetComponentOverride{
 		"dual": {Enabled: helpers.PtrTrue()},
 	}}
@@ -160,8 +152,11 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 		t.Fatal(err)
 	}
 	reconcileCertificates(t, r, y)
-	if next := readOnlineState(t, r, y); next.Sequence != state.Sequence {
-		t.Fatalf("pending dual-role server changed authorization: %+v", next)
+	for _, n := range onBothNodes {
+		cm, _ := readPolicyConfigMap(t, r, y, n)
+		if !reflect.DeepEqual(cm.Data, projected[n.Name]) {
+			t.Fatalf("pending dual-role server changed authorization on %s", n.Name)
+		}
 	}
 	if count := len(listCertificates(t, r)); count != 6 {
 		t.Fatalf("test did not reach unrelated certificate issuance: got %d Certificates", count)
@@ -173,7 +168,7 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 	reconcileCertificates(t, r, y)
 	for _, n := range onBothNodes {
 		_, bundle := readPolicyConfigMap(t, r, y, n)
-		if bundle.Sequence != state.Sequence+1 || bundle.Accounts == nil || len(bundle.Accounts) != 0 {
+		if bundle.Accounts == nil || len(bundle.Accounts) != 0 {
 			t.Fatalf("Node %s did not receive an explicit empty policy: %+v", n.Name, bundle)
 		}
 	}
@@ -188,39 +183,5 @@ func TestOnlinePolicyUpdatesWithoutDeploymentWritesOrCertificateReadiness(t *tes
 		if current.ResourceVersion != old.ResourceVersion || !reflect.DeepEqual(current.Spec, old.Spec) {
 			t.Fatalf("Deployment changed: %s", old.Name)
 		}
-	}
-}
-
-func TestOnlinePolicyRequiresFreshInstallation(t *testing.T) {
-	for _, mode := range []string{"unmanaged", "legacy"} {
-		t.Run(mode, func(t *testing.T) {
-			r, y, node := certificateEnvironment(t)
-			cfg := &r.GlobalConfig.Config
-			certificates := cfg.Certificates
-			if mode == "legacy" {
-				startCertificateWorkloads(t, r, y)
-			} else {
-				cfg.Certificates = nil
-				publishCertificateConfig(t, r)
-				reconcileCertificates(t, r, y)
-			}
-			before := certificateWorkload(t, r, "controlplane")
-
-			cfg.Certificates = certificates
-			certificates.OnlineGatewayPolicy = true
-			publishCertificateConfig(t, r)
-			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
-			if err == nil || !strings.Contains(err.Error(), "requires a fresh installation") {
-				t.Fatalf("expected existing installation to be rejected, got %v", err)
-			}
-			after := certificateWorkload(t, r, "controlplane")
-			if after.ResourceVersion != before.ResourceVersion || !reflect.DeepEqual(after.Spec, before.Spec) {
-				t.Fatal("rejecting online policy changed the existing gateway")
-			}
-			key := client.ObjectKey{Namespace: y.Namespace, Name: manifests.PolicyConfigMapName(string(y.UID), string(node.UID))}
-			if err := r.Get(t.Context(), key, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
-				t.Fatalf("expected no online projection, got %v", err)
-			}
-		})
 	}
 }

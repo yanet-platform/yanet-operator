@@ -155,7 +155,7 @@ func TestMissingBoxExplicitDrain(t *testing.T) {
 	if err := r.List(t.Context(), deps); err != nil {
 		t.Fatal(err)
 	}
-	if len(deps.Items) != 4 {
+	if len(deps.Items) != 5 {
 		t.Fatalf("drain changed Deployment inventory: %d", len(deps.Items))
 	}
 	for _, d := range deps.Items {
@@ -238,7 +238,7 @@ func TestDeploymentClaimSurvivesMissingMetadataLabel(t *testing.T) {
 	}
 }
 
-func TestMissingSSHBundleAllowsIndependentReconcileAndRelease(t *testing.T) {
+func TestMissingSSHBundleBlocksApplyButAllowsNodeRelease(t *testing.T) {
 	r, y, node := certificateEnvironment(t)
 	trust := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "ssh-trust", Namespace: y.Namespace}}
 	if err := r.Create(t.Context(), trust); err != nil {
@@ -265,9 +265,15 @@ func TestMissingSSHBundleAllowsIndependentReconcileAndRelease(t *testing.T) {
 	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)}); !errors.As(err, &unavailable) {
 		t.Fatalf("expected SSH source error, got %v", err)
 	}
-	_ = certificateWorkload(t, r, "dataplane")
 	if err := r.Get(t.Context(), client.ObjectKeyFromObject(stale), stale); !apierrors.IsNotFound(err) {
 		t.Fatalf("former Node was not released: %v", err)
+	}
+	deps := &appsv1.DeploymentList{}
+	if err := r.List(t.Context(), deps); err != nil {
+		t.Fatal(err)
+	}
+	if len(deps.Items) != 0 || len(listCertificates(t, r)) != 0 {
+		t.Fatal("unavailable SSH policy did not block resource creation")
 	}
 	if err := r.Get(t.Context(), client.ObjectKeyFromObject(y), y); err != nil {
 		t.Fatal(err)
@@ -291,8 +297,8 @@ func TestMissingSSHBundleDoesNotPermitStalePaletteWrites(t *testing.T) {
 	if err := r.Update(t.Context(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)}); err == nil || !strings.Contains(err.Error(), "source changed") {
-		t.Fatalf("expected stale source error, got %v", err)
+	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)}); err == nil || !strings.Contains(err.Error(), "SSH trust") {
+		t.Fatalf("expected unavailable SSH source, got %v", err)
 	}
 	deps := &appsv1.DeploymentList{}
 	if err := r.List(t.Context(), deps); err != nil {
@@ -327,7 +333,6 @@ func TestUnavailableSSHBundleKeepsLiveCredentialWorkloads(t *testing.T) {
 	if err := r.Get(t.Context(), client.ObjectKeyFromObject(y), y); err != nil {
 		t.Fatal(err)
 	}
-	policy := y.Annotations[policyStateAnnotation]
 	if !apimeta.IsStatusConditionTrue(y.Status.Conditions, "CredentialsDelivered") {
 		t.Fatal("test setup did not reach delivered status")
 	}
@@ -342,8 +347,8 @@ func TestUnavailableSSHBundleKeepsLiveCredentialWorkloads(t *testing.T) {
 	if _, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)}); !errors.As(err, &unavailable) {
 		t.Fatalf("expected SSH error, got %v", err)
 	}
-	if d := certificateWorkload(t, r, "dataplane"); d.ResourceVersion == dep.ResourceVersion || !strings.HasSuffix(d.Spec.Template.Spec.Containers[0].Image, ":next") {
-		t.Fatal("unrelated dataplane image was not updated")
+	if d := certificateWorkload(t, r, "dataplane"); d.ResourceVersion != dep.ResourceVersion {
+		t.Fatal("failed preflight changed the dataplane")
 	}
 	for component, version := range map[string]string{"credential-delivery": writer.ResourceVersion, "controlplane": consumer.ResourceVersion} {
 		if got := certificateWorkload(t, r, component).ResourceVersion; got != version {
@@ -356,7 +361,7 @@ func TestUnavailableSSHBundleKeepsLiveCredentialWorkloads(t *testing.T) {
 	if err := r.Get(t.Context(), client.ObjectKeyFromObject(y), y); err != nil {
 		t.Fatal(err)
 	}
-	if y.Annotations[policyStateAnnotation] != policy || !apimeta.IsStatusConditionPresentAndEqual(y.Status.Conditions, "CredentialsDelivered", metav1.ConditionUnknown) {
-		t.Fatalf("invalid policy advanced allocation or left delivery status falsely green: %+v", y.Status.Conditions)
+	if !apimeta.IsStatusConditionPresentAndEqual(y.Status.Conditions, "CredentialsDelivered", metav1.ConditionUnknown) {
+		t.Fatalf("invalid policy left delivery status falsely green: %+v", y.Status.Conditions)
 	}
 }

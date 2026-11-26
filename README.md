@@ -139,10 +139,9 @@ automatic environment. Optional `config.mountPath` selects the container directo
 (default `/etc/yanet2`); inline data is mounted as `<mountPath>/config`.
 Only `{numa}` in controlplane arguments is substituted; all other arguments are literal.
 
-**Before upgrading from v3.1.0**, complete the [gateway listener preflight](MANAGED_CERTIFICATES.md#gateway-listener-preflight-for-upgrades-from-v310)
-for every active node and NUMA instance. Plaintext gateways that relied on the
-old injected bind need an explicit Service-reachable bind before rollout.
-Keep external TLS-only gateways TLS-only.
+Configure [gateway listeners](MANAGED_CERTIFICATES.md#gateway-listeners)
+explicitly for every active node and NUMA instance, including the Service's
+transport and reachable bind address.
 
 Controlplane configs use the native `gateway.server.grpc` section. Without a managed
 controlplane server certificate profile, configure either `grpc.endpoint` or

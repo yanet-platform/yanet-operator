@@ -2,17 +2,14 @@ package credentials
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -22,33 +19,11 @@ func lockPublication(root *os.Root, flags int) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open credential publication lock: %w", err)
 	}
-	operation := unix.LOCK_SH
-	if flags&(os.O_WRONLY|os.O_RDWR) != 0 {
-		operation = unix.LOCK_EX
-	}
-	if err := unix.Flock(int(lock.Fd()), operation|unix.LOCK_NB); err != nil {
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = lock.Close()
 		return nil, fmt.Errorf("lock credential publication: %w", err)
 	}
 	return lock, nil
-}
-
-func retryPublicationCheck(ctx context.Context, check func() error) error {
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		err := check()
-		if !errors.Is(err, unix.EWOULDBLOCK) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return err
-		case <-ticker.C:
-		}
-	}
 }
 
 // durableCurrent belongs to one polling loop. Pin the actual symlink inode so

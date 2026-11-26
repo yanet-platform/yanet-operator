@@ -32,18 +32,10 @@ func TestWriterReadinessSharesRolePublicationLock(t *testing.T) {
 			project(t, source, "issued", cert, key)
 			identity := credentials.Identity{URI: identityURI, Usage: usage}
 			args := []string{"--uri=" + identityURI, "--usage=" + usage, "--destination=" + destination, "--trust=" + trust, "--check"}
-			var policy *credentials.GatewayPolicy
-			if usage == "server" {
-				policy = recoveryPolicy(1, false)
-				args = append(args, "--gateway-policy", "--policy-epoch=installation-uid", "--policy-revision=1", "--ssh-trust-sha256=none")
-			}
-			if _, err := credentials.Publish(source, destination, trust, identity, now, policy); err != nil {
+			if _, err := credentials.Publish(source, destination, trust, identity, now); err != nil {
 				t.Fatal(err)
 			}
 			probe := append(slices.Clone(args), "--writer-readiness")
-			if usage == "server" {
-				probe = append(probe, "--exact-policy-revision")
-			}
 			lockPath := filepath.Join(destination, ".publish-lock")
 			lock, openErr := os.Open(lockPath)
 			if openErr != nil {
@@ -64,14 +56,6 @@ func TestWriterReadinessSharesRolePublicationLock(t *testing.T) {
 			}
 			if err := credentials.Run(t.Context(), probe); err != nil {
 				t.Fatalf("writer readiness did not recover after release: %v", err)
-			}
-			if usage == "server" {
-				if _, err := credentials.Publish(source, destination, trust, identity, now, recoveryPolicy(2, false)); err != nil {
-					t.Fatal(err)
-				}
-				if err := credentials.Run(t.Context(), probe); err == nil || !strings.Contains(err.Error(), "differs from desired writer revision") {
-					t.Fatalf("writer accepted the wrong exact revision: %v", err)
-				}
 			}
 			if err := os.Remove(lockPath); err != nil {
 				t.Fatal(err)

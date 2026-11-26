@@ -183,21 +183,20 @@ between `gateway.server.http.endpoint` and deprecated `gateway.server.http_endpo
 and the runtime loader rejects it. The operator does not inject that variable.
 Without a native gRPC section or an explicit legacy endpoint, the public runtime
 defaults to `[::1]:8080`, which does not serve the Service's Pod IP target.
-The [v3.1.0 upgrade preflight](MANAGED_CERTIFICATES.md#gateway-listener-preflight-for-upgrades-from-v310)
-is mandatory before rolling out this ownership change.
+See [gateway listeners](MANAGED_CERTIFICATES.md#gateway-listeners) for explicit
+transport configuration.
 With a managed controlplane server certificate profile, the same reserved gRPC
 port is assigned through `YANET_GATEWAY_SERVER_GRPC_TLS_ENDPOINT` and the plaintext
 gRPC endpoint is cleared. Native key-pair/authentication configuration stays in
 the host file. UID-bound gateway account policy and its offline startup gate are
 described in [MANAGED_CERTIFICATES.md](MANAGED_CERTIFICATES.md).
-Its handoff uses an installation-UID epoch and durable monotonic policy revision
-on the Yanet, allocated with uncached source verification and optimistic CAS.
-Atomic local publication lets retained revision-aware gates load newer validated
-authorization without reviving historical grants. Writer readiness requires the
-exact desired revision; consumer gates require at least their template's revision.
-Upgrading from published v3.1.0 requires an unchanged-policy rollout, refreshed
-offline checkpoints and an explicit UID-scoped acknowledgment before policy can
-advance. Deployment readiness alone does not acknowledge external checkpoints.
+Every managed gateway uses independent file-policy polling. A stable per-Node
+ConfigMap feeds `policy-sync`, which replaces public identity, permission and
+optional SSH CA files in a persistent directory separate from TLS generations.
+Account changes preserve existing Deployment specs. Identity and permission
+reloads are independent and affect new RPCs; open streams continue. Startup uses
+the last delivered local files without the API. There is no policy revision or
+checkpoint acknowledgment protocol; existing installations require a clean reset.
 Other YAML schemas, such as an ACL's nested `operator.instances`, require explicit
 schema-specific env in palette patches through the same runtime loader.
 

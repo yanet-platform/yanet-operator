@@ -6,7 +6,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -28,7 +27,6 @@ import (
 
 func TestOnlinePolicyWriterWaitsForOwnedProjection(t *testing.T) {
 	r, y, node := certificateEnvironment(t)
-	r.GlobalConfig.Config.Certificates.OnlineGatewayPolicy = true
 	publishCertificateConfig(t, r)
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 		Namespace: y.Namespace, Name: manifests.PolicyConfigMapName(string(y.UID), string(node.UID)),
@@ -53,22 +51,13 @@ func TestOnlinePolicyWriterWaitsForOwnedProjection(t *testing.T) {
 func TestOnlinePolicyDisabledDrainPreservesConsumerTemplate(t *testing.T) {
 	r, y, _ := certificateEnvironment(t)
 	cfg := &r.GlobalConfig.Config
-	cfg.Certificates.OnlineGatewayPolicy = true
-	cfg.Components.Operators = []api.OperatorSpec{{Name: "peer", Containers: []api.OperatorContainer{
-		{Name: "peer", Image: api.ImageRef{Name: "peer", Tag: "v1"}},
-	}}}
-	cfg.BoxTypes[0].Operators = map[string]api.BoxOperator{"peer": {}}
-	cfg.Certificates.Profiles = append(cfg.Certificates.Profiles, api.CertificateProfile{
-		Name: "peer", Component: "peer", Container: "peer", MountPath: "/etc/yanet2/pki/peer",
-		Usage: "server", DNSNames: []string{"{node}"},
-	})
 	publishCertificateConfig(t, r)
 	convergeOnlinePolicy(t, r, y)
 	before := certificateWorkload(t, r, "controlplane")
 	if len(manifests.OnlinePolicyTargets(before)) != 1 {
 		t.Fatal("expected the running gateway to have a managed policy mount")
 	}
-	cfg.Certificates.Profiles = cfg.Certificates.Profiles[1:]
+	cfg.Certificates = nil
 	publishCertificateConfig(t, r)
 	y.Spec.Enabled = helpers.PtrFalse()
 	y.Generation++
@@ -99,42 +88,32 @@ func TestOnlinePolicyDisabledDrainPreservesConsumerTemplate(t *testing.T) {
 }
 
 func TestOnlinePolicyUnavailableSSHDoesNotBlockNodeRelease(t *testing.T) {
-	for _, online := range []bool{false, true} {
-		t.Run(fmt.Sprintf("online=%t", online), func(t *testing.T) {
-			r, y, node := certificateEnvironment(t)
-			node.Labels = map[string]string{"selected": "true"}
-			if err := r.Update(t.Context(), node); err != nil {
-				t.Fatal(err)
-			}
-			y.Spec.NodeSelector = map[string]string{"selected": "true"}
-			y.Generation++
-			if err := r.Update(t.Context(), y); err != nil {
-				t.Fatal(err)
-			}
-			sshTrust := createReviewSSHTrust(t, r, y)
-			certs := r.GlobalConfig.Config.Certificates
-			certs.OnlineGatewayPolicy = online
-			if online {
-				publishCertificateConfig(t, r)
-				convergeOnlinePolicy(t, r, y)
-			} else {
-				startCertificateWorkloads(t, r, y)
-			}
-			gw := certificateWorkload(t, r, "controlplane")
-			if err := r.Delete(t.Context(), sshTrust); err != nil {
-				t.Fatal(err)
-			}
-			node.Labels = nil
-			if err := r.Update(t.Context(), node); err != nil {
-				t.Fatal(err)
-			}
-			_, reconcileErr := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
-			got := &appsv1.Deployment{}
-			err := r.Get(t.Context(), client.ObjectKeyFromObject(gw), got)
-			if !apierrors.IsNotFound(err) && (err != nil || got.DeletionTimestamp.IsZero()) {
-				t.Fatalf("no foreground cleanup of released gateway (reconcile=%v, get=%v)", reconcileErr, err)
-			}
-		})
+	r, y, node := certificateEnvironment(t)
+	node.Labels = map[string]string{"selected": "true"}
+	if err := r.Update(t.Context(), node); err != nil {
+		t.Fatal(err)
+	}
+	y.Spec.NodeSelector = map[string]string{"selected": "true"}
+	y.Generation++
+	if err := r.Update(t.Context(), y); err != nil {
+		t.Fatal(err)
+	}
+	sshTrust := createReviewSSHTrust(t, r, y)
+	publishCertificateConfig(t, r)
+	convergeOnlinePolicy(t, r, y)
+	gw := certificateWorkload(t, r, "controlplane")
+	if err := r.Delete(t.Context(), sshTrust); err != nil {
+		t.Fatal(err)
+	}
+	node.Labels = nil
+	if err := r.Update(t.Context(), node); err != nil {
+		t.Fatal(err)
+	}
+	_, reconcileErr := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
+	got := &appsv1.Deployment{}
+	err := r.Get(t.Context(), client.ObjectKeyFromObject(gw), got)
+	if !apierrors.IsNotFound(err) && (err != nil || got.DeletionTimestamp.IsZero()) {
+		t.Fatalf("no foreground cleanup of released gateway (reconcile=%v, get=%v)", reconcileErr, err)
 	}
 }
 
@@ -165,7 +144,6 @@ func TestOnlinePolicyDeliveryNameReservedForSidecars(t *testing.T) {
 	r, _, _ := certificateEnvironment(t)
 	cfg := &r.GlobalConfig.Config
 	cfg.Patches = nil
-	cfg.Certificates.OnlineGatewayPolicy = true
 	cfg.Components.Dataplane.Sidecars = []api.SidecarSpec{{Name: "policy-delivery", Image: api.ImageRef{Name: "demo", Tag: "v1"}}}
 	cfg.BoxTypes[0].Components.Dataplane.Sidecars = map[string]api.BoxDataplaneSidecar{"policy-delivery": {}}
 	validator := &api.YanetConfigCustomValidator{}
@@ -178,7 +156,6 @@ func TestOnlinePolicyDeliveryNameReservedForSidecars(t *testing.T) {
 func TestOnlinePolicyCredentialMountCannotShadowPolicy(t *testing.T) {
 	r, y, _ := certificateEnvironment(t)
 	certs := r.GlobalConfig.Config.Certificates
-	certs.OnlineGatewayPolicy = true
 	certs.Profiles = append(certs.Profiles, api.CertificateProfile{
 		Name: "client", Component: "controlplane", Container: "controlplane",
 		MountPath: "/var/lib/yanet2/gateway-policy/current", Usage: "client",
@@ -194,61 +171,55 @@ func TestOnlinePolicyCredentialMountCannotShadowPolicy(t *testing.T) {
 }
 
 func TestOnlinePolicyExclusivityUsesLiveNodeLabels(t *testing.T) {
-	for _, online := range []bool{false, true} {
-		t.Run(fmt.Sprintf("online=%t", online), func(t *testing.T) {
-			r, y, node := certificateEnvironment(t)
-			r.GlobalConfig.Config.Certificates.OnlineGatewayPolicy = online
-			publishCertificateConfig(t, r)
-			y.Spec.NodeSelector = map[string]string{"rack": "selected"}
-			y.Generation++
-			if err := r.Update(t.Context(), y); err != nil {
-				t.Fatal(err)
+	r, y, node := certificateEnvironment(t)
+	publishCertificateConfig(t, r)
+	y.Spec.NodeSelector = map[string]string{"rack": "selected"}
+	y.Generation++
+	if err := r.Update(t.Context(), y); err != nil {
+		t.Fatal(err)
+	}
+	// With no incumbent producer, equal timestamps are ordered by name.
+	older := &api.Yanet{ObjectMeta: metav1.ObjectMeta{
+		Name: "aaa", Namespace: y.Namespace, UID: "other-uid", Generation: 1,
+	}, Spec: api.YanetSpec{
+		BoxType: y.Spec.BoxType, AutoSync: helpers.PtrTrue(), NodeSelector: map[string]string{"zone": "selected"},
+	}}
+	if err := r.Create(t.Context(), older); err != nil {
+		t.Fatal(err)
+	}
+	node.Labels = map[string]string{"rack": "selected", "zone": "selected"}
+	if err := r.Update(t.Context(), node); err != nil {
+		t.Fatal(err)
+	}
+	stale := node.DeepCopy()
+	delete(stale.Labels, "zone")
+	base := r.Client.(client.WithWatch)
+	r.APIReader = base
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if nodes, ok := list.(*corev1.NodeList); ok {
+				nodes.Items = []corev1.Node{*stale.DeepCopy()}
+				return nil
 			}
-			// With no incumbent producer, equal timestamps are ordered by name.
-			older := &api.Yanet{ObjectMeta: metav1.ObjectMeta{
-				Name: "aaa", Namespace: y.Namespace, UID: "other-uid", Generation: 1,
-			}, Spec: api.YanetSpec{
-				BoxType: y.Spec.BoxType, AutoSync: helpers.PtrTrue(), NodeSelector: map[string]string{"zone": "selected"},
-			}}
-			if err := r.Create(t.Context(), older); err != nil {
-				t.Fatal(err)
-			}
-			node.Labels = map[string]string{"rack": "selected", "zone": "selected"}
-			if err := r.Update(t.Context(), node); err != nil {
-				t.Fatal(err)
-			}
-			stale := node.DeepCopy()
-			delete(stale.Labels, "zone")
-			base := r.Client.(client.WithWatch)
-			r.APIReader = base
-			r.Client = interceptor.NewClient(base, interceptor.Funcs{
-				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-					if nodes, ok := list.(*corev1.NodeList); ok {
-						nodes.Items = []corev1.Node{*stale.DeepCopy()}
-						return nil
-					}
-					return c.List(ctx, list, opts...)
-				},
-			})
-			_, reconcileErr := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
-			deps := &appsv1.DeploymentList{}
-			if err := base.List(t.Context(), deps); err != nil {
-				t.Fatal(err)
-			}
-			for i := range deps.Items {
-				d := &deps.Items[i]
-				if controlledByYanet(d, y) {
-					t.Fatalf("stale labels let a losing installation acquire the live Node: deployment=%s err=%v", d.Name, reconcileErr)
-				}
-			}
-		})
+			return c.List(ctx, list, opts...)
+		},
+	})
+	_, reconcileErr := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
+	deps := &appsv1.DeploymentList{}
+	if err := base.List(t.Context(), deps); err != nil {
+		t.Fatal(err)
+	}
+	for i := range deps.Items {
+		d := &deps.Items[i]
+		if controlledByYanet(d, y) {
+			t.Fatalf("stale labels let a losing installation acquire the live Node: deployment=%s err=%v", d.Name, reconcileErr)
+		}
 	}
 }
 
 func TestOnlinePolicyServerToggleKeepsExistingGatewaySpec(t *testing.T) {
 	r, y, node := certificateEnvironment(t)
 	cfg := &r.GlobalConfig.Config
-	cfg.Certificates.OnlineGatewayPolicy = true
 	cfg.Components.Operators = []api.OperatorSpec{{Name: "peer", Containers: []api.OperatorContainer{
 		{Name: "peer", Image: api.ImageRef{Name: "peer", Tag: "v1"}},
 	}}}
@@ -294,14 +265,13 @@ func TestOnlinePolicyServerToggleKeepsExistingGatewaySpec(t *testing.T) {
 	}
 }
 
-func TestOnlinePolicyPauseKeepsStateAndProjection(t *testing.T) {
-	for _, mode := range []string{"stop", "report-only", "disabled", "stale-config"} {
+func TestOnlinePolicyPauseKeepsProjection(t *testing.T) {
+	for _, mode := range []string{"stop", "report-only", "disabled"} {
 		t.Run(mode, func(t *testing.T) {
 			r, y, node := certificateEnvironment(t)
 			cfg := &r.GlobalConfig.Config
-			cfg.Certificates.OnlineGatewayPolicy = true
 			publishCertificateConfig(t, r)
-			state := convergeOnlinePolicy(t, r, y)
+			convergeOnlinePolicy(t, r, y)
 			projection, _ := readPolicyConfigMap(t, r, y, node)
 			writer := certificateWorkload(t, r, manifests.PolicyDeliveryComponent)
 			cfg.Certificates.AdditionalGatewayAccounts = []api.GatewayAccount{
@@ -321,22 +291,15 @@ func TestOnlinePolicyPauseKeepsStateAndProjection(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if mode != "stale-config" {
-				publishCertificateConfig(t, r)
-			}
+			publishCertificateConfig(t, r)
 			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(y)})
-			if mode == "stale-config" {
-				if err == nil || !strings.Contains(err.Error(), "online policy source changed") {
-					t.Fatalf("expected stale source rejection: %v", err)
-				}
-			} else if err != nil {
+			if err != nil {
 				t.Fatal(err)
 			}
-			latest := readOnlineState(t, r, y)
 			latestProjection, _ := readPolicyConfigMap(t, r, y, node)
 			latestWriter := certificateWorkload(t, r, manifests.PolicyDeliveryComponent)
-			if latest != state || latestProjection.ResourceVersion != projection.ResourceVersion {
-				t.Fatalf("policy state or projection changed while %s", mode)
+			if latestProjection.ResourceVersion != projection.ResourceVersion {
+				t.Fatalf("policy projection changed while %s", mode)
 			}
 			if mode == "disabled" {
 				if !deploymentReplicasAreZero(latestWriter) ||
@@ -361,7 +324,6 @@ func TestOnlinePolicyProjectsExactSSHBinaryDataAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &r.GlobalConfig.Config
-	cfg.Certificates.OnlineGatewayPolicy = true
 	publishCertificateConfig(t, r)
 	convergeOnlinePolicy(t, r, y)
 	_, initial := readPolicyConfigMap(t, r, y, node)
@@ -375,14 +337,14 @@ func TestOnlinePolicyProjectsExactSSHBinaryDataAndRemoval(t *testing.T) {
 	}
 	reconcileCertificates(t, r, y)
 	_, updated := readPolicyConfigMap(t, r, y, node)
-	if updated.Sequence != initial.Sequence+1 || !bytes.Equal(updated.SSHTrust, rotated) {
-		t.Fatal("exact bytes did not contribute to a fresh revision")
+	if !bytes.Equal(updated.SSHTrust, rotated) {
+		t.Fatal("rotated SSH trust was not projected byte-for-byte")
 	}
 	cfg.Certificates.SSHTrustBundle = nil
 	publishCertificateConfig(t, r)
 	reconcileCertificates(t, r, y)
 	_, removed := readPolicyConfigMap(t, r, y, node)
-	if removed.Sequence != updated.Sequence+1 || len(removed.SSHTrust) != 0 {
+	if len(removed.SSHTrust) != 0 {
 		t.Fatal("removing SSH trust did not replace the projection")
 	}
 }

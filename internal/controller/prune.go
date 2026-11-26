@@ -104,21 +104,25 @@ func (r *YanetReconciler) pruneConflictingDeployments(
 // Missing online ACL input blocks publication, not foreground deletion of
 // this installation's workloads from nodes it no longer selects.
 func (r *YanetReconciler) pruneReleasedOnlineNodes(
-	ctx context.Context, y *yanetv1alpha1.Yanet, cfg *yanetv1alpha1.YanetConfigSpec, nodes []corev1.Node, logger logr.Logger,
+	ctx context.Context, y *yanetv1alpha1.Yanet, logger logr.Logger,
 ) error {
-	fresh, _, err := r.onlinePolicySources(ctx, y, cfg, "", false)
-	if err != nil {
+	fresh := &yanetv1alpha1.Yanet{}
+	if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(y), fresh); err != nil {
 		return err
 	}
-	if verifyErr := r.verifyOnlineNodes(ctx, fresh, nodes); verifyErr != nil {
-		return verifyErr
+	if fresh.UID != y.UID || !fresh.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("installation changed while releasing online policy nodes")
+	}
+	nodes := &corev1.NodeList{}
+	if err := r.liveReader().List(ctx, nodes, client.MatchingLabels(fresh.Spec.NodeSelector)); err != nil {
+		return err
 	}
 	deployments := &appsv1.DeploymentList{}
 	if listErr := r.liveReader().List(ctx, deployments, client.InNamespace(fresh.Namespace)); listErr != nil {
 		return fmt.Errorf("list released Deployments: %w", listErr)
 	}
-	selected := make(map[string]bool, len(nodes))
-	for _, node := range nodes {
+	selected := make(map[string]bool, len(nodes.Items))
+	for _, node := range nodes.Items {
 		selected[node.Name] = true
 	}
 	released := map[string]struct{}{}

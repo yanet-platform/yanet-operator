@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	api "github.com/yanet-platform/yanet-operator/api/v1alpha1"
 	"github.com/yanet-platform/yanet-operator/internal/manifests"
@@ -11,20 +12,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Online policy starts with a new installation UID, not an in-place conversion
-// of readers which may still boot from legacy credentials.
-func (r *YanetReconciler) verifyNewOnlineScope(ctx context.Context, y *api.Yanet) error {
-	if y.Annotations[policyStateAnnotation] != "" {
-		return fmt.Errorf("online gateway policy requires a fresh installation; legacy policy is configured")
-	}
-	live := &appsv1.DeploymentList{}
-	if err := r.liveReader().List(ctx, live, client.InNamespace(y.Namespace)); err != nil {
+// Node labels also determine exclusivity. Reject a stale render before any
+// online policy or workload writes, including when no server profile is wired.
+func (r *YanetReconciler) verifyOnlineNodes(ctx context.Context, y *api.Yanet, nodes []corev1.Node) error {
+	selected := &corev1.NodeList{}
+	if err := r.liveReader().List(ctx, selected, client.MatchingLabels(y.Spec.NodeSelector)); err != nil {
 		return err
 	}
-	for i := range live.Items {
-		d := &live.Items[i]
-		if controlledByYanet(d, y) {
-			return fmt.Errorf("online gateway policy requires a fresh installation; deployment %s already exists without online policy state", d.Name)
+	if len(selected.Items) != len(nodes) {
+		return fmt.Errorf("online policy node selection changed")
+	}
+	rendered := make(map[string]corev1.Node, len(nodes))
+	for _, node := range nodes {
+		rendered[node.Name] = node
+	}
+	for _, node := range selected.Items {
+		expected := rendered[node.Name]
+		if node.UID == "" || node.UID != expected.UID || !node.DeletionTimestamp.IsZero() ||
+			!maps.Equal(node.Labels, expected.Labels) {
+			return fmt.Errorf("online policy Node scope changed: %s", node.Name)
 		}
 	}
 	return nil
