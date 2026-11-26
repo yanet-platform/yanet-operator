@@ -22,8 +22,8 @@ before replacing an existing installation; no compatibility conversion is provid
 - Ownership-aware cleanup and guarded role/network transitions.
 - Opt-in cert-manager issuance with role-scoped persistent credential delivery;
   see [managed certificates](MANAGED_CERTIFICATES.md) for prerequisites and limits.
-  Upgrades from published v3.1.0 require the guide's unchanged-policy gate rollout
-  and explicit checkpoint acknowledgment before authorization policy can change.
+  Replacing an existing managed installation requires stopping its workloads,
+  retiring its offline startup definitions and creating a clean installation.
 
 ## Installation
 

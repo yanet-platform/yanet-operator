@@ -80,14 +80,19 @@ func (r *YanetReconciler) prepareOnlinePolicy(
 	if err := r.verifyOnlineNodes(ctx, y, nodes); err != nil {
 		return result, err
 	}
+	if !slices.ContainsFunc(nodes, func(node corev1.Node) bool {
+		return plans[node.Name].PolicyDelivery != nil
+	}) {
+		return result, nil
+	}
+	trust, err := r.readOnlineTrust(ctx, y, spec)
+	if err != nil {
+		return result, err
+	}
 	for _, node := range nodes {
 		delivery := plans[node.Name].PolicyDelivery
 		if delivery == nil {
 			continue
-		}
-		trust, err := r.readOnlineTrust(ctx, y, spec)
-		if err != nil {
-			return result, err
 		}
 		bundle := credentials.OnlinePolicyBundle{
 			Accounts: normalizedAccounts(manifests.GatewayAccounts(spec, y.Namespace, string(y.UID), string(node.UID))),
