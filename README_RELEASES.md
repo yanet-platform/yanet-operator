@@ -8,9 +8,11 @@ Images remain at `ghcr.io/yanet-platform/yanet-operator`; charts from 3.0.2 use
 prevent one artifact from replacing the other's version tag. Historical 0.2.x
 charts remain at their original repository.
 
-The v3.1.0 to **operator/chart 3.2.0** transition is documented in the
-[release notes](release-notes/v3.2.0.md). Upgrades from
-pre-3.0 installations must still follow the [3.0.0 API replacement procedure](release-notes/v3.0.0.md).
+**Operator/chart 4.0.0** replaces the managed gateway policy delivery contract.
+Existing managed installations require the
+[clean replacement procedure](release-notes/v4.0.0.md#clean-replacement).
+Pre-3.0 installations also require the
+[3.0.0 API replacement procedure](release-notes/v3.0.0.md).
 Release preparation in a pull request does not publish images or qualify a live cluster.
 
 ## Prepare
