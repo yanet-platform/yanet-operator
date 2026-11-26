@@ -81,28 +81,11 @@ func Validate(certPEM, keyPEM, trustPEM []byte, identity Identity, now time.Time
 // separate path lookups across a switch can otherwise observe different pairs.
 // Paths are trusted administrative inputs from the node-bound delivery Pod;
 // certificate contents cannot select paths outside its configured mounts.
-func Publish(source, destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy) (string, error) {
-	return publish(source, destination, trustFile, identity, now, policy, nil)
+func Publish(source, destination, trustFile string, identity Identity, now time.Time) (string, error) {
+	return publish(source, destination, trustFile, identity, now, nil)
 }
 
-func publish(source, destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy, durable *durableCurrent) (string, error) {
-	if policy != nil && identity.Usage != "server" {
-		return "", fmt.Errorf("gateway policy can only accompany server credentials")
-	}
-	files, policyErr := gatewayFiles(policy)
-	if policyErr != nil {
-		return "", policyErr
-	}
-	if files == nil {
-		files = make(map[string][]byte)
-	}
-	if policy != nil && policy.Revision != nil {
-		metadata, metadataErr := encodePolicy(policy, files)
-		if metadataErr != nil {
-			return "", metadataErr
-		}
-		files[policyFilename] = metadata
-	}
+func publish(source, destination, trustFile string, identity Identity, now time.Time, durable *durableCurrent) (string, error) {
 	// Pin the kubelet generation before reading either file. Reading tls.crt and
 	// tls.key through separate projection symlinks races Secret renewal.
 	generation, projectionErr := filepath.EvalSymlinks(filepath.Join(source, "..data"))
@@ -125,12 +108,9 @@ func publish(source, destination, trustFile string, identity Identity, now time.
 		return "", err
 	}
 	content := append(bytes.Clone(cert), trust...)
-	for _, filename := range []string{"identities.yaml", "permissions.yaml", "ssh-ca.pub", policyFilename} {
-		content = append(content, files[filename]...)
-	}
 	digest := sha256.Sum256(content)
 	name := hex.EncodeToString(digest[:])
-	files["tls.crt"], files["tls.key"], files["ca.crt"] = cert, key, trust
+	files := map[string][]byte{"tls.crt": cert, "tls.key": key, "ca.crt": trust}
 	if err := os.MkdirAll(destination, 0o700); err != nil {
 		return "", err
 	}
@@ -138,7 +118,7 @@ func publish(source, destination, trustFile string, identity Identity, now time.
 		return "", err
 	}
 	// Recreate is the normal single-writer boundary. The lock also serializes
-	// a stale checkpoint/exporter against check-and-switch during recovery.
+	// overlapping exporters and readiness probes.
 	destinationRoot, rootErr := os.OpenRoot(destination)
 	if rootErr != nil {
 		return "", rootErr
@@ -150,9 +130,6 @@ func publish(source, destination, trustFile string, identity Identity, now time.
 	}
 	// Closing the descriptor releases flock on every return path.
 	defer func() { _ = lock.Close() }()
-	if err := authorizePublication(destination, policy, files); err != nil {
-		return "", err
-	}
 	previous, linkErr := destinationRoot.Readlink("current")
 	if linkErr != nil && !os.IsNotExist(linkErr) {
 		return "", linkErr
@@ -177,15 +154,15 @@ func publish(source, destination, trustFile string, identity Identity, now time.
 
 // Check validates a single installed generation without the API or Secret cache.
 // As in Publish, destination and trustFile are trusted administrative paths.
-func Check(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy) error {
-	return checkInstalled(destination, trustFile, identity, now, policy, false)
+func Check(destination, trustFile string, identity Identity, now time.Time) error {
+	return checkInstalled(destination, trustFile, identity, now)
 }
 
 // The writer syncs files and the generation directory before switching current.
 // A readiness probe can complete a switch's durability if the writer's final
 // sync failed. Hold the same per-role lock from before resolving current until
 // after syncing its parent, so a concurrent writer cannot change the target.
-func checkWriterReadiness(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy, exactRevision bool) error {
+func checkWriterReadiness(destination, trustFile string, identity Identity, now time.Time) error {
 	root, err := os.OpenRoot(destination)
 	if err != nil {
 		return err
@@ -196,7 +173,7 @@ func checkWriterReadiness(destination, trustFile string, identity Identity, now 
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	if checkErr := checkInstalled(destination, trustFile, identity, now, policy, exactRevision); checkErr != nil {
+	if checkErr := checkInstalled(destination, trustFile, identity, now); checkErr != nil {
 		return checkErr
 	}
 	if syncErr := syncRoot(root); syncErr != nil {
@@ -205,10 +182,7 @@ func checkWriterReadiness(destination, trustFile string, identity Identity, now 
 	return nil
 }
 
-func checkInstalled(destination, trustFile string, identity Identity, now time.Time, policy *GatewayPolicy, exactRevision bool) error {
-	if policy != nil && identity.Usage != "server" {
-		return fmt.Errorf("gateway policy can only accompany server credentials")
-	}
+func checkInstalled(destination, trustFile string, identity Identity, now time.Time) error {
 	generation, resolveErr := filepath.EvalSymlinks(filepath.Join(destination, "current"))
 	if resolveErr != nil {
 		return resolveErr
@@ -223,55 +197,6 @@ func checkInstalled(destination, trustFile string, identity Identity, now time.T
 		return trustPathErr
 	}
 	trustFile = pinnedTrust
-	if policy != nil && policy.SSHTrustFile != "" {
-		// Do not mutate the caller's policy or resolve current again when an
-		// offline startup uses the installed SSH trust bundle.
-		pinnedPolicy := *policy
-		pinnedSSH, sshPathErr := pinInstalledPath(destination, generation, policy.SSHTrustFile, "ssh-ca.pub")
-		if sshPathErr != nil {
-			return sshPathErr
-		}
-		pinnedPolicy.SSHTrustFile = pinnedSSH
-		policy = &pinnedPolicy
-	}
-	if policy != nil && policy.Revision != nil {
-		if err := validateRevision(policy.Revision); err != nil {
-			return err
-		}
-		installed, metadataErr := readPolicy(generation)
-		if metadataErr != nil {
-			return metadataErr
-		}
-		if err := compareRevision(installed.Revision, *policy.Revision); err != nil {
-			return err
-		}
-		if exactRevision && installed.Revision.Sequence != policy.Revision.Sequence {
-			return fmt.Errorf("installed policy revision differs from desired writer revision")
-		}
-		if installed.Revision.Sequence > policy.Revision.Sequence {
-			// An older supported checkpoint loads the current authorization set,
-			// not its compiled-in historical grants or SSH CA requirements.
-			current := &GatewayPolicy{Accounts: installed.Accounts, Revision: &installed.Revision, SSHTrustHash: "none"}
-			if installed.SSHHash != "" {
-				current.SSHTrustFile = filepath.Join(generation, "ssh-ca.pub")
-				current.SSHTrustHash = installed.SSHHash
-			}
-			policy = current
-		}
-	}
-	files, policyErr := gatewayFiles(policy)
-	if policyErr != nil {
-		return policyErr
-	}
-	if policy != nil && policy.SSHTrustFile == "" {
-		_, statErr := root.Stat("ssh-ca.pub")
-		if statErr == nil {
-			return fmt.Errorf("installed gateway still contains removed SSH CA trust")
-		}
-		if !os.IsNotExist(statErr) {
-			return statErr
-		}
-	}
 	cert, certReadErr := root.ReadFile("tls.crt")
 	if certReadErr != nil {
 		return certReadErr
@@ -293,15 +218,6 @@ func checkInstalled(destination, trustFile string, identity Identity, now time.T
 	}
 	if !bytes.Equal(trust, requiredTrust) {
 		return fmt.Errorf("installed X.509 trust does not match the requested bundle")
-	}
-	for filename, expected := range files {
-		stored, readErr := root.ReadFile(filename)
-		if readErr != nil {
-			return readErr
-		}
-		if !bytes.Equal(stored, expected) {
-			return fmt.Errorf("installed gateway accounts do not match the requested policy: %s", filename)
-		}
 	}
 	return nil
 }

@@ -57,6 +57,13 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "policy-sync" {
+		if err := credentials.RunPolicy(ctrl.SetupSignalHandler(), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "policy-sync failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "credential-sync" {
 		if err := credentials.Run(ctrl.SetupSignalHandler(), os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "credential-sync failed:", err)

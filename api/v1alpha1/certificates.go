@@ -22,8 +22,8 @@ type CertificateManagementSpec struct {
 	// namespace. The leaf Secret's ca.crt is deliberately not a trust source.
 	TrustBundle corev1.ConfigMapKeySelector `json:"trustBundle"`
 	// SSHTrustBundle supplies OpenSSH CA public keys for gateway SSH certificate
-	// authentication. It is independent of X.509 trust and is persisted only in
-	// server-role current/ssh-ca.pub generations.
+	// authentication. It is independent of X.509 trust and is persisted in
+	// the shared gateway policy directory.
 	// +optional
 	SSHTrustBundle *corev1.ConfigMapKeySelector `json:"sshTrustBundle,omitempty"`
 	// AdditionalGatewayAccounts adds explicitly authorized local logins alongside
@@ -33,7 +33,7 @@ type CertificateManagementSpec struct {
 	AdditionalGatewayAccounts []GatewayAccount `json:"additionalGatewayAccounts,omitempty"`
 	// HostPath must be a persistent directory, not /run, /tmp or kubelet cache.
 	HostPath string `json:"hostPath"`
-	// ExporterImage is an exact operator image containing /manager credential-sync.
+	// ExporterImage is an exact operator image containing credential-sync and policy-sync.
 	ExporterImage string `json:"exporterImage"`
 	// Duration and RenewBefore are explicit Go durations accepted by cert-manager.
 	Duration    string `json:"duration"`
@@ -79,7 +79,7 @@ type CertificateProfile struct {
 	DNSNames []string `json:"dnsNames,omitempty"`
 	// GatewayPermissions grants this client profile's UID-bound account explicit
 	// gRPC method patterns. Server profiles receive the effective client accounts
-	// in persistent current/{identities.yaml,permissions.yaml} files.
+	// in persistent identity and permission files.
 	// +optional
 	// +kubebuilder:validation:MaxItems=128
 	GatewayPermissions []string `json:"gatewayPermissions,omitempty"`
@@ -164,8 +164,13 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 	}
 	names := map[string]bool{}
 	for _, op := range components.Operators {
-		if op.Name == "credential-delivery" {
-			return fmt.Errorf("credential-delivery is reserved when certificates are enabled")
+		if op.Name == "credential-delivery" || op.Name == "policy-delivery" {
+			return fmt.Errorf("%s is reserved for managed delivery", op.Name)
+		}
+	}
+	for _, sidecar := range components.Dataplane.Sidecars {
+		if sidecar.Name == "policy-delivery" {
+			return fmt.Errorf("%s is reserved for gateway policy delivery", sidecar.Name)
 		}
 	}
 	hasServer := false
@@ -221,7 +226,7 @@ func ValidateCertificates(c *CertificateManagementSpec, components *ComponentsSp
 		}
 	}
 	if !hasServer && (c.SSHTrustBundle != nil || len(c.AdditionalGatewayAccounts) > 0) {
-		return fmt.Errorf("gateway SSH trust and additional accounts require a server certificate profile")
+		return fmt.Errorf("managed gateway policy requires a server certificate profile")
 	}
 	return nil
 }
