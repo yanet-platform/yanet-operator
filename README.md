@@ -6,10 +6,10 @@
 Kubernetes operator for YANET2 workloads: component palettes, named strategic-merge
 patches, box-type presets, multi-node installations and per-NUMA controlplanes.
 
-**Operator and chart 3.2.0** use one API, `yanet.yanet-platform.io/v1alpha1`.
-The former component-based API is exposed as `Yanet` and `YanetConfig`. The legacy
-single-node implementation is removed. See the [breaking release notes](release-notes/v3.0.0.md)
-before replacing an existing installation; no compatibility conversion is provided.
+**Operator and chart 4.0.0** use one API, `yanet.yanet-platform.io/v1alpha1`,
+with `Yanet` and `YanetConfig` resources. Managed gateways use persistent file
+policy and upstream reload. See the [breaking release notes](release-notes/v4.0.0.md)
+before replacing an existing managed installation.
 
 ## Features
 
@@ -33,12 +33,12 @@ After release publication, install into a cluster with the new CRDs:
 ```bash
 helm install yanet-operator \
   oci://ghcr.io/yanet-platform/charts/yanet-operator \
-  --version 3.2.0 \
+  --version 4.0.0 \
   --namespace yanet-system \
   --create-namespace
 ```
 
-For an existing v3.1.0 installation, follow the [upgrade instructions](release-notes/v3.2.0.md)
+For an existing managed installation, follow the [clean replacement instructions](release-notes/v4.0.0.md#clean-replacement)
 before updating Helm values or the operator image. Set `image.repository` to the
 published GHCR repository or a verified site mirror accessible to the cluster.
 Use `--set metrics.serviceMonitor.enabled=false` without Prometheus Operator.
