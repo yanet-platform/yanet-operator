@@ -106,6 +106,12 @@ type ImagesSpec struct {
 	// operator.
 	// +optional
 	PullSecrets []corev1.LocalObjectReference `json:"pullSecrets,omitempty"`
+
+	// Diagnostics maps an exact rendered controlplane image reference to the
+	// compatible CLI image from the same release. An unmatched image does not
+	// enable a diagnostics workload. This also supports independent digest pins.
+	// +optional
+	Diagnostics map[string]string `json:"diagnostics,omitempty"`
 }
 
 // ComponentsSpec is the palette of components the operator can render.
@@ -186,6 +192,8 @@ const (
 	DataplaneContainerName = "dataplane"
 	// BirdAdapterContainerName is the rendered bird-adapter container name.
 	BirdAdapterContainerName = "bird-adapter"
+	// DiagnosticsComponent is the reserved component name of the managed CLI.
+	DiagnosticsComponent = "diagnostics-cli"
 )
 
 // DataplaneSpec describes one dataplane Pod: the DPDK process, hugepages and

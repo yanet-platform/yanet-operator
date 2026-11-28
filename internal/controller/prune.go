@@ -184,6 +184,7 @@ func controlledByYanet(object client.Object, yanet *yanetv1alpha1.Yanet) bool {
 // set are considered orphans.
 type desiredSet struct {
 	Deployments  map[string]struct{}
+	DaemonSets   map[string]struct{}
 	ConfigMaps   map[string]struct{}
 	Certificates map[string]struct{}
 }
@@ -192,6 +193,7 @@ type desiredSet struct {
 func newDesiredSet() desiredSet {
 	return desiredSet{
 		Deployments:  map[string]struct{}{},
+		DaemonSets:   map[string]struct{}{},
 		ConfigMaps:   map[string]struct{}{},
 		Certificates: map[string]struct{}{},
 	}
@@ -200,6 +202,7 @@ func newDesiredSet() desiredSet {
 type pruneResult struct {
 	Deleted              int
 	RetainedDeployments  []appsv1.Deployment
+	RetainedDaemonSets   []appsv1.DaemonSet
 	RetainedConfigMaps   []string
 	RetainedCertificates []string
 }
@@ -228,6 +231,9 @@ func (r *YanetReconciler) pruneOrphans(
 	var firstErr error
 	var result pruneResult
 	deletionRequested := false
+	if err := r.pruneDiagnostics(ctx, yanet, desired.DaemonSets, autoSync, &result); err != nil {
+		return result, err
+	}
 
 	// Deployments ---------------------------------------------
 	deps := &appsv1.DeploymentList{}

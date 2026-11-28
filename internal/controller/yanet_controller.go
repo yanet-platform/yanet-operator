@@ -87,6 +87,7 @@ func (r *YanetReconciler) checkUpdateRequeue(logger logr.Logger, updateWindow ti
 //+kubebuilder:rbac:groups=yanet.yanet-platform.io,resources=yanetconfigs/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups="",resources=nodes;pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -141,6 +142,7 @@ func (r *YanetReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// update. A new-object-only predicate would drop label-removal events.
 		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(r.mapPodToYanet)).
 		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.DaemonSet{}).
 		Owns(&corev1.ConfigMap{})
 	if r.ManageCertificates {
 		builder = builder.Owns(newCertificate()).

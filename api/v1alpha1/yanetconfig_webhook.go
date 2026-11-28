@@ -295,9 +295,10 @@ func validatePatchUniqueness(patches []NamedPatch) error {
 
 func validateOperatorUniqueness(ops []OperatorSpec) error {
 	reservedNames := map[string]struct{}{
-		"controlplane": {},
-		"dataplane":    {},
-		"bird-adapter": {},
+		"controlplane":       {},
+		"dataplane":          {},
+		"bird-adapter":       {},
+		DiagnosticsComponent: {},
 	}
 	seen := make(map[string]struct{}, len(ops))
 	for i := range ops {

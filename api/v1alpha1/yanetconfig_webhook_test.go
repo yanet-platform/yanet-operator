@@ -188,6 +188,7 @@ func TestYanetConfigWebhook_ReservedOperatorName(t *testing.T) {
 		"controlplane",
 		"dataplane",
 		"bird-adapter",
+		"diagnostics-cli",
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig()
