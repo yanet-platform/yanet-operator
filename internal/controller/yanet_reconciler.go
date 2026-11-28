@@ -374,6 +374,9 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			return ctrl.Result{}, err
 		}
 		certificatePlan := certificatePlans[node.Name]
+		if cli := certificatePlan.Diagnostics; cli != nil {
+			desired.DaemonSets[cli.Name] = struct{}{}
+		}
 		if delivery := certificatePlan.PolicyDelivery; delivery != nil {
 			desired.Deployments[delivery.Name] = struct{}{}
 			desired.ConfigMaps[manifests.PolicyConfigMapName(string(yanet.UID), string(node.UID))] = struct{}{}
@@ -554,6 +557,34 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 				}
 			}
 		}
+		if cli := certificatePlan.Diagnostics; cli != nil {
+			state := syncWaitingCredentials
+			var cliErr error
+			if !credentialsReady {
+				if !autoSync {
+					state = "out-of-sync (credentials)"
+				}
+			} else if ready, err := r.diagnosticsControlplanesReady(ctx, workloadsByNode[node.Name]); err != nil {
+				state, cliErr = "error", err
+			} else if !ready {
+				state = "sync-waiting"
+				if !autoSync {
+					state = "out-of-sync (controlplane rollout)"
+				}
+			} else {
+				state, cliErr = r.applyDiagnostics(ctx, yanet, cli, autoSync)
+			}
+			if autoSync && (state == syncWaitingCredentials || state == "sync-waiting") {
+				syncWaiting = true
+				if earliestRequeue == 0 || earliestRequeue > 5*time.Second {
+					earliestRequeue = 5 * time.Second
+				}
+			}
+			ns.Deployments[cli.Name] = state
+			if cliErr != nil {
+				reconcileErrs = append(reconcileErrs, cliErr)
+			}
+		}
 		nodesStatus[node.Name] = ns
 	}
 
@@ -603,6 +634,16 @@ func (r *YanetReconciler) reconcileYanet(ctx context.Context, yanet *yanetv1alph
 			ns.Deployments = make(map[string]string)
 		}
 		ns.Deployments[deployment.Name] = "out-of-sync (orphan)"
+		nodesStatus[nodeName] = ns
+	}
+	for _, daemonSet := range pruned.RetainedDaemonSets {
+		nodeName := daemonSet.Labels[manifests.LabelNode]
+		ns := nodesStatus[nodeName]
+		ns.NodeName = nodeName
+		if ns.Deployments == nil {
+			ns.Deployments = make(map[string]string)
+		}
+		ns.Deployments[daemonSet.Name] = "out-of-sync (orphan)"
 		nodesStatus[nodeName] = ns
 	}
 	yanetOrphansPruned.WithLabelValues(yanet.Name, yanet.Namespace).Add(float64(pruned.Deleted))
@@ -772,7 +813,14 @@ func (r *YanetReconciler) preflightResources(
 		for _, workload := range workloads {
 			deployments = append(deployments, workload.deployment)
 		}
-		certificatePlans[node.Name] = manifests.BuildCertificatePlan(buildCtx, deployments, installationEnabled)
+		var diagnostic *appsv1.DaemonSet
+		if installationEnabled && len(cfg.Images.Diagnostics) != 0 {
+			diagnostic, err = planDiagnostics(buildCtx, cfg.Images.Diagnostics, workloads)
+			if err != nil {
+				preflightErrs = append(preflightErrs, fmt.Errorf("build diagnostics on %s: %w", node.Name, err))
+			}
+		}
+		certificatePlans[node.Name] = manifests.BuildCertificatePlan(buildCtx, deployments, installationEnabled, diagnostic)
 		// Certificate planning mutates consumer Pods and generates writers.
 		// Validate those final Pods, not only the pre-certificate rendering.
 		if delivery := certificatePlans[node.Name].Delivery; delivery != nil {
@@ -890,6 +938,15 @@ func (r *YanetReconciler) handleYanetDeletion(
 	}
 	for i := range deployments.Items {
 		if controlledByYanet(&deployments.Items[i], yanet) {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+	}
+	daemonSets := &appsv1.DaemonSetList{}
+	if err := r.liveReader().List(ctx, daemonSets, client.InNamespace(yanet.Namespace)); err != nil {
+		return ctrl.Result{}, err
+	}
+	for i := range daemonSets.Items {
+		if controlledByYanet(&daemonSets.Items[i], yanet) {
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}

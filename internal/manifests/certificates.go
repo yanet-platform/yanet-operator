@@ -28,6 +28,7 @@ type CertificatePlan struct {
 	Certificates   []*unstructured.Unstructured
 	Delivery       *appsv1.Deployment
 	PolicyDelivery *appsv1.Deployment
+	Diagnostics    *appsv1.DaemonSet
 }
 
 // ConfigureCertificates applies the typed mount contract after user patches.
@@ -116,8 +117,11 @@ func certificateName(ctx BuildContext, profile string) string {
 // profile's grants, regardless of whether its credential is currently issued.
 // Delivery lives in a separate Pod so recovery checkpoints of the consumers
 // contain no Secret or ConfigMap volumes.
-func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enabled bool) CertificatePlan {
+func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enabled bool, diagnostics ...*appsv1.DaemonSet) CertificatePlan {
 	var plan CertificatePlan
+	if len(diagnostics) != 0 {
+		plan.Diagnostics = diagnostics[0]
+	}
 	if ctx.Certificates == nil {
 		return plan
 	}
@@ -130,6 +134,11 @@ func BuildCertificatePlan(ctx BuildContext, workloads []*appsv1.Deployment, enab
 			continue
 		}
 		for _, v := range d.Spec.Template.Spec.Volumes {
+			mounted[v.Name] = true
+		}
+	}
+	if plan.Diagnostics != nil {
+		for _, v := range plan.Diagnostics.Spec.Template.Spec.Volumes {
 			mounted[v.Name] = true
 		}
 	}

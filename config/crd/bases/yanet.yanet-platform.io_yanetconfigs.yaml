@@ -899,6 +899,14 @@ spec:
                   Images defines global image settings shared by all generated
                   Deployments.
                 properties:
+                  diagnostics:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Diagnostics maps an exact rendered controlplane image reference to the
+                      compatible CLI image from the same release. An unmatched image does not
+                      enable a diagnostics workload. This also supports independent digest pins.
+                    type: object
                   prefix:
                     description: |-
                       Prefix is the default path segment between registry and image

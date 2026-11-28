@@ -331,6 +331,28 @@ configuration, device-plugin selection and attachment list together, then enable
 the installation. This does not resolve the separate dataplane/controlplane
 shared-memory startup-lifecycle requirement.
 
+### Managed diagnostics CLI
+
+Opt in with `yanetconfig.spec.images.diagnostics`. Each key is the exact
+controlplane image reference after rendering and installation overrides. Each
+value is a compatible CLI image reference from that release. The two images
+can be independently digest-pinned.
+
+```yaml
+yanetconfig:
+  spec:
+    images:
+      diagnostics:
+        "registry.example.test/runtime/controlplane:1.2.3": "registry.example.test/runtime/cli:1.2.3"
+```
+
+An installation without a matching image does not get diagnostics. All serving
+controlplanes on a node must use the same image. Supply a `diagnostics` client
+profile in the installation's managed certificate configuration. The operator
+creates one node-pinned DaemonSet per eligible installation node after
+credential delivery and controlplane rollout, without a Service or service
+account token. The CLI image must provide `/usr/bin/sleep` and `/bin/sh`.
+
 ## Values
 
 | Parameter | Description | Default |
